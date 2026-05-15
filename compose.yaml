@@ -1,0 +1,222 @@
+# compose.yaml — single entry point for development, testing, and production.
+#
+# Run from the repository root:
+#
+#   docker compose --profile dev up --build       # start (rookery + postgres + mailpit)
+#   docker compose --profile test run --rm test   # run tests
+#   docker compose --profile lint run --rm lint   # run go vet
+#
+# On first run:
+#   1. Copy rookery.toml.example to rookery.toml and edit at least `domain`
+#      (and any other CHANGE_ME markers) for your instance.
+#   2. `docker compose --profile dev up --build` — secrets-init generates .env
+#      with random secrets on first start. Back up .env afterwards, especially
+#      ROOKERY_MASTER_KEY.
+#
+# Docker (with Compose v2) is the only supported runtime. Rootless Podman was
+# evaluated and rejected: privileged-port binding, OCI vs Docker image format,
+# short-name resolution, and podman-compose bookkeeping noise all combine into
+# too much friction for too little gain. Operators on Podman hosts can run the
+# Docker CLI against the Podman socket if they really want to, but that path
+# is not tested. See docs/ops/ for the full operator guide.
+#
+# Image references are fully qualified (e.g. docker.io/library/alpine rather
+# than alpine) purely as good hygiene — Docker accepts both forms.
+#
+# Phase 0 ships plaintext HTTP on port 80 only. TLS termination via ACME
+# (certmagic) lands in Phase 4 (§11.7 of PLAN.md); ports 443/25/465/587 are
+# wired up in subsequent phases.
+
+services:
+
+  # -------------------------------------------------------------------------- #
+  # secrets-init — generate .env on first run                                  #
+  #                                                                            #
+  # Writes .env with freshly generated secrets for any variable that is absent #
+  # or empty. Exits immediately once everything is in place; subsequent runs   #
+  # are fast no-ops.                                                           #
+  #                                                                            #
+  # rookery.toml is NOT created here on purpose — it carries instance-specific #
+  # values (domain, contact email, policy knobs) that the operator must set    #
+  # consciously. If rookery.toml is missing, secrets-init fails with           #
+  # instructions and the stack will not start. Copy the example, edit it,      #
+  # then re-run `docker compose up`.                                           #
+  # -------------------------------------------------------------------------- #
+  secrets-init:
+    image: docker.io/library/alpine:3.21
+    volumes:
+      - .:/rookery
+    command:
+      - sh
+      - -euc
+      - |
+        # openssl is not in the default alpine image. Install it once; future
+        # runs of the same container layer skip this. apk's cache lives inside
+        # the container so it doesn't pollute the host or the bind mount.
+        if ! command -v openssl >/dev/null 2>&1; then
+          apk add --no-cache openssl >/dev/null
+        fi
+
+        # Generate .env first. Secrets are something this script can fix
+        # unattended; rookery.toml is something only the operator can. We do
+        # the unattended part regardless so a subsequent run after the
+        # operator creates rookery.toml has nothing left to do.
+        ENV=/rookery/.env
+        touch "$$ENV"
+
+        gen() {
+          local var="$$1" val="$${2:-}" cur
+          cur=$$(grep -E "^$${var}=" "$$ENV" | cut -d= -f2-)
+          if [ -z "$$cur" ]; then
+            grep -v "^$${var}=" "$$ENV" > "$${ENV}.tmp" && mv "$${ENV}.tmp" "$$ENV" || true
+            [ -z "$$val" ] && val=$$(openssl rand -hex 32)
+            printf '%s=%s\n' "$$var" "$$val" >> "$$ENV"
+            echo "secrets-init: generated $$var"
+          fi
+        }
+
+        # DB password is written under both names — rookery reads
+        # ROOKERY_DB_PASSWORD, postgres reads POSTGRES_PASSWORD.
+        DB_PASS=$$(grep -E "^ROOKERY_DB_PASSWORD=" "$$ENV" | cut -d= -f2-)
+        [ -z "$$DB_PASS" ] && DB_PASS=$$(openssl rand -hex 32)
+        gen ROOKERY_DB_PASSWORD "$$DB_PASS"
+        gen POSTGRES_PASSWORD   "$$DB_PASS"
+        gen ROOKERY_MASTER_KEY
+        gen ROOKERY_SESSION_KEY
+
+        echo "secrets-init: .env is complete"
+
+        # Now check for the operator-managed config. We do this last so the
+        # secret generation above has already happened and won't need to run
+        # again on the operator's next attempt.
+        if [ ! -f /rookery/rookery.toml ]; then
+          echo "" >&2
+          echo "secrets-init: /rookery/rookery.toml is missing." >&2
+          echo "" >&2
+          echo "  Copy the example and edit it before starting the stack:" >&2
+          echo "    cp rookery.toml.example rookery.toml" >&2
+          echo "    \$$EDITOR rookery.toml      # set domain, contact_email, ..." >&2
+          echo "" >&2
+          echo "  Then re-run: docker compose --profile dev up --build" >&2
+          exit 1
+        fi
+    restart: "no"
+
+  # -------------------------------------------------------------------------- #
+  # rookery — the mail server + web client                                     #
+  # -------------------------------------------------------------------------- #
+  rookery:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: rookery:latest
+    restart: unless-stopped
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    ports:
+      - "80:80"               # HTTP (Phase 0). ACME HTTP-01 in Phase 4+.
+      # The ports below are reserved for later phases and intentionally not
+      # published yet — nothing listens on them in Phase 0.
+      # - "443:443"           # HTTPS (Phase 4)
+      # - "25:25"             # SMTP inbound MX (Phase 1)
+      # - "465:465"           # SMTP submission, implicit TLS (Phase 2)
+      # - "587:587"           # SMTP submission, STARTTLS (Phase 2)
+    volumes:
+      # rookery.toml must exist on the host before `docker compose up`; see
+      # secrets-init above. Edit it on the host; changes require a server
+      # restart.
+      - ./rookery.toml:/etc/rookery/rookery.toml:ro
+      # The message_dir setting in rookery.toml must match this mount path
+      # (default /var/lib/rookery/messages); otherwise messages land in the
+      # container's writable layer and disappear on container replacement.
+      - rookery-messages:/var/lib/rookery/messages
+    env_file: ./.env
+    # Healthcheck is implemented as a `rookery-server healthcheck` subcommand
+    # (see cmd/rookery-server/main.go) because the distroless runtime image
+    # has no shell or wget/curl. It lives here rather than as a HEALTHCHECK
+    # directive in the Containerfile so the compose file is the single source
+    # of truth for runtime behaviour.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/rookery-server", "healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # -------------------------------------------------------------------------- #
+  # postgres                                                                   #
+  # -------------------------------------------------------------------------- #
+  postgres:
+    image: docker.io/library/postgres:17-alpine
+    restart: unless-stopped
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+    env_file: ./.env
+    environment:
+      POSTGRES_DB:   rookery
+      POSTGRES_USER: rookery
+      # POSTGRES_PASSWORD comes from env_file (same value as ROOKERY_DB_PASSWORD)
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rookery -d rookery"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------- #
+  # mailpit — SMTP test sink (dev profile only)                                #
+  # UI at http://localhost:8025                                                #
+  # -------------------------------------------------------------------------- #
+  mailpit:
+    image: docker.io/axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+    profiles: [dev]
+
+  # -------------------------------------------------------------------------- #
+  # test — run the Go test suite and exit                                      #
+  # docker compose --profile test run --rm test                               #
+  # -------------------------------------------------------------------------- #
+  test:
+    image: docker.io/library/golang:1.23-bookworm
+    working_dir: /src
+    volumes:
+      - .:/src:ro
+      - go-cache:/root/.cache/go
+      - go-mod-cache:/go/pkg/mod
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    env_file: ./.env
+    command: go test -v -count=1 ./...
+    restart: "no"
+    profiles: [test]
+
+  # -------------------------------------------------------------------------- #
+  # lint — run go vet and exit                                                 #
+  # docker compose --profile lint run --rm lint                               #
+  # -------------------------------------------------------------------------- #
+  lint:
+    image: docker.io/library/golang:1.23-bookworm
+    working_dir: /src
+    volumes:
+      - .:/src:ro
+      - go-cache:/root/.cache/go
+      - go-mod-cache:/go/pkg/mod
+    command: go vet ./...
+    restart: "no"
+    profiles: [lint]
+
+volumes:
+  postgres-data:
+  rookery-messages:
+  go-cache:
+  go-mod-cache:

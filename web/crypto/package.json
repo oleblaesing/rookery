@@ -1,0 +1,12 @@
+{
+  "name": "rookery-crypto",
+  "version": "0.0.0",
+  "description": "Browser-side PGP crypto module for rookery. Bundled by esbuild inside the Containerfile build; never run with npm in production.",
+  "private": true,
+  "scripts": {
+    "build": "esbuild --bundle --minify --outfile=../../web/static/crypto.js index.js"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.2"
+  }
+}

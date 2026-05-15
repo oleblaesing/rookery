@@ -1,0 +1,102 @@
+# rookery.toml — instance configuration file.
+#
+# Copy this file to rookery.toml, edit the values, and mount it into the
+# container at /etc/rookery/rookery.toml (see compose.yaml).
+#
+# Secrets (DB password, master key, session key) are NOT in this file.
+# They come from environment variables; see compose.yaml.
+#
+# Changes to this file require a server restart.
+#
+# Every setting below includes its default value so you can see what you're
+# changing. You only need to set values that differ from the default.
+
+# --------------------------------------------------------------------------- #
+# Required settings
+# --------------------------------------------------------------------------- #
+
+# Primary mail domain for this instance. All @<domain> addresses live here.
+# Users can add their own custom domains later (see §5.2b of PLAN.md).
+domain = "rookery.example"        # CHANGE_ME
+
+# Let's Encrypt contact email. Unused in Phase 0 (no TLS yet); becomes required
+# once ACME provisioning lands in Phase 4 (§11.7 of PLAN.md). Set it now if you
+# already know the address, to avoid a config change later.
+contact_email = "admin@rookery.example"   # CHANGE_ME (optional in Phase 0)
+
+# Human-readable display name shown to users on signup pages.
+# Defaults to the value of `domain` if not set.
+instance_name = "My Rookery"      # optional
+
+# --------------------------------------------------------------------------- #
+# HTTP listener
+# --------------------------------------------------------------------------- #
+[http]
+# Bind address. 0.0.0.0 = all interfaces.
+host = "0.0.0.0"
+
+# Port for the HTTP server. Phase 0 serves plaintext HTTP on 80; TLS
+# termination via ACME (certmagic) on 443 lands in Phase 4 (§11.7 of PLAN.md).
+# Change this only if you know what you are doing.
+port = 80
+
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
+[log]
+# Minimum log level to emit. One of: debug, info, warn, error.
+# Structured JSON output to stdout. Default: info.
+level = "info"
+
+# --------------------------------------------------------------------------- #
+# Storage
+# --------------------------------------------------------------------------- #
+[storage]
+# Filesystem path where raw .eml message files are stored, content-addressed
+# as messages/sha256/ab/cd/<hash>.eml. Must be on the rookery-messages volume.
+# Default: /var/lib/rookery/messages.
+#
+# This must match the bind mount in compose.yaml. If you change it here you
+# must also change the volume mount, or messages will be written to the
+# container's writable layer and lost on container replacement.
+message_dir = "/var/lib/rookery/messages"
+
+# --------------------------------------------------------------------------- #
+# SMTP
+# --------------------------------------------------------------------------- #
+[smtp]
+# Maximum accepted message size in bytes. Default: 26214400 (25 MiB).
+# Note: PGP base64 encoding inflates messages by ~33%, so a 16 MiB plaintext
+# attachment will become ~21 MiB on the wire. Size accordingly.
+max_message_bytes = 26214400
+
+# Per-user outbound rate limit: messages per hour. Default: 200.
+outbound_rate_limit_per_user = 200
+
+# Per-user outbound rate limit: messages per day. Default: 1000.
+outbound_daily_limit_per_user = 1000
+
+# Per-destination-domain outbound rate limit: messages per hour. Default: 5000.
+outbound_rate_limit_per_domain = 5000
+
+# --------------------------------------------------------------------------- #
+# Per-instance policy
+# --------------------------------------------------------------------------- #
+[policy]
+# Default per-user mailbox quota in bytes. Default: 5368709120 (5 GiB).
+# Per-user overrides via: UPDATE users SET quota_bytes = ... WHERE ...;
+default_quota_bytes = 5368709120
+
+# Days before messages in Trash are hard-deleted. Default: 30.
+# Set to 0 for immediate hard delete on trash.
+trash_retention_days = 30
+
+# Days of inactivity before a session expires. Default: 7.
+session_expiry_days = 7
+
+# Log connecting IP addresses on the web UI and submission ports.
+# Default: false (pseudonymity-preserving). Set to true only if you understand
+# the trade-off: logging IPs enables abuse investigation at the cost of
+# undermining the pseudonymity property the system is designed to provide.
+# See §5.4, §11.2 of PLAN.md.
+log_connecting_ips = false

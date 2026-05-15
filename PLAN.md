@@ -107,12 +107,12 @@ The product is intelligible only in terms of three concrete journeys: the **oper
 The operator is a competent Linux user with a domain and a VPS. They might be running the instance for themselves only, or for a small group of friends/family/colleagues, or as a more-or-less public instance accepting invited members. v1 doesn't distinguish: it's the same software, the same flow. **The operator does everything from the shell.** There is no setup wizard, no admin web UI, no in-app role for them — see P10.
 
 1. **Provision.** A $5/month VPS, public IPv4 (and ideally IPv6), a domain like `rookery.example`. Reverse DNS (PTR) set to that hostname — many providers require a support ticket; doc this.
-2. **Copy the example compose file.** The README ships a known-good `compose.yaml` (Docker Compose; Podman works with one extra setup step, see §11.12). Operator copies it to the VPS along with the example `rookery.toml` config file.
+2. **Copy the example compose file.** The README ships a known-good `compose.yaml` (Docker with the Compose v2 plugin; that is the only supported runtime — see §7). Operator copies it to the VPS along with the example `rookery.toml` config file.
 3. **Edit the config.** `rookery.toml` is short and commented. Operator sets at minimum: primary domain (`rookery.example`), Let's Encrypt contact email, instance display name. Secrets (DB password, server master key, session-signing key) come from environment variables documented in the compose file — the operator either sets them inline or sources a `.env` file. The server master key (§11.6) is the one secret they need to back up themselves.
 4. **`docker compose up -d`.** Server starts, opens ports 25/80/443/465/587, generates DKIM keys on first run, logs the required DNS records as structured log lines.
 5. **Add the DNS records.** Operator either reads them from the log (`docker compose logs rookery | grep DNS`) or runs the bundled script `docker compose exec rookery /opt/rookery/scripts/print-dns.sh`. They paste records into their DNS provider, wait for propagation. The server periodically rechecks DNS and logs the status; when everything resolves correctly it provisions Let's Encrypt certs automatically (via `certmagic`) and starts accepting outbound mail.
 6. **Create the first invite.** `docker compose exec rookery /opt/rookery/scripts/new-invite.sh` runs a small shell script (which under the hood is `psql -c "INSERT INTO invites ..."` plus a `printf` of the resulting URL). The script prints the invite URL to stdout. Operator visits the URL in their browser and goes through the user flow in §5.2a — picks a local-part, generates a PGP key in the browser, etc. They are now a regular user of the instance; that's the only role they need.
-7. **(Optional) Add custom domains for users.** Operator runs `docker compose exec rookery /opt/rookery/scripts/add-domain.sh alice.com`, which inserts the row, the server picks it up on its next domain-poll, generates the per-domain DKIM keys, provisions ACME for `mta-sts.alice.com` and `openpgpkey.alice.com`, and logs the DNS records the user (or operator) needs to publish. Or — if the per-instance config says users can self-serve — the user does this themselves via the web UI flow in §5.2b.
+7. **(Optional) Users add their own custom domains.** Custom domains are always self-serve via the web UI flow in §5.2b. The user visits the custom-domain settings page, enters their domain, and follows the DNS-record wizard. The server generates per-domain DKIM keys, provisions ACME for `mta-sts.alice.com` and `openpgpkey.alice.com`, and guides the user through verification. There is no `add-domain.sh` script; operators who want to pre-register a domain for a user can do so via a direct `psql INSERT` into the `domains` table.
 
 **Time budget:** under 30 minutes of *active configuration time* (DNS propagation and provider PTR turnaround excluded — see §10). Active steps are: edit config file (~5 min), `docker compose up` and wait for it to settle (~2 min), paste DNS records into registrar (~5 min), run invite script and complete user signup (~5 min). The rest is waiting on DNS, which is not us.
 
@@ -274,8 +274,8 @@ Key ideas:
 | Passphrase KDF | Argon2id via WebAssembly (e.g. `argon2-browser`) | Strong KDF, runs locally. Same dep posture as OpenPGP.js: pinned, SRI-locked, vendored if necessary. |
 | Client storage | IndexedDB on each set-up device; private key stored encrypted with passphrase-derived key. Recovery `.asc` file (same encrypted blob) held off-device by the user, mandatory at signup. | Passphrase never leaves the device. Private key never leaves the user's control — server holds nothing key-shaped on the private side, see §11.1. |
 | Server-push (later) | Server-Sent Events via browser-native `EventSource` for new-mail notifications | Long-poll first. No WebSockets. No library — `EventSource` is stdlib in the browser. |
-| Build | **The Containerfile is the build.** `docker build` (or `podman build`) on a clean checkout produces the deployable image, with no other host-side toolchain required. Inside the multi-stage build: Go toolchain compiles the server; a single `esbuild` invocation bundles the JS crypto module (and only that — `partials.js` ships hand-written, no bundler). No `npm run dev`, no Vite. No transitive `postinstall` scripts permitted at any build stage. **No hosted CI provider is assumed.** The project is forge-agnostic — GitHub, Codeberg, sourcehut, a self-hosted Gitea, or a tarball on someone's web server are all equally valid hosting choices. If a hosted CI is in use for a particular fork or mirror, it runs the same `docker build` and the same in-repo test scripts that any developer or self-hoster runs locally; the project does not ship forge-specific workflow files in v1. Lint and test entrypoints (`go test`, `go vet`, optionally `golangci-lint`) are invoked inside the container build or via a small Makefile / `dev.sh` wrapper, runnable by anyone with `docker` installed and nothing else. | Minimal toolchain, minimal supply-chain exposure, no vendor lock-in for the build pipeline. |
-| Container | Multi-stage `Dockerfile` (also valid `Containerfile`), distroless final image. **The Containerfile is the only supported build path** — not just for deployment but for development too, where JS bundling is involved (Go code can be iterated with native `go run` / `go test` on the host, which is normal and fast; the JS crypto module goes through the container build so developers don't have to install Node or esbuild on their host). **Recommended runtime: Docker.** Podman works with one extra setup step on the host (`setcap 'cap_net_bind_service=+ep' $(which podman)` to allow rootless port-25 binding, or run rootful). The compose-spec file is the same for both. | Easy self-host. Docker is friction-free out of the box; we document Podman because the audience tends to prefer it but we don't pretend the rootless port-25 story is solved. |
+| Build | **The Containerfile is the build.** `docker build` on a clean checkout produces the deployable image, with no other host-side toolchain required. Inside the multi-stage build: Go toolchain compiles the server; a single `esbuild` invocation bundles the JS crypto module (and only that — `partials.js` ships hand-written, no bundler). No `npm run dev`, no Vite. No transitive `postinstall` scripts permitted at any build stage. **No hosted CI provider is assumed.** The project is forge-agnostic — GitHub, Codeberg, sourcehut, a self-hosted Gitea, or a tarball on someone's web server are all equally valid hosting choices. If a hosted CI is in use for a particular fork or mirror, it runs the same `docker build` and the same in-repo test scripts that any developer or self-hoster runs locally; the project does not ship forge-specific workflow files in v1. Lint and test entrypoints (`go test`, `go vet`, optionally `golangci-lint`) are invoked inside the container build or via a small Makefile / `dev.sh` wrapper, runnable by anyone with `docker` installed and nothing else. | Minimal toolchain, minimal supply-chain exposure, no vendor lock-in for the build pipeline. |
+| Container | Multi-stage `Dockerfile` (also valid `Containerfile`), distroless final image. **The Containerfile is the only supported build path** — not just for deployment but for development too, where JS bundling is involved (Go code can be iterated with native `go run` / `go test` on the host, which is normal and fast; the JS crypto module goes through the container build so developers don't have to install Node or esbuild on their host). **Runtime: Docker only, with the Compose v2 plugin.** Rootless Podman was evaluated during Phase 0 and rejected — privileged-port binding, OCI vs Docker image format, short-name resolution, and `podman-compose` bookkeeping noise added up to too much friction for too little gain, and supporting both runtimes doubled the surface area we'd have to test and document. The compose-spec file is what it is; operators on Podman hosts can run the Docker CLI against the Podman socket if they really want to, but that path is not tested or supported. | Easy self-host. One runtime to document, one runtime to test against; we explicitly trade a small piece of audience preference for a much simpler operator experience. |
 | License | **AGPLv3** | Closes the SaaS loophole. Anyone running rookery as a service has to ship their changes back. |
 
 ### Explicitly deferred / rejected
@@ -303,13 +303,13 @@ This is a side project. The roadmap is a dependency graph and a rough sizing sig
 **ADR prerequisites** are called out inline where a phase depends on a design decision not yet made (see §11).
 
 ### Phase 0 — Foundations (≈1 week)
-- Repo scaffolding, Go module, Containerfile (multi-stage: Go build + JS bundle + distroless final image), small Makefile *as a convenience wrapper* around `docker build` and `docker compose` (not a build system in its own right — the Containerfile is the build, §7).
+- Repo scaffolding, Go module, Containerfile (multi-stage: Go build + JS bundle + distroless final image). No Makefile — `docker compose` is the only interface; see §7.
 - ADRs for the major decisions in this doc (at minimum: ADR-0001 through ADR-0008 from §13).
 - README + this plan.
 - `compose.yaml` with Postgres + a minimal SMTP test harness (e.g. `mailpit`) for local dev.
 - **HTTP API sketch.** A first draft of the resource model (users, messages, keys, domains, invites) before any handler is written. Not frozen yet, but the shape exists on paper. This is the artifact P6 promises.
 
-**Deliverable:** `make dev` (or `docker compose up`) boots an empty server with `/healthz`. The project builds from a clean checkout on any host with only `docker` installed. ADRs committed. API sketch reviewable.
+**Deliverable:** `docker compose --profile dev up --build` boots an empty server with `/healthz` (and mailpit for SMTP testing). The project builds from a clean checkout on any host with only `docker` installed. ADRs committed. API sketch reviewable.
 
 ### Phase 1 — Receive mail, decrypt in the browser (≈4–6 weeks)
 - Inbound SMTP listener (port 25, STARTTLS-preferred, see §11.4) that accepts mail for the instance's primary domain.
@@ -356,7 +356,7 @@ This is a side project. The roadmap is a dependency graph and a rough sizing sig
 - **Catch-all on custom domains**, opt-in per domain, default off (§11.3).
 - **Reserved local-parts** (`postmaster@`, `abuse@`, etc.) auto-created on every newly verified custom domain.
 - **DNS preflight and drift detection.** Continuously re-checks records and surfaces drift in the UI. A user whose registrar quietly drops a CNAME finds out from us, not from a confused correspondent.
-- **Custom-domain policy controls.** Per-instance toggle in `rookery.toml`: whether users can self-add custom domains via the web UI flow, or whether only the operator can (via `./scripts/add-domain.sh`). Default: operator-only.
+- **Custom domains are always user self-serve.** There is no per-instance policy toggle and no `add-domain.sh` script. Users add domains via the web UI flow (§5.2b); the operator can pre-register domains via `psql` for advanced cases.
 - HTTP API extended to cover domain registration, verification status, DNS-record reads, address & alias management, catch-all toggling.
 
 **Deliverable:** A user on a public instance can bring `alice@alice.com`, complete the full DNS setup with our guidance in well under an hour of active configuration time, and have working two-way encrypted mail on their own domain with strict transport security. Migrating that domain to a different `rookery` instance later requires only changing CNAMEs — that promise is now real, because the records exist as a set.
@@ -483,7 +483,7 @@ This section captures every architectural choice that affects the shape of the p
 ### 11.2 Authentication and session model
 
 - **Login secret.** A user has a *login passphrase* (HTTP-layer authentication) distinct from their *PGP passphrase* (browser-side key decryption). The login passphrase is Argon2id-hashed on the server. They are deliberately separate so a compromise of one does not imply compromise of the other; in practice a user may set them to the same value, which we discourage in onboarding but do not prevent. ADR-0015.
-- **Sessions.** Cookie-based, server-side session store (Postgres). HttpOnly, Secure, SameSite=Lax. Sliding expiry of 7 days of inactivity, hard expiry of 30 days; both configurable per-instance. "Remember me" is implicit (sliding window) — there is no separate long-lived-token flow. Logout invalidates the session row server-side; concurrent sessions are allowed and listed in account settings **by last-seen timestamp only** — neither the IP nor the user agent is recorded, in line with the pseudonymity-by-default property in §1 and §4. Operators who explicitly enable IP logging at the instance level (a config-file flag, off by default, §5.4) get IP/UA columns surfaced in the same settings page; users on such an instance see exactly what is being stored about them. ADR-0015.
+- **Sessions.** Cookie-based, server-side session store (Postgres). HttpOnly, Secure, SameSite=Lax. Sliding expiry only: a session expires after `session_expiry_days` days of inactivity (default 7); there is no hard expiry ceiling. "Remember me" is implicit (sliding window) — there is no separate long-lived-token flow. Logout invalidates the session row server-side; concurrent sessions are allowed and listed in account settings **by last-seen timestamp only** — neither the IP nor the user agent is recorded, in line with the pseudonymity-by-default property in §1 and §4. Operators who explicitly enable IP logging at the instance level (a config-file flag, off by default, §5.4) get IP/UA columns surfaced in the same settings page; users on such an instance see exactly what is being stored about them. ADR-0015.
 - **2FA on login.** TOTP support is in scope for v1, opt-in per user, set up in account settings. WebAuthn / hardware-key 2FA is Phase 7 (alongside YubiKey unlock of the PGP key). SMS 2FA is explicitly ruled out, consistent with §5.4's "no phone number." ADR-0015.
 - **CSRF.** Standard double-submit cookie or per-request token; not deciding the exact mechanism here, but every state-changing endpoint requires it. The HTTP API consumed by `partials.js` follows the same rule. ADR-0015.
 - **Content Security Policy.** Strict, by default: no inline scripts, no inline styles, no third-party origins, `frame-ancestors 'none'`. The crypto pages additionally serve a stricter policy that allows the pinned OpenPGP.js and WASM Argon2id (via SRI) and nothing else. Exact directives live in the implementation, not this plan. ADR-0016.
@@ -534,8 +534,8 @@ This section captures every architectural choice that affects the shape of the p
 ### 11.8 Registration, abuse, and the operator model
 
 - **One role: user. There is no in-app admin.** The system has a single application-level role — *user*. The **operator** is whoever has shell access to the VPS; they have root and they have `psql`, and that is enough. There is no admin web UI, no in-app admin login, no admin role flag in the database. Anything an admin "would have done" is either (a) a user-facing action the user does themselves in the web UI, or (b) something the operator does on the box via documented commands. This is a hard simplification and a real principle (P10). ADR-0008.
-- **Registration.** Invite-only by default. Invite tokens are rows in an `invites` table; the operator creates them with a one-line `psql` insert (or the small helper script `./scripts/new-invite.sh` in the repo). Open registration is an env-var flag (`ROOKERY_ALLOW_OPEN_REGISTRATION=true`) the operator can set, with the docs being clear about the abuse consequences. User-issued invites are a Phase 7+ option that would require adding a route to the user-facing UI; not in v1. ADR-0008.
-- **Custom-domain registration.** When the per-instance policy is "operator adds domains, not users" (the default), the operator does it via `psql` insert into the `domains` table + the server picks up the new row, generates DKIM keypairs, provisions ACME, and prints the DNS records to the server log (or to a file the operator can `cat`). When the policy is "users self-serve," the existing user-facing custom-domain flow (§5.2b) handles everything. Switching policy is a config-file change.
+- **Registration.** Invite-only, always. There is no open-registration mode and no config knob to enable one — the abuse risk on a pseudonymous, IP-log-free instance is not a trade-off worth offering. Invite tokens are rows in an `invites` table; the operator creates them via `./scripts/new-invite.sh` (a thin `psql INSERT` wrapper). User-issued invites are a Phase 7+ option; not in v1. ADR-0008.
+- **Custom-domain registration.** Users add their own custom domains via the web UI (§5.2b), always. There is no operator-managed-only mode and no per-instance policy toggle. The server generates DKIM keypairs, provisions ACME, and logs DNS records when the user completes DNS verification through the UI. Operators can also insert domain rows directly via `psql` for advanced cases (e.g. pre-registering a domain before inviting the user), but the web UI flow is the supported path.
 - **Outbound spam abuse.** Per-user and per-instance rate limits (§11.4) are enforced unconditionally. Beyond that, anomaly detection lives in **Prometheus metrics** (outbound volume per user, bounce rate, recent rejection codes) and **structured logs** — the operator can `grep`, alert via their existing Alertmanager rules, or write small queries against the metrics. There is no "anomaly dashboard" page we ship; if the operator wants one, they wire up Grafana against the metrics endpoint. The point is: the operator already has these tools; we don't reinvent them.
 - **Account suspension.** Suspending a user is a flag on the user row (`suspended_at`). Set the column via `psql` (or `./scripts/suspend-user.sh`); the server checks the flag on every inbound and outbound operation. Suspended accounts cannot send or receive (inbound rejected at SMTP time with `550 5.7.1 Account suspended`, producing a normal bounce; outbound attempts fail with a clear error in the user's web UI). Suspension is reversible by clearing the flag. ADR-0025.
 - **First-user bootstrapping.** On a fresh instance, the first user account must come from somewhere. The operator creates it with `./scripts/new-invite.sh` (which writes an invite row to the DB and prints the invite URL to stdout), then visits that URL in their browser like any other invited user. No special bootstrap dance, no `is_admin` column to set. This is the same flow every subsequent user takes; the first user just happens to also be the operator. ADR-0008.
@@ -598,7 +598,7 @@ The instance is configured via a **mix of environment variables (for secrets) an
 
 - **Config file:** `rookery.toml`, mounted at `/etc/rookery/rookery.toml`. Contains the primary domain, Let's Encrypt contact email, the per-instance policy toggles (open registration, custom-domain self-service), quota defaults, rate-limit overrides, paths to data directories, log verbosity. The file is short and heavily commented. Example file lives in the repo and is the canonical schema reference. Changes to the file require a server restart in v1; hot-reload is not in scope. ADR-0027.
 - **Environment variables (secrets only):**
-  - `ROOKERY_DB_URL` — Postgres connection string.
+  - `ROOKERY_DB_PASSWORD` — Postgres password. The connection URL is not configurable — rookery always connects to `postgres://rookery:<password>@postgres:5432/rookery`. Only the password varies, and it is always generated automatically by `secrets-init` on first `compose up`.
   - `ROOKERY_MASTER_KEY` — server master key (§11.6). Generated on first run if absent and printed to the log with a one-time "back this up" notice; on subsequent runs the operator provides it.
   - `ROOKERY_SESSION_KEY` — HMAC key for session cookies. Same generate-on-first-run pattern.
   - `ROOKERY_SMTP_RELAY_PASSWORD` — optional, only if a Phase 7 smarthost is configured.
@@ -614,7 +614,6 @@ The shape of "the operator does ops from the shell" is concrete: a small set of 
 | Script | What it does | Implementation shape |
 |---|---|---|
 | `new-invite.sh [validity_days]` | Generate a new invite URL | `psql -c "INSERT INTO invites ..." \| printf` |
-| `add-domain.sh <domain>` | Add a custom domain (operator-managed flow) | `psql -c "INSERT INTO domains ..."` then nudge the server to pick it up |
 | `suspend-user.sh <address>` | Mark a user suspended | `psql -c "UPDATE users SET suspended_at = now() WHERE primary_address = ..."` |
 | `unsuspend-user.sh <address>` | Reverse the above | `psql -c "UPDATE users SET suspended_at = NULL WHERE ..."` |
 | `delete-user.sh <address> [reason]` | Operator-initiated deletion (§11.9) | calls a small server endpoint at `localhost:internal-port` that runs the same deletion logic the user flow would, or directly writes tombstone + triggers purge |
@@ -699,31 +698,29 @@ These are noise at the planning level; the relevant principle is "follow current
 ## 12. Repo layout (proposed)
 
 ```
-/cmd/rookery-server/       # the only binary: HTTP + SMTP + background workers
-/internal/smtp/            # inbound + outbound SMTP
-/internal/web/             # HTTP handlers, html/template rendering
-/internal/web/templates/   # *.gohtml files
-/internal/keydir/          # local key directory + WKD publishing + auto-attach helpers
-/internal/discovery/       # remote key discovery (WKD, keyservers)
-/internal/store/           # DB + blob storage
-/internal/auth/            # user auth, sessions, 2FA
-/internal/queue/           # outbound mail queue
-/internal/domains/         # custom-domain registration, DNS verification, drift checks
-/internal/acme/            # per-domain ACME (Let's Encrypt) for HTTPS, MTA-STS
-/internal/addresses/       # address routing, aliases, plus-addressing, catch-all
-/internal/lifecycle/       # account deletion, backup, export/import
-/scripts/                  # operator shell scripts (new-invite.sh, suspend-user.sh, etc.) — §11.12. Mirrored into the container image at /opt/rookery/scripts/
-/web/static/               # hand-written CSS, partials.js (hand-written), the bundled crypto JS module, pinned OpenPGP.js + WASM Argon2id (vendored, SRI-locked)
-/web/partials/             # source for partials.js — hand-written, no build step, ships as-is
-/web/crypto/               # source for the JS crypto module (TS, bundled by esbuild — esbuild runs *inside* the Containerfile build, never on the developer's host; see §7)
-/Containerfile             # the build. Multi-stage: Go compile + esbuild for the crypto JS + distroless final image. `docker build` (or `podman build`) on a clean checkout produces the deployable image.
-/Makefile                  # thin convenience wrapper around `docker build`, `docker compose`, and the in-repo test scripts. Not a build system; the Containerfile is the build.
-/deploy/
-  /compose.yaml            # example Docker Compose file referenced by the README
-  /rookery.toml.example    # example config file with documented schema
-/docs/
-  /adr/                    # architecture decision records
-  /ops/                    # deployment, DNS, TLS, runbook docs
+cmd/rookery-server/        # the only binary: HTTP + SMTP + background workers
+internal/smtp/             # inbound + outbound SMTP
+internal/web/              # HTTP handlers, html/template rendering
+internal/web/templates/    # *.gohtml files
+internal/keydir/           # local key directory + WKD publishing + auto-attach helpers
+internal/discovery/        # remote key discovery (WKD, keyservers)
+internal/store/            # DB + blob storage
+internal/auth/             # user auth, sessions, 2FA
+internal/queue/            # outbound mail queue
+internal/domains/          # custom-domain registration, DNS verification, drift checks
+internal/acme/             # per-domain ACME (Let's Encrypt) for HTTPS, MTA-STS
+internal/addresses/        # address routing, aliases, plus-addressing, catch-all
+internal/lifecycle/        # account deletion, backup, export/import
+scripts/                   # operator shell scripts (new-invite.sh, suspend-user.sh, etc.) — §11.12. Mirrored into the container image at /opt/rookery/scripts/
+web/static/                # hand-written CSS, partials.js (hand-written), the bundled crypto JS module, pinned OpenPGP.js + WASM Argon2id (vendored, SRI-locked)
+web/partials/              # source for partials.js — hand-written, no build step, ships as-is
+web/crypto/                # source for the JS crypto module (bundled by esbuild — esbuild runs *inside* the Containerfile build, never on the developer's host; see §7)
+compose.yaml               # dev server, test runner, linter, mailpit — single entry point
+rookery.toml.example       # annotated config file schema
+Containerfile              # the build. Multi-stage: Go compile + esbuild for the crypto JS + distroless final image. `docker build` on a clean checkout produces the deployable image.
+docs/
+  adr/                     # architecture decision records
+  ops/                     # deployment, DNS, TLS, runbook docs
 PLAN.md                    # this file
 README.md                  # quickstart with compose snippet
 SECURITY.md                # threat model + reporting (Phase 5)
