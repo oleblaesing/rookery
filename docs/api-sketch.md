@@ -1,22 +1,18 @@
-# HTTP API Resource Model — Phase 0 Sketch
+# HTTP Resource Model — Internal Reference
 
-This document is the Phase 0 artifact required by §8 ("Phase 0 — Foundations") of
-PLAN.md. It sketches the resource model and endpoint shape for the rookery HTTP API
-before any handler is written. The goal is to have an on-paper contract that grounds
-Phase 1 implementation and makes the "deliberately replaceable" principle (ADR-0006)
-real from day one.
+This document sketches the resource model and endpoint shape for the rookery web UI
+before any handler is written. It is an internal reference — a shared vocabulary for
+implementation — not a public API contract. There is no versioning, no stability
+guarantee, and no plan for third-party client support (see ADR-0006).
 
-This is a **sketch**, not a frozen spec. Endpoint details, exact field names, and error
-codes will be refined as handlers are written. The sketch is frozen into a versioned,
-stable contract during Phase 5 (see ADR-0031). What is fixed now is the **resource
-model** — the nouns and their relationships.
+What is fixed here is the **resource model** — the nouns and their relationships.
+Endpoint details, exact field names, and error codes are refined as handlers are written.
 
 ---
 
-## Base URL and versioning
+## Base URL
 
-All API routes live under `/api/v1/`. Future breaking changes ship under `/api/v2/`.
-URL-path versioning was chosen for human readability; see ADR-0031.
+All routes live under `/api/v1/`.
 
 Example: `GET https://rookery.example/api/v1/messages`
 
@@ -24,13 +20,9 @@ Example: `GET https://rookery.example/api/v1/messages`
 
 ## Authentication
 
-Two mechanisms are accepted on every authenticated endpoint:
+One mechanism is accepted on every authenticated endpoint:
 
-- **Session cookie** (`rookery_session`): for browser clients. Set on login; HttpOnly,
-  Secure, SameSite=Lax. This is what the web UI uses.
-- **Bearer token** (`Authorization: Bearer <token>`): for programmatic clients. Tokens
-  are generated in account settings, stored hashed server-side (Argon2id), scoped, and
-  revocable. See ADR-0031.
+- **Session cookie** (`rookery_session`): set on login; HttpOnly, Secure, SameSite=Lax.
 
 Unauthenticated requests to protected endpoints return `401 Unauthorized`.
 
@@ -50,8 +42,9 @@ All error responses use a stable JSON envelope:
 }
 ```
 
-- `code`: stable string constant — clients pattern-match on this, never on `message`.
-- `message`: human-readable, may change freely within a major version.
+- `code`: string constant identifying the error type — the web UI's JS modules switch
+  on this value. Avoid depending on `message` for logic; it may change freely.
+- `message`: human-readable description, for display only.
 - `details`: optional object with extra context (e.g. which field failed validation).
 
 ---
@@ -68,13 +61,44 @@ List endpoints use cursor-based pagination (never offset). Response shape:
 ```
 
 Pass `?cursor=<value>` on the next request. Default page size: 50. Max: 200 (via
-`?limit=`). See ADR-0031.
+`?limit=`).
 
 ---
 
 ## Resources
 
-### 1. Users
+### 1. Auth
+
+Session creation and destruction.
+
+**Endpoints:**
+
+```
+GET    /api/v1/auth/challenge  # Issue a one-time nonce for the given address
+POST   /api/v1/auth/login      # Verify a signed challenge → session cookie
+POST   /api/v1/auth/logout     # Destroy the current session
+```
+
+Authentication is PGP challenge/response — the server holds no passphrase and no
+passphrase hash.
+
+`GET /api/v1/auth/challenge?address=alice@example.com` returns `{challenge_id, nonce}`.
+The nonce is a 32-byte random value (64-char hex). Challenges are single-use and expire
+after 5 minutes.
+
+`POST /api/v1/auth/login` accepts `{address, challenge_id, signed_challenge}` where
+`signed_challenge` is an ASCII-armored detached PGP signature of the nonce, made by
+the user's private key. The server verifies the signature against the stored public key.
+On success it returns a session cookie (`rookery_session`, HttpOnly, Secure, SameSite=Lax)
+and the authenticated user's profile (same shape as `GET /users/me`). Returns `401` on
+invalid or expired challenge, bad signature, or unknown address.
+
+`POST /api/v1/auth/logout` invalidates the session server-side and clears the cookie.
+Idempotent — calling it on an already-expired session returns `200`.
+
+---
+
+### 2. Users
 
 A user is an account on the instance. One account, one PGP key, one or many addresses.
 The server never holds the PGP private key. See ADR-0010, ADR-0014.
@@ -100,14 +124,36 @@ PATCH  /api/v1/users/me               # Update display_name, etc.
 DELETE /api/v1/users/me               # Initiate account deletion (§11.9)
 GET    /api/v1/users/me/sessions       # List active sessions (by last-seen timestamp, no IP/UA)
 DELETE /api/v1/users/me/sessions/{id}  # Revoke a specific session
-GET    /api/v1/users/me/tokens         # List API tokens
-POST   /api/v1/users/me/tokens         # Create an API token
-DELETE /api/v1/users/me/tokens/{id}    # Revoke an API token
 ```
+
+**`POST /api/v1/users/register` request body:**
+
+```json
+{
+  "invite_token": "<opaque token from the invite URL>",
+  "local_part": "alice",
+  "armored_public_key": "<ASCII-armored OpenPGP public key block>"
+}
+```
+
+This is a single atomic step. The invite token identifies which invite is being
+consumed; the local part is validated for availability; the public key is stored.
+No intermediate pending-user state is necessary. On success the server returns the
+new user's profile and sets a session cookie (the user is logged in immediately
+after registration).
+
+No passphrase appears here. Key generation happens entirely in the browser before
+this request is made; the keypair is generated without a passphrase. Only the
+public key reaches the server. After registration the user is redirected to
+settings, where they set a passphrase and export the private key as an encrypted
+`.asc` recovery file (OpenPGP.js's built-in s2k per RFC 9580). The server holds no
+passphrase and no passphrase hash — authentication after registration is PGP
+challenge/response (see `GET /api/v1/auth/challenge` and `POST /api/v1/auth/login`
+below).
 
 ---
 
-### 2. Keys
+### 3. Keys
 
 The user's public PGP key(s). The server holds public keys only; never private keys.
 See ADR-0010, ADR-0011.
@@ -124,7 +170,8 @@ See ADR-0010, ADR-0011.
 
 ```
 GET    /api/v1/keys/me                  # Get the authenticated user's active public key
-PUT    /api/v1/keys/me                  # Upload / replace the user's public key
+PUT    /api/v1/keys/me                  # Upload the user's public key (Phase 1: initial upload
+                                        # only; key rotation with attestation lands in Phase 6)
 GET    /api/v1/keys/lookup?address=...  # Discover a public key for any address (WKD + cache)
 ```
 
@@ -132,9 +179,17 @@ The `/keys/lookup` endpoint is the server-side key discovery used by the compose
 (via `partials.js`). It checks: local directory → WKD → optional keyserver. Result
 includes the key (if found), discovery method, and a "first seen" timestamp if relevant.
 
+**Note on `PUT /keys/me`:** in Phase 1, the only valid use of this endpoint is the
+initial key upload during registration (called by `POST /users/register` internally) or
+if the user needs to re-upload a key without changing it. Key *rotation* — replacing one
+key with a different one — requires the attestation protocol from ADR-0028 and is a
+Phase 6 deliverable. Phase 1 treats a second `PUT` with a different key as an error
+(`409 CONFLICT`) so that no key gets silently replaced without the rotation protocol in
+place.
+
 ---
 
-### 3. Invites
+### 4. Invites
 
 Invite tokens control registration. Created by the operator via `./scripts/new-invite.sh`.
 In Phase 7+ user-issued invites may be added. See ADR-0008.
@@ -151,12 +206,15 @@ In Phase 7+ user-issued invites may be added. See ADR-0008.
 
 ```
 GET  /api/v1/invites/{token}   # Validate an invite token (unauthenticated; returns domain info)
-POST /api/v1/invites/{token}   # Consume the invite (first step of registration)
 ```
+
+`GET /api/v1/invites/{token}` returns the instance name, primary domain, and whether the
+token is valid and unused. The invite is consumed atomically inside `POST /users/register`
+— there is no separate "consume invite" step.
 
 ---
 
-### 4. Messages
+### 5. Messages
 
 A message is a stored RFC 5322 email. The server stores the raw blob (encrypted or not
 as received) and metadata. Bodies of PGP-encrypted messages are never decrypted
@@ -168,7 +226,8 @@ server-side. See §6, §11.5.
 | `thread_id` | UUID \| null | Thread grouping derived from `In-Reply-To`/`References`. |
 | `folder` | string | Virtual folder: `inbox`, `sent`, `drafts`, `trash`, `bounced`. |
 | `from_address` | string | Envelope From. |
-| `to_addresses` | []string | Envelope To (may include CC/BCC). |
+| `to` | []string | `To` header addresses. |
+| `cc` | []string | `Cc` header addresses. May be empty. |
 | `subject` | string | Subject header. Leaked in standard SMTP; not encrypted. |
 | `date` | RFC 3339 | Message Date header. |
 | `size_bytes` | int64 | Size of the raw blob. |
@@ -179,6 +238,11 @@ server-side. See §6, §11.5.
 | `has_attachments` | bool | Whether the message has MIME attachments. |
 | `deleted_at` | RFC 3339 \| null | When moved to Trash; null if not deleted. |
 
+**Note on recipients:** `to` and `cc` are the MIME header values — what is visible to
+all recipients. BCC recipients are deliberately not exposed in the metadata returned by
+the API; they are only present in the raw RFC 5322 blob and only accessible by the
+sending user via `GET /messages/{id}/raw`.
+
 **Endpoints:**
 
 ```
@@ -188,8 +252,8 @@ GET    /api/v1/messages/{id}/raw            # Get the raw RFC 5322 blob (for cli
 PATCH  /api/v1/messages/{id}               # Update is_read, is_starred, folder
 DELETE /api/v1/messages/{id}               # Soft-delete (move to Trash)
 DELETE /api/v1/messages/{id}?permanent=1   # Hard-delete from Trash (irreversible)
-POST   /api/v1/messages                     # Submit an outbound message (PGP/MIME blob POSTed by JS)
-POST   /api/v1/messages/drafts              # Save a draft
+POST   /api/v1/messages                     # Submit an outbound message (Phase 2)
+POST   /api/v1/messages/drafts              # Save a draft (Phase 2)
 GET    /api/v1/messages/drafts/{id}         # Get a draft (raw content for client-side)
 PUT    /api/v1/messages/drafts/{id}         # Replace a draft
 DELETE /api/v1/messages/drafts/{id}         # Delete a draft
@@ -200,13 +264,17 @@ DELETE /api/v1/messages/drafts/{id}         # Delete a draft
 - `GET /api/v1/messages/{id}/raw` returns the raw RFC 5322 message bytes
   (`Content-Type: message/rfc822`). The browser JS module fetches this and decrypts
   locally. The server never decrypts PGP-encrypted bodies.
-- `POST /api/v1/messages` accepts the fully-encrypted PGP/MIME blob built by the
-  browser JS module. The server queues it for outbound SMTP delivery.
-- The `Idempotency-Key` header is accepted on POST endpoints. See ADR-0031.
+- `POST /api/v1/messages` and draft endpoints are Phase 2. They are listed here because
+  they are part of the stable resource model, but they return `501 Not Implemented` in
+  Phase 1.
+- The `folder` query parameter on `GET /messages` is the canonical way to get drafts:
+  `GET /messages?folder=drafts`. The `/messages/drafts/` sub-path is a convenience
+  alias. Both are consistent.
+- The `Idempotency-Key` header is accepted on POST endpoints to allow safe retries.
 
 ---
 
-### 5. Addresses
+### 6. Addresses
 
 A user can hold multiple addresses across multiple domains. See §11.3, ADR-0017.
 
@@ -236,7 +304,7 @@ DELETE /api/v1/addresses/{id}/aliases/{alias_id}  # Remove an alias
 
 ---
 
-### 6. Domains
+### 7. Domains
 
 A domain managed by this instance — either the primary domain or a user-verified custom
 domain. See §5.2b, §11.3, ADR-0007. Phase 3 is where this resource becomes fully
@@ -273,7 +341,7 @@ GET    /api/v1/domains/{id}/dns-records      # Get the full DNS record set (copy
 
 ---
 
-### 7. Known Keys (per-user contact key cache)
+### 8. Known Keys (per-user contact key cache)
 
 The known-keys cache records public keys for correspondent addresses, harvested from
 auto-attached keys on inbound messages or discovered via WKD during compose. See §5.3,
@@ -281,20 +349,25 @@ auto-attached keys on inbound messages or discovered via WKD during compose. See
 
 | Field | Type | Description |
 |---|---|---|
-| `address` | string | Correspondent address. |
 | `fingerprint` | string | OpenPGP fingerprint of the cached key. |
+| `address` | string | Correspondent address. |
 | `armored_public_key` | string | ASCII-armored public key. |
 | `first_seen_at` | RFC 3339 | When this key was first associated with this address. |
 | `last_seen_at` | RFC 3339 | Most recent inbound message from this address with this key. |
 | `source` | string | How discovered: `auto_attach`, `wkd`, `keyserver`, `manual`. |
 
+**Note on identifiers:** known-key entries are identified by `fingerprint`, not by
+address. A single address can have multiple keys over time (key rotation). Using
+`address` as the sole identifier would make it impossible to represent key history and
+would silently overwrite old entries on rotation.
+
 **Endpoints:**
 
 ```
-GET    /api/v1/known-keys                    # List all cached keys for the authenticated user
-GET    /api/v1/known-keys?address=<addr>     # Look up cached key for a specific address
-DELETE /api/v1/known-keys/{address}          # Remove a cached key (will re-discover on next compose)
-PUT    /api/v1/known-keys/{address}          # Manually set / override a key for an address
+GET    /api/v1/known-keys                       # List all cached keys for the authenticated user
+GET    /api/v1/known-keys?address=<addr>        # Look up cached key(s) for a specific address
+DELETE /api/v1/known-keys/{fingerprint}         # Remove a cached key by fingerprint
+PUT    /api/v1/known-keys/{fingerprint}         # Manually set / override a key by fingerprint
 ```
 
 ---
@@ -302,11 +375,22 @@ PUT    /api/v1/known-keys/{address}          # Manually set / override a key for
 ## Unauthenticated public endpoints
 
 ```
-GET  /healthz                               # Health check (no auth required)
-GET  /api/v1/status                         # Server version + domain (no auth required)
-GET  /.well-known/openpgpkey/<domain>/...   # WKD endpoint (standard; no auth required)
-GET  /invite/{token}                        # Invite landing page (HTML; no auth required)
+GET  /healthz                                    # Health check (no auth required)
+GET  /api/v1/status                              # Server version + domain (no auth required)
+GET  /invite/{token}                             # Invite landing page (HTML; no auth required)
 ```
+
+**WKD (Web Key Directory) — Advanced Method only (see ADR-0024):**
+
+```
+GET  https://openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<z-base-32-hash>
+GET  https://openpgpkey.<domain>/.well-known/openpgpkey/<domain>/policy
+```
+
+WKD Advanced Method requests arrive at the `openpgpkey.<domain>` hostname (via CNAME to
+the instance), not at the instance's primary hostname. The instance handles these by
+inspecting the `Host` header (or the SNI on TLS) and routing accordingly. The Direct
+Method (`<domain>/.well-known/openpgpkey/...`) is not supported per ADR-0024.
 
 ---
 
@@ -315,9 +399,9 @@ GET  /invite/{token}                        # Invite landing page (HTML; no auth
 | Phase | What gets added |
 |---|---|
 | Phase 0 | `/healthz`, `/api/v1/status`. Everything else is stubbed. |
-| Phase 1 | Users (register + me), Keys (upload + lookup), Invites, Messages (receive + read), WKD. |
+| Phase 1 | Auth (challenge/login/logout), Users (register + me), Keys (upload + lookup), Invites (validate), Messages (receive + read + raw), WKD. |
 | Phase 2 | Messages (send + draft), compose-time key discovery, queue status. |
 | Phase 3 | Domains (full CRUD + DNS verification), Addresses (multi-address + aliases). |
-| Phase 4 | Operator observability endpoints (internal; not part of the public API surface). |
-| Phase 5 | API formally frozen: Bearer tokens, cursor pagination, idempotency keys, semver. Known Keys (full CRUD). |
+| Phase 4 | Operator observability endpoints (internal). |
+| Phase 5 | Known Keys (full CRUD). Cursor pagination. |
 | Phase 6 | Mailbox export/import endpoints. |

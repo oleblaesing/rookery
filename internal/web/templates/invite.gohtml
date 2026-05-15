@@ -1,0 +1,46 @@
+{{define "title"}}join {{.InstanceName}}{{end}}
+
+{{define "content"}}
+<section class="form-page">
+  <h1>join {{.InstanceName}}</h1>
+
+  <div class="info-block">
+    <p>You're joining <strong>{{.InstanceName}}</strong>, an encrypted email instance.</p>
+    <p>A PGP keypair will be generated in your browser. After your account is
+    created you will be taken to settings where you can set a passphrase and
+    export your recovery file. <strong>If you lose the recovery file, your
+    mail is unrecoverable. There is no reset.</strong></p>
+    <p>We do not ask for your name, phone number, or any other identifying
+    information. The account is pseudonymous.</p>
+    <p>The recipients of your mail and the network in between will still see
+    standard email metadata — your address, theirs, subject lines, timestamps.
+    That is how email works and it is not something we can change.</p>
+  </div>
+
+  <form id="register-form">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+    <input type="hidden" name="invite_token" value="{{.InviteToken}}">
+
+    <label for="local_part">username</label>
+    <div class="input-suffix-wrap">
+      <input type="text" id="local_part" name="local_part" required
+             pattern="[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]|[a-z0-9]"
+             autocomplete="username"
+             placeholder="alice">
+      <span class="input-suffix">@{{.Domain}}</span>
+    </div>
+
+    {{/* The public key field is populated by the JS crypto module before submit. */}}
+    <input type="hidden" id="armored_public_key" name="armored_public_key">
+
+    <div id="keygen-status" class="keygen-status" aria-live="polite"></div>
+
+    <button type="submit" id="submit-btn">create account</button>
+  </form>
+</section>
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/crypto.js" defer></script>
+<script src="/static/register.js" defer></script>
+{{end}}

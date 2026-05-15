@@ -1,0 +1,39 @@
+{{define "title"}}log in — {{.InstanceName}}{{end}}
+
+{{define "scripts"}}
+<script src="/static/crypto.js" defer></script>
+<script src="/static/login.js" defer></script>
+{{end}}
+
+{{define "content"}}
+<section class="form-page">
+  <h1>log in</h1>
+  <p class="instance-name">{{.InstanceName}}</p>
+
+  <p class="error" role="alert"{{if not .Error}} hidden{{end}}>{{if .Error}}{{.Error}}{{end}}</p>
+
+  <form id="login-form">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+
+    <label for="address">account</label>
+    <input type="text" id="address" name="address" required autocomplete="username"
+           value="{{.Address}}" placeholder="alice or alice@{{.Domain}}">
+
+    <label for="recovery_file">recovery file (.asc)</label>
+    <input type="file" id="recovery_file" name="recovery_file" accept=".asc,.txt" required>
+
+    <label for="passphrase">private key passphrase</label>
+    <input type="password" id="passphrase" name="passphrase"
+           autocomplete="current-password" placeholder="passphrase">
+    <p class="field-hint">The passphrase that encrypts your recovery file.
+    Leave blank if you exported without one (no 2FA).</p>
+
+    <button type="submit">log in</button>
+  </form>
+
+  <p class="no-recovery">No "forgot passphrase" link. The server holds no
+  passphrase and no passphrase hash — there is nothing to reset. If you have
+  lost your recovery file or passphrase, your account cannot be recovered.</p>
+
+</section>
+{{end}}

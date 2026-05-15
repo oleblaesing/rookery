@@ -1,0 +1,65 @@
+{{define "title"}}inbox — {{.InstanceName}}{{end}}
+
+{{define "content"}}
+<section class="mailbox">
+  <div class="mailbox-toolbar">
+    <h1>inbox</h1>
+    {{- if .Messages}}
+    <span class="message-count">{{len .Messages}} message{{if gt (len .Messages) 1}}s{{end}}</span>
+    {{- end}}
+  </div>
+
+  <nav class="folder-nav">
+    <a href="/inbox" {{if eq .Folder "inbox"}}class="active"{{end}}>inbox</a>
+    <a href="/inbox?folder=sent" {{if eq .Folder "sent"}}class="active"{{end}}>sent</a>
+    <a href="/inbox?folder=trash" {{if eq .Folder "trash"}}class="active"{{end}}>trash</a>
+  </nav>
+
+  {{- if not .Messages}}
+  <p class="empty-state">no messages</p>
+  {{- else}}
+  <table class="message-list">
+    <thead>
+      <tr>
+        <th class="col-status" aria-label="status"></th>
+        <th class="col-from">from</th>
+        <th class="col-subject">subject</th>
+        <th class="col-date">date</th>
+        <th class="col-security" aria-label="security"></th>
+      </tr>
+    </thead>
+    <tbody>
+    {{- range .Messages}}
+      <tr class="message-row{{if not .IsRead}} unread{{end}}"
+          data-message-id="{{.ID}}">
+        <td class="col-status">
+          {{- if not .IsRead}}<span class="unread-dot" aria-label="unread">●</span>{{end}}
+        </td>
+        <td class="col-from">
+          <a href="/messages/{{.ID}}">{{.FromAddress}}</a>
+        </td>
+        <td class="col-subject">
+          <a href="/messages/{{.ID}}">{{if .Subject}}{{.Subject}}{{else}}(no subject){{end}}</a>
+          {{- if .HasAttachments}} <span class="attach-icon" aria-label="has attachments">⊕</span>{{end}}
+        </td>
+        <td class="col-date">
+          <time datetime="{{.Date.Format "2006-01-02T15:04:05Z07:00"}}">
+            {{.Date.Format "02 Jan 15:04"}}
+          </time>
+        </td>
+        <td class="col-security">
+          {{- if eq .SecurityState "pgp_encrypted"}}
+          <span class="security-badge encrypted" title="PGP encrypted">🔒</span>
+          {{- else if eq .SecurityState "pgp_signed_plaintext"}}
+          <span class="security-badge signed" title="PGP signed, not encrypted">✓</span>
+          {{- else}}
+          <span class="security-badge plaintext" title="plaintext">⚠</span>
+          {{- end}}
+        </td>
+      </tr>
+    {{- end}}
+    </tbody>
+  </table>
+  {{- end}}
+</section>
+{{end}}

@@ -1,0 +1,56 @@
+{{define "title"}}settings — {{.InstanceName}}{{end}}
+
+{{define "content"}}
+<section class="form-page">
+  <h1>settings</h1>
+
+  <h2>private key</h2>
+
+  <div class="info-block">
+    <p>Your recovery file contains your private key, encrypted with your
+    passphrase. The server does not have a copy of either.</p>
+    <p><strong>This file is your second factor.</strong> Logging in requires
+    both the file and the passphrase — a stolen passphrase is useless without
+    it, and a stolen file is useless without the passphrase. No TOTP app or
+    SMS code needed; the recovery file plays that role structurally.</p>
+    <p>Re-exporting this file with a new passphrase <strong>changes your
+    login passphrase</strong> — the server authenticates you by verifying a
+    signature from your key, not by checking a stored password. The new file
+    replaces the old one; use the new passphrase to log in on any device from
+    that point on.</p>
+    <p>If you lose both the recovery file and your browser's local storage,
+    your mail is unrecoverable. <strong>Store it off-device</strong> — a USB
+    drive, a printed copy in a sealed envelope, an encrypted external
+    backup.</p>
+    <p>While you are logged in, your private key is held in plaintext in
+    browser <code>localStorage</code>. It is cleared on logout. <strong>Log
+    out when you are done</strong>, especially on shared or untrusted
+    machines where another user or process might read browser storage.</p>
+  </div>
+
+  <form id="export-form">
+    <div class="field">
+      <label for="export-passphrase">private key passphrase</label>
+      <input type="password" id="export-passphrase" name="export_passphrase"
+             autocomplete="new-password" placeholder="passphrase">
+      <p class="field-hint">This passphrase encrypts your private key and acts as
+      your first factor. Your private key file is the second factor — logging in
+      requires both. Leave blank to export without a passphrase.</p>
+    </div>
+    <div class="field">
+      <label for="export-passphrase-confirm">confirm private key passphrase</label>
+      <input type="password" id="export-passphrase-confirm" name="export_passphrase_confirm"
+             autocomplete="new-password" placeholder="repeat passphrase">
+    </div>
+    <div class="form-actions">
+      <button type="submit" id="export-btn" class="button">export recovery file</button>
+    </div>
+    <p id="export-error" class="field-hint error" style="display:none"></p>
+  </form>
+</section>
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/crypto.js" defer></script>
+<script src="/static/settings.js" defer></script>
+{{end}}

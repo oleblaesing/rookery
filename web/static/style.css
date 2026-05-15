@@ -1,0 +1,576 @@
+/*
+ * rookery — main stylesheet
+ *
+ * Visual direction: night-sky dark theme.
+ * Ravens carry sealed messages through the dark. The UI should feel like
+ * reading dispatches by candlelight in a citadel tower — warm parchment text
+ * on a deep night background, cold teal accent like frost on a raven's feather.
+ *
+ * System fonts only. Single file. No framework, no variables polyfill.
+ * Information-forward, minimal decoration.
+ */
+
+/* -------------------------------------------------------------------------
+   Reset / base
+   ------------------------------------------------------------------------- */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: #0d1117;
+  color: #e6d9c2; /* warm parchment — not harsh white */
+  font-family: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, monospace;
+  font-size: 0.9375rem; /* 15px */
+  line-height: 1.65;
+}
+
+a {
+  color: #7dd3c8; /* cold teal — the single accent colour */
+  text-decoration: underline;
+}
+a:hover {
+  color: #a5e3df;
+}
+
+h1, h2, h3 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 0 0 0.75rem;
+  letter-spacing: 0.02em;
+}
+h1 { font-size: 1.25rem; }
+h2 { font-size: 1.0625rem; }
+h3 { font-size: 0.9375rem; }
+
+p { margin: 0 0 0.75rem; }
+
+code, pre, kbd {
+  font-family: inherit; /* already monospace */
+  font-size: 0.875rem;
+}
+code {
+  background: #1c2128;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  color: #a5e3df;
+}
+pre {
+  background: #161b22;
+  border: 1px solid #21262d;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 4px;
+}
+
+hr {
+  border: none;
+  border-top: 1px solid #21262d;
+  margin: 1.5rem 0;
+}
+
+/* -------------------------------------------------------------------------
+   Layout
+   ------------------------------------------------------------------------- */
+
+.site-header {
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
+  padding: 0.65rem 1.5rem;
+  border-bottom: 1px solid #21262d;
+  background: #0d1117;
+}
+
+.site-name {
+  font-weight: 700;
+  font-size: 0.9375rem;
+  text-decoration: none;
+  color: #e6d9c2;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.site-name:hover {
+  color: #7dd3c8;
+}
+
+.site-nav {
+  display: flex;
+  gap: 1.25rem;
+}
+.site-nav a {
+  text-decoration: none;
+  color: #8b949e;
+  font-size: 0.875rem;
+  letter-spacing: 0.04em;
+}
+.site-nav a:hover {
+  color: #e6d9c2;
+  text-decoration: none;
+}
+
+.site-user {
+  margin-left: auto;
+  font-size: 0.8125rem;
+  color: #484f58;
+}
+
+main {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem 1.5rem;
+}
+
+/* -------------------------------------------------------------------------
+   Forms
+   ------------------------------------------------------------------------- */
+
+.form-page {
+  max-width: 440px;
+}
+
+.field + .field {
+  margin-top: 1rem;
+}
+
+label {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #8b949e;
+  margin-bottom: 0.3rem;
+  margin-top: 1rem;
+}
+label:first-child { margin-top: 0; }
+
+input[type="text"],
+input[type="email"],
+input[type="password"] {
+  display: block;
+  width: 100%;
+  padding: 0.45rem 0.7rem;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  background: #0d1117;
+  color: #e6d9c2;
+}
+input[type="text"]::placeholder,
+input[type="email"]::placeholder,
+input[type="password"]::placeholder {
+  color: #484f58;
+}
+input:focus {
+  outline: none;
+  border-color: #7dd3c8;
+  box-shadow: 0 0 0 2px rgba(125, 211, 200, 0.15);
+}
+
+input[type="file"] {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.875rem;
+  color: #8b949e;
+}
+
+input[type="checkbox"] {
+  margin-right: 0.4em;
+  accent-color: #7dd3c8;
+}
+
+button, .button {
+  display: inline-block;
+  margin-top: 1rem;
+  padding: 0.45rem 1.1rem;
+  background: #1c3a38;
+  color: #7dd3c8;
+  border: 1px solid #2d5c58;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  text-decoration: none;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+button:hover, .button:hover {
+  background: #244a47;
+  border-color: #7dd3c8;
+  color: #a5e3df;
+}
+button:disabled {
+  background: #161b22;
+  border-color: #21262d;
+  color: #484f58;
+  cursor: not-allowed;
+}
+.button-danger {
+  background: #2d1515;
+  color: #f85149;
+  border-color: #4a1f1f;
+}
+.button-danger:hover {
+  background: #3d1c1c;
+  border-color: #f85149;
+  color: #ff7b72;
+}
+.button-secondary {
+  background: #161b22;
+  color: #8b949e;
+  border-color: #30363d;
+}
+.button-secondary:hover {
+  background: #1c2128;
+  color: #e6d9c2;
+  border-color: #484f58;
+}
+.form-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.info-notice {
+  background: #0f1e1d;
+  border-left: 2px solid #7dd3c8;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.9375rem;
+  color: #a5e3df;
+}
+.button-link {
+  background: none;
+  color: #7dd3c8;
+  text-decoration: underline;
+  padding: 0;
+  margin: 0;
+  font-size: inherit;
+  border: none;
+  cursor: pointer;
+}
+.button-link:hover {
+  color: #a5e3df;
+}
+
+.field-hint {
+  font-size: 0.8125rem;
+  color: #484f58;
+  margin-top: 0.25rem;
+  margin-bottom: 0;
+}
+
+.instance-name {
+  font-size: 0.875rem;
+  color: #484f58;
+  margin-top: -0.5rem;
+  margin-bottom: 1.25rem;
+  letter-spacing: 0.04em;
+}
+
+.input-suffix-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+.input-suffix-wrap input {
+  border-right: none;
+  border-radius: 4px 0 0 4px;
+}
+.input-suffix {
+  padding: 0.45rem 0.7rem;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-left: none;
+  border-radius: 0 4px 4px 0;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  color: #484f58;
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------------------------------
+   Status / badge elements
+   ------------------------------------------------------------------------- */
+
+.error, .error-notice {
+  color: #f85149;
+  font-size: 0.875rem;
+  padding: 0.45rem 0.7rem;
+  background: #1c0f0e;
+  border-left: 2px solid #f85149;
+  margin-bottom: 0.75rem;
+}
+
+.keygen-status {
+  font-size: 0.875rem;
+  margin: 0.5rem 0;
+  min-height: 1.2em;
+}
+.keygen-status.ok    { color: #3fb950; }
+.keygen-status.error { color: #f85149; }
+
+.info-block {
+  background: #0f1e1d;
+  border-left: 2px solid #7dd3c8;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.25rem;
+  font-size: 0.875rem;
+  color: #8b949e;
+}
+.info-block p:last-child { margin-bottom: 0; }
+
+.no-recovery {
+  font-size: 0.8125rem;
+  color: #484f58;
+  margin-top: 1rem;
+  border-top: 1px solid #21262d;
+  padding-top: 0.75rem;
+}
+
+
+.recovery-section {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #191600;
+  border: 1px solid #3a3000;
+  border-radius: 4px;
+}
+.recovery-section h2 {
+  font-size: 0.9375rem;
+  color: #d29922;
+}
+
+/* -------------------------------------------------------------------------
+   Inbox / message list
+   ------------------------------------------------------------------------- */
+
+.mailbox {}
+
+.mailbox-toolbar {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+.message-count {
+  font-size: 0.8125rem;
+  color: #484f58;
+}
+
+.folder-nav {
+  display: flex;
+  gap: 1.5rem;
+  margin-bottom: 1.25rem;
+  font-size: 0.8125rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-bottom: 1px solid #21262d;
+  padding-bottom: 0.6rem;
+}
+.folder-nav a {
+  text-decoration: none;
+  color: #484f58;
+}
+.folder-nav a.active {
+  color: #7dd3c8;
+  font-weight: 600;
+}
+.folder-nav a:hover { color: #8b949e; }
+
+.empty-state {
+  color: #484f58;
+  font-size: 0.9375rem;
+}
+
+.message-list {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+.message-list th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #484f58;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid #21262d;
+}
+.message-list td {
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid #161b22;
+  vertical-align: middle;
+}
+.message-row:last-child td { border-bottom: none; }
+.message-row:hover td { background: #161b22; }
+.message-row.unread td { background: #0f1e1d; }
+.message-row.unread .col-from a { color: #e6d9c2; font-weight: 600; }
+
+.col-status  { width: 1.25rem; }
+.col-from    { width: 16rem; }
+.col-subject {}
+.col-date    { width: 9rem; white-space: nowrap; font-size: 0.8125rem; color: #484f58; }
+.col-security { width: 2rem; text-align: center; }
+
+.message-list a { text-decoration: none; color: #8b949e; }
+.message-list a:hover { color: #e6d9c2; }
+
+.unread-dot  { color: #7dd3c8; font-size: 0.55rem; }
+.attach-icon { font-size: 0.75rem; color: #484f58; }
+
+.security-badge { font-size: 0.75rem; }
+.security-badge.plaintext  { color: #d29922; }
+.security-badge.encrypted  { color: #3fb950; }
+.security-badge.signed     { color: #7dd3c8; }
+
+/* -------------------------------------------------------------------------
+   Read page
+   ------------------------------------------------------------------------- */
+
+.message-view {}
+
+.message-header {
+  border-bottom: 1px solid #21262d;
+  padding-bottom: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+.message-subject {
+  font-size: 1.125rem;
+  margin-bottom: 0.75rem;
+  color: #e6d9c2;
+}
+
+.message-meta {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr;
+  gap: 0.2rem 0.5rem;
+  font-size: 0.8125rem;
+  margin-bottom: 0.75rem;
+}
+.message-meta dt {
+  color: #484f58;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  padding-top: 0.075rem;
+}
+.message-meta dd {
+  margin: 0;
+  color: #8b949e;
+  word-break: break-all;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  padding: 0.2rem 0.6rem;
+  border-radius: 3px;
+}
+.badge-encrypted { background: #0d2117; color: #3fb950; border: 1px solid #1a4028; }
+.badge-signed    { background: #0f1e1d; color: #7dd3c8; border: 1px solid #1e3c3a; }
+.badge-plaintext { background: #1a1200; color: #d29922; border: 1px solid #3a2e00; }
+
+.message-body {
+  margin: 1.25rem 0;
+}
+.message-body-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.9375rem;
+  line-height: 1.7;
+  font-family: inherit;
+  color: #c9bfa8; /* slightly warmer/dimmer than headings — reading comfort */
+  margin: 0;
+  background: none;
+  padding: 0;
+}
+
+.decrypting-notice, .loading-notice {
+  color: #484f58;
+  font-style: italic;
+  font-size: 0.875rem;
+}
+
+.message-actions {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #21262d;
+}
+.inline-form { margin: 0; }
+.inline-form button { margin-top: 0; }
+
+/* -------------------------------------------------------------------------
+   Key restore form (on login page, rendered by JS)
+   ------------------------------------------------------------------------- */
+
+#key-restore-form {
+  max-width: 440px;
+}
+#key-restore-form label { display: block; margin-top: 0.75rem; }
+#key-restore-form input[type="file"],
+#key-restore-form input[type="password"] { max-width: 380px; }
+
+.hint {
+  font-size: 0.8125rem;
+  color: #484f58;
+  margin-top: 0.5rem;
+  margin-bottom: 0;
+}
+
+/* -------------------------------------------------------------------------
+   Footer
+   ------------------------------------------------------------------------- */
+
+.site-footer {
+  border-top: 1px solid #21262d;
+  padding: 0.65rem 1.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  color: #30363d;
+  text-align: center;
+  margin-top: 3rem;
+}
+.site-footer a {
+  color: #484f58;
+  text-decoration: none;
+}
+.site-footer a:hover {
+  color: #8b949e;
+}
+
+/* -------------------------------------------------------------------------
+   Responsive (mobile-tolerated — not optimised)
+   ------------------------------------------------------------------------- */
+
+@media (max-width: 600px) {
+  .col-from   { width: auto; }
+  .col-date   { display: none; }
+  .col-status { display: none; }
+  .message-meta {
+    grid-template-columns: 3.5rem 1fr;
+  }
+  .site-header {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  .site-user { margin-left: 0; width: 100%; }
+}

@@ -1,0 +1,46 @@
+{{- /*
+  base.gohtml — the outer HTML shell shared by all pages.
+  Each page template calls {{ template "base" . }} and defines
+  the "title" and "content" blocks.
+
+  Visual direction: §11.15 — techie-utility, archlinux.org lineage.
+  System fonts only; no webfonts. Single stylesheet. No JS in the shell
+  except the CSRF meta tag and deferred page scripts.
+*/ -}}
+{{define "base"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{{block "title" .}}{{.InstanceName}}{{end}}</title>
+  {{- if .CSRFToken}}
+  <meta name="csrf-token" content="{{.CSRFToken}}">
+  {{- end}}
+  <link rel="icon" href="/static/favicon.ico">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="site-header">
+    <a href="/" class="site-name">{{.InstanceName}}</a>
+    {{- if .User}}
+    <nav class="site-nav">
+      <a href="/inbox">inbox</a>
+      <a href="/settings">settings</a>
+      <a href="#" data-action="logout" class="logout-link"
+         title="Your private key is in browser localStorage while logged in. Log out on shared or untrusted machines.">log out</a>
+    </nav>
+    <span class="site-user">{{.User.PrimaryAddress}}</span>
+    {{- end}}
+  </header>
+  <main>
+    {{block "content" .}}{{end}}
+  </main>
+  {{block "scripts" .}}{{end}}
+  <script src="/static/partials.js" defer></script>
+  <footer class="site-footer">
+    <span>powered by <a href="https://github.com/anomalyco/rookery">rookery</a></span>
+  </footer>
+</body>
+</html>
+{{end}}

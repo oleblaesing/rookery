@@ -23,6 +23,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"rookery/internal/config"
+	"rookery/internal/smtp"
+	"rookery/internal/store"
 	"rookery/internal/web"
 )
 
@@ -63,35 +65,62 @@ func runServer() int {
 		}
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// ---- Open DB + run migrations ----
+	st, err := store.Open(ctx, cfg.DBUrl(), cfg.Storage.MessageDir)
+	if err != nil {
+		slog.Error("failed to open store", "err", err)
+		return 1
+	}
+	defer st.Close()
+
+	// ---- First-run bootstrap ----
+	// Seed the primary domain row if it doesn't exist yet.
+	if err := bootstrapPrimaryDomain(ctx, st, cfg); err != nil {
+		slog.Error("bootstrap: failed to seed primary domain", "err", err)
+		return 1
+	}
+
+	// ---- HTTP server ----
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	web.RegisterRoutes(r, cfg)
+	web.RegisterRoutes(r, cfg, st.DB, st)
 
-	addr := fmt.Sprintf("%s:%d", cfg.HTTP.Host, cfg.HTTP.Port)
+	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTP.Host, cfg.HTTP.Port)
 	srv := &http.Server{
-		Addr:         addr,
+		Addr:         httpAddr,
 		Handler:      r,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
-	slog.Info("rookery starting", "addr", addr, "domain", cfg.Domain)
+	slog.Info("rookery starting", "http_addr", httpAddr, "domain", cfg.Domain)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	// ---- SMTP inbound listener ----
+	// TLS config is nil in Phase 1 (no cert provisioning yet). Phase 4 wires
+	// certmagic and passes a *tls.Config here.
+	smtpServer := smtp.NewServer(cfg, st.DB, st, nil)
 
-	serverErr := make(chan error, 1)
+	serverErr := make(chan error, 2)
+
 	go func() {
-		// Phase 0 serves plaintext HTTP. TLS termination via ACME (certmagic)
-		// lands in Phase 4 (§11.7 of PLAN.md); when it does, this will become
-		// srv.ListenAndServeTLS or a certmagic-managed listener.
+		// Phase 0/1 serves plaintext HTTP. TLS termination via ACME (certmagic)
+		// lands in Phase 4 (§11.7 of PLAN.md).
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			serverErr <- err
+			serverErr <- fmt.Errorf("http: %w", err)
+		}
+	}()
+
+	go func() {
+		if err := smtpServer.ListenAndServe(ctx); err != nil {
+			serverErr <- fmt.Errorf("smtp: %w", err)
 		}
 	}()
 
@@ -99,25 +128,38 @@ func runServer() int {
 	case <-ctx.Done():
 		slog.Info("shutdown signal received")
 	case err := <-serverErr:
-		slog.Error("http server error", "err", err)
-		// Fall through to graceful shutdown so any in-flight work still drains.
+		slog.Error("server error", "err", err)
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		slog.Error("graceful shutdown failed", "err", err)
+		slog.Error("graceful HTTP shutdown failed", "err", err)
 	}
 
 	slog.Info("rookery stopped")
 	return 0
 }
 
+// bootstrapPrimaryDomain inserts the primary domain row on first run if it
+// does not already exist. This is the only server-managed row that must exist
+// before any user can register. §11.8 / ADR-0008: no interactive setup wizard.
+func bootstrapPrimaryDomain(ctx context.Context, st *store.Store, cfg *config.Config) error {
+	_, err := st.DB.Exec(ctx, `
+		INSERT INTO domains (domain, is_primary, verified_at, wkd_active)
+		VALUES ($1, TRUE, now(), TRUE)
+		ON CONFLICT (domain) DO NOTHING
+	`, cfg.Domain)
+	if err != nil {
+		return fmt.Errorf("bootstrap primary domain: %w", err)
+	}
+	slog.Info("bootstrap: primary domain ready", "domain", cfg.Domain)
+	return nil
+}
+
 // runHealthcheck is invoked as `rookery-server healthcheck` from the container
 // HEALTHCHECK. It probes the locally bound HTTP listener and exits 0 on
-// success, non-zero on failure. It deliberately avoids importing the rest of
-// the server so that a misconfiguration that prevents the server from starting
-// does not also prevent the healthcheck binary from running.
+// success, non-zero on failure.
 func runHealthcheck() int {
 	port := os.Getenv("ROOKERY_HEALTHCHECK_PORT")
 	if port == "" {

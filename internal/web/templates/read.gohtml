@@ -1,0 +1,88 @@
+{{define "title"}}{{if .Message.Subject}}{{.Message.Subject}}{{else}}(no subject){{end}} — {{.InstanceName}}{{end}}
+
+{{define "content"}}
+<section class="message-view">
+  <div class="message-header">
+    <h1 class="message-subject">
+      {{- if .Message.Subject}}{{.Message.Subject}}{{else}}(no subject){{end}}
+    </h1>
+
+    <dl class="message-meta">
+      <dt>from</dt>
+      <dd>{{.Message.FromAddress}}</dd>
+
+      {{- if .Message.To}}
+      <dt>to</dt>
+      <dd>{{range $i, $a := .Message.To}}{{if $i}}, {{end}}{{$a}}{{end}}</dd>
+      {{- end}}
+
+      {{- if .Message.Cc}}
+      <dt>cc</dt>
+      <dd>{{range $i, $a := .Message.Cc}}{{if $i}}, {{end}}{{$a}}{{end}}</dd>
+      {{- end}}
+
+      <dt>date</dt>
+      <dd>
+        <time datetime="{{.Message.Date.Format "2006-01-02T15:04:05Z07:00"}}">
+          {{.Message.Date.Format "Monday, 2 January 2006, 15:04 MST"}}
+        </time>
+      </dd>
+    </dl>
+
+    <div class="security-status" id="security-status">
+      {{- if eq .Message.SecurityState "pgp_encrypted"}}
+      <span class="badge badge-encrypted" id="security-badge">
+        🔒 PGP encrypted — decrypting…
+      </span>
+      {{- else if eq .Message.SecurityState "pgp_signed_plaintext"}}
+      <span class="badge badge-signed" id="security-badge">
+        ✓ PGP signed plaintext — verifying signature…
+      </span>
+      {{- else}}
+      <span class="badge badge-plaintext" id="security-badge">
+        ⚠ this message was received in plaintext
+      </span>
+      {{- end}}
+    </div>
+  </div>
+
+  <div class="message-body" id="message-body"
+       data-message-id="{{.Message.ID}}"
+       data-security-state="{{.Message.SecurityState}}"
+       data-key-fingerprint="{{.User.PublicKeyFingerprint}}">
+    {{- if eq .Message.SecurityState "pgp_encrypted"}}
+    <p class="decrypting-notice" id="decrypting-notice" aria-live="polite">
+      decrypting…
+    </p>
+    {{- else}}
+    {{/* Plaintext or signed-plaintext: body rendered server-side is not available
+         because we store only the raw blob. The JS module fetches /raw and renders.
+         For signed-plaintext the JS also verifies the signature. */}}
+    <p class="loading-notice" id="decrypting-notice" aria-live="polite">
+      loading…
+    </p>
+    {{- end}}
+  </div>
+
+  <div class="message-actions">
+    {{- if eq .Message.Folder "trash"}}
+    <a href="/inbox?folder=trash" class="button-link">← back to trash</a>
+    <form method="post" action="/messages/{{.Message.ID}}/delete" class="inline-form">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <button type="submit" class="button-danger">delete permanently</button>
+    </form>
+    {{- else}}
+    <a href="/inbox" class="button-link">← back to inbox</a>
+    <form method="post" action="/messages/{{.Message.ID}}/trash" class="inline-form">
+      <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+      <button type="submit" class="button-danger">move to trash</button>
+    </form>
+    {{- end}}
+  </div>
+</section>
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/crypto.js" defer></script>
+<script src="/static/read.js" defer></script>
+{{end}}

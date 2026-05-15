@@ -20,7 +20,7 @@
 # BuildKit (docker buildx) automatically provides BUILDPLATFORM and
 # TARGETARCH. We default to the build host's architecture when neither is set,
 # so a plain `docker build` on amd64 or arm64 still works.
-FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.23-bookworm AS go-build
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.25-bookworm AS go-build
 
 ARG TARGETARCH
 ARG TARGETOS=linux
@@ -43,7 +43,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} \
 # Stage 2: JS build
 # --------------------------------------------------------------------------- #
 # esbuild bundles only the browser crypto module (web/crypto/).
-# partials.js is hand-written and ships as-is (web/partials/).
+# partials.js and other hand-written JS ship as-is (web/static/).
 # The CSS ships as-is (web/static/).
 #
 # Node is used *only* here, inside the multi-stage build, so developers never
@@ -52,8 +52,8 @@ FROM docker.io/library/node:22-bookworm-slim AS js-build
 
 WORKDIR /src/web/crypto
 
-# Install only esbuild — no other npm packages.
-# --ignore-scripts prevents any postinstall hooks from running. See P12.
+# Install only the declared dependencies — no transitive postinstall scripts.
+# --ignore-scripts prevents any lifecycle hooks from running. See P12.
 COPY web/crypto/package.json web/crypto/package-lock.json ./
 RUN npm ci --ignore-scripts
 
@@ -61,22 +61,35 @@ COPY web/crypto/ ./
 RUN node_modules/.bin/esbuild \
     --bundle \
     --minify \
+    --format=iife \
+    --global-name=RookeryCrypto \
     --outfile=/out/crypto.js \
     index.js
 
 # --------------------------------------------------------------------------- #
 # Stage 3: Final distroless image
 # --------------------------------------------------------------------------- #
+# Small intermediate stage to create writable directories owned by nonroot
+# (uid 65532). distroless has no shell, so we can't mkdir at runtime.
+FROM docker.io/library/busybox:stable AS dirs
+RUN mkdir -p /var/lib/rookery/messages && \
+    chown -R 65532:65532 /var/lib/rookery
+
 FROM gcr.io/distroless/static-debian12:nonroot AS final
 
 # Binary
 COPY --from=go-build /out/rookery-server /usr/local/bin/rookery-server
 
-# Static web assets
-COPY --from=js-build /out/crypto.js          /opt/rookery/web/static/crypto.js
-# Phase 0 ships the binary + crypto bundle only. The web/static, web/partials,
-# internal/web/templates, and scripts/ trees land in Phase 1 onward; their
-# COPY directives are added then.
+# Pre-created data directory owned by nonroot so the volume mount is writable.
+COPY --from=dirs /var/lib/rookery /var/lib/rookery
+
+# Hand-written static assets (no build step needed — copy the whole directory)
+COPY web/static/ /opt/rookery/web/static/
+
+# Bundled JS crypto module (produced by Stage 2). This COPY runs *after* the
+# hand-written static assets so that any accidental web/static/crypto.js
+# placeholder in the source tree cannot silently shadow the real bundle.
+COPY --from=js-build /out/crypto.js /opt/rookery/web/static/crypto.js
 
 EXPOSE 80 443 25 465 587
 

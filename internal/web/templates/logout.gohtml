@@ -1,0 +1,37 @@
+{{define "title"}}logging out — {{.InstanceName}}{{end}}
+
+{{define "content"}}
+<section class="form-page">
+  <p>logging out…</p>
+</section>
+{{end}}
+
+{{define "scripts"}}
+<script>
+document.addEventListener('DOMContentLoaded', async function () {
+  // Clear localStorage key material directly — do not depend on crypto.js
+  // loading successfully, as a script load failure would otherwise leave key
+  // material behind.
+  try {
+    localStorage.removeItem('rookery_swk');
+    localStorage.removeItem('rookery_swb');
+    localStorage.removeItem('rookery_sfp');
+  } catch (_) {}
+
+  const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
+  try {
+    await fetch('/api/v1/auth/logout', {
+      method: 'POST',
+      headers: { 'X-CSRF-Token': csrf },
+      credentials: 'same-origin',
+    });
+  } finally {
+    {{- if .Next}}
+    window.location.replace('/login?next={{.Next}}');
+    {{- else}}
+    window.location.replace('/login');
+    {{- end}}
+  }
+});
+</script>
+{{end}}
