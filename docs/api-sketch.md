@@ -191,8 +191,9 @@ place.
 
 ### 4. Invites
 
-Invite tokens control registration. Created by the operator via `./scripts/new-invite.sh`.
-In Phase 7+ user-issued invites may be added. See ADR-0008.
+Invite tokens control registration. Created by the operator via
+`rookery invite create` (ADR-0033). In Phase 7+ user-issued invites may be
+added. See ADR-0008.
 
 | Field | Type | Description |
 |---|---|---|

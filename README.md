@@ -15,7 +15,7 @@ called a *relay rookery* (see [PLAN.md](PLAN.md) §11.10).
 
 - A mail server (inbound + outbound SMTP) that speaks standard email to the rest of the world.
 - A server-rendered web UI where PGP encryption and decryption happen in the browser.
-- One binary, one config file, one rebuild command. The traditional self-hosted mail stack — Postfix, Dovecot, Roundcube, rspamd, certbot, a PGP plugin, the WKD/MTA-STS/DKIM glue — collapses into a single Go process. You do not need to learn `main.cf`, Dovecot's config syntax, or `opendkim.conf`, because they are not in the box. Upgrading is `git pull && docker compose up -d --build` — the Containerfile is the build, so the source tree you pull *is* the upgrade. First-run on a fresh VPS takes under 30 minutes of active configuration time, but that is a side effect of the architecture, not the point of it.
+- One binary, one config file, one rebuild command. The traditional self-hosted mail stack — Postfix, Dovecot, Roundcube, rspamd, certbot, a PGP plugin, the WKD/MTA-STS/DKIM glue — collapses into a single Go process. You do not need to learn `main.cf`, Dovecot's config syntax, or `opendkim.conf`, because they are not in the box. Upgrading is `rookery update && sudo systemctl restart rookery` — the Containerfile is the build, so the source tree you pull *is* the upgrade. First-run on a fresh VPS takes under 30 minutes of active configuration time, but that is a side effect of the architecture, not the point of it.
 - Invite-only by default; pseudonymous by design; no name, no phone, no recovery email required.
 
 **The server never holds your PGP private key.** It is generated in the browser
@@ -77,81 +77,127 @@ Docker is the only supported runtime; rootless Podman was evaluated and rejected
 (privileged-port binding, image-format and short-name quirks). See the header of
 `compose.yaml` for the full rationale.
 
+Everything goes through the `rookery` dispatcher script at the repo root.
+It wraps `docker compose`, generates secrets and config files, installs the
+systemd unit, and exposes every operator action as a subcommand. Run
+`./rookery help` for the full list.
+
 ```sh
-# 1. Clone the repo onto the VPS.
-git clone <repo-url> rookery
-cd rookery
+# 1. Clone the repo into /opt/rookery on the VPS.
+#    The systemd unit hard-codes this path (WorkingDirectory=/opt/rookery),
+#    so cloning elsewhere means editing the unit or running rookery from a
+#    non-standard location. Take the standard path.
+sudo mkdir -p /opt/rookery
+sudo chown "$USER" /opt/rookery
+git clone <repo-url> /opt/rookery
+cd /opt/rookery
 
-# 2. Edit the config file.
-cp rookery.toml.example rookery.toml
-$EDITOR rookery.toml          # Set domain, contact_email, instance_name.
+# 2. Bootstrap. User-local: writes .env (random secrets), rookery.toml
+#    (from the example, with the flags pre-filled), Caddyfile, and a staged
+#    ./rookery.service. No sudo. Idempotent — safe to re-run.
+./rookery init \
+    --domain rookery.example \
+    --email admin@rookery.example \
+    --name "My Rookery"
+#    Or with no flags to be prompted interactively.
 
-# 3. Build and start the stack. Secrets are generated automatically into .env.
-#    --build ensures the image reflects the current source tree (the same
-#    command is used to upgrade after `git pull`).
-docker compose up -d --build
-
-# 4. Back up .env — especially ROOKERY_MASTER_KEY.
+# 3. Back up .env — especially ROOKERY_MASTER_KEY.
 #    Losing it bricks the instance's DKIM keys, sessions, and ACME credentials.
+#    rookery init prints a one-time reminder.
 
-# 5. Print the DNS records you need to publish.
-#    (The server also logs these at startup — check: docker compose logs rookery)
-docker compose logs rookery | grep DNS
+# 4. Install the systemd unit. Copies ./rookery.service to
+#    /etc/systemd/system/ and runs `systemctl daemon-reload`. Run once per
+#    host. Does NOT enable or start.
+sudo ./rookery install
 
-# 6. Publish the DNS records at your registrar and wait for propagation.
+# 5. Enable and start the service. Standard systemd from here.
+sudo systemctl enable --now rookery
 
-# 7. Create the first invite (for yourself).
-#    Operator scripts run via the postgres container (which has psql + sh).
-#    ROOKERY_DOMAIN is set automatically from rookery.toml by secrets-init.
-docker compose exec -T postgres sh /scripts/new-invite.sh
+# 6. Print the DNS records you need to publish.
+#    (The server logs them at startup.)
+./rookery logs | grep DNS
 
-# 8. Visit the printed URL in your browser and complete the signup flow.
+# 7. Publish the DNS records at your registrar and wait for propagation.
+
+# 8. Create the first invite (for yourself).
+./rookery invite create
+
+# 9. Visit the printed URL in your browser and complete the signup flow.
+```
+
+Upgrading later:
+
+```sh
+cd /opt/rookery
+./rookery update                # git pull --ff-only && docker compose build
+sudo systemctl restart rookery
 ```
 
 ---
 
 ## Running as a system service
 
-To start rookery automatically on boot, install the provided systemd unit:
+If you ran `./rookery init` and `sudo ./rookery install` per the quickstart,
+the systemd unit is already in place and you can `systemctl enable --now
+rookery`. The dispatcher generates the unit from a template, fills `User=`
+from `--user` (default: `whoami`), and the `install` subcommand handles the
+single sudo step (copy to `/etc/systemd/system/`, run `daemon-reload`).
+
+If you skipped the quickstart and want to wire systemd up manually:
 
 ```sh
-# Copy the template, set User= to the unix user that owns /opt/rookery.
-sudo cp docs/ops/rookery.service /etc/systemd/system/rookery.service
-sudo $EDITOR /etc/systemd/system/rookery.service
-
-sudo systemctl daemon-reload
+./rookery init           # generates ./rookery.service from your config
+sudo ./rookery install   # copies it to /etc/systemd/system/ + daemon-reload
 sudo systemctl enable --now rookery
 ```
 
-The unit calls `run.sh --profile prod up --build -d`, so it rebuilds the image on
-every start. Upgrading is:
+The unit's `ExecStart` is `rookery start --prod`, so it brings up Caddy on
+80/443, rookery on 8080 behind it, and SMTP on 25.
 
-```sh
-git -C /opt/rookery pull
-sudo systemctl restart rookery
-```
-
-Logs: `sudo journalctl -u rookery -f` (systemd) or `docker compose logs -f rookery`
-(container stdout).
+Logs: `sudo journalctl -u rookery -f` (systemd) or `./rookery logs` (container
+stdout).
 
 ---
 
 ## Local development
 
-Everything runs through `compose.yaml`. No Makefile, no host-side toolchain required
-beyond Docker (with the Compose v2 plugin).
+Everything runs through the `rookery` dispatcher. No Makefile, no host-side
+toolchain required beyond Docker (with the Compose v2 plugin).
 
 ```sh
-# Start the stack (rookery + postgres + mailpit SMTP sink).
-# Secrets are generated automatically into .env on first run.
-# Mailpit web UI at http://localhost:8025.
-docker compose --profile dev up --build
+# First run only: bootstrap secrets and rookery.toml.
+# Accept the example defaults or pass --domain / --email / --name to skip
+# the prompts. Generates ./rookery.service and Caddyfile too — both inert in
+# dev, both gitignored.
+./rookery init
+
+# Start the dev stack (rookery + postgres + mailpit SMTP sink).
+# Web UI at http://localhost:8080. Mailpit UI at http://localhost:8025.
+./rookery start
+# (./rookery stop / ./rookery restart as needed.)
+
+# Inject a message into the dev stack's inbound SMTP.
+./rookery send-mail alice@localhost
+
+# Generate an invite URL.
+./rookery invite create
 
 # Run the Go test suite inside a container.
-docker compose --profile test run --rm test
+./rookery test
 
 # Run go vet.
-docker compose --profile lint run --rm lint
+./rookery vet
+
+# Drop into a psql shell.
+./rookery psql
+
+# Pull upstream changes and rebuild (does not restart).
+./rookery update
+./rookery restart
+
+# Escape hatches if you need raw docker compose:
+./rookery exec rspamd rspamc stat
+./rookery compose ps
 ```
 
 The JS crypto module is bundled inside the container build.
@@ -176,7 +222,6 @@ internal/
   addresses/            Address routing, aliases, plus-addressing
   lifecycle/            Account deletion, backup, export/import
   config/               Config file + env var loading
-scripts/                Operator shell scripts (mirrored into container)
 web/
   static/               Hand-written CSS, partials.js, vendored crypto assets
   partials/             Source for partials.js (hand-written, no build step)
@@ -186,7 +231,8 @@ docs/
   api/                  HTTP API documentation
   ops/                  Deployment, DNS, TLS, operator runbook
     rookery.service     systemd unit template
-compose.yaml            Dev server, test runner, linter, mailpit — single entry point
+rookery                 Operator + developer dispatcher (single POSIX shell script)
+compose.yaml            Service definitions consumed by the dispatcher
 rookery.toml.example    Annotated config file schema
 Containerfile           The build (multi-stage; also a valid Dockerfile)
 PLAN.md                 Full design document

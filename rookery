@@ -1,0 +1,689 @@
+#!/bin/sh
+# rookery — operator and developer dispatcher for a rookery instance.
+#
+# Single entry point for every instance operation: bootstrap, start, stop,
+# restart, update, invite generation, test injection, and more.
+# Wraps docker compose; operators never need to invoke docker compose directly.
+#
+# Usage: ./rookery <subcommand> [flags] [args]
+#        ./rookery help <subcommand>
+#
+# See docs/adr/ADR-0033.md for rationale and the full subcommand surface.
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOKERY_SMTP="${ROOKERY_SMTP:-smtp://localhost:25}"
+ROOKERY_HTTP="${ROOKERY_HTTP:-http://localhost:8080}"
+# Global used by the send-mail encrypted path for temp-dir cleanup.
+_SEND_MAIL_TMPDIR=""
+
+# ---------------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------------
+
+die()  { printf 'rookery: error: %s\n' "$*" >&2; exit 1; }
+info() { printf 'rookery: %s\n'        "$*" >&2; }
+
+# Run docker compose against the project compose file, regardless of CWD.
+dc() { docker compose -f "$SCRIPT_DIR/compose.yaml" "$@"; }
+
+# Fail with a one-line hint if init has not been run.
+need_init() {
+    if [ ! -f "$SCRIPT_DIR/.env" ] || [ ! -f "$SCRIPT_DIR/rookery.toml" ]; then
+        die ".env or rookery.toml missing — run './rookery init' first"
+    fi
+}
+
+# Read a string value from rookery.toml on the host.
+toml_get() {
+    grep -E "^[[:space:]]*${1}[[:space:]]*=" "$SCRIPT_DIR/rookery.toml" \
+        | head -1 \
+        | sed 's/.*=[[:space:]]*"\([^"]*\)".*/\1/'
+}
+
+# Read a variable from .env; prints the value (empty if missing).
+env_get() {
+    grep -E "^${1}=" "$SCRIPT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-
+}
+
+# Write a variable to .env if it is missing or empty.
+# Usage: env_gen VAR [value]   — omit value to auto-generate with openssl.
+env_gen() {
+    local var="$1" val="${2:-}"
+    local cur
+    cur=$(env_get "$var")
+    if [ -z "$cur" ]; then
+        grep -v "^${var}=" "$SCRIPT_DIR/.env" > "$SCRIPT_DIR/.env.tmp" 2>/dev/null \
+            && mv "$SCRIPT_DIR/.env.tmp" "$SCRIPT_DIR/.env" || true
+        [ -z "$val" ] && val=$(openssl rand -hex 32)
+        printf '%s=%s\n' "$var" "$val" >> "$SCRIPT_DIR/.env"
+        info "generated $var"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+cmd_init() {
+    local opt_domain="" opt_email="" opt_name="" opt_user="" opt_no_prompt=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --domain)    shift; opt_domain="${1:-}";    shift ;;
+            --email)     shift; opt_email="${1:-}";     shift ;;
+            --name)      shift; opt_name="${1:-}";      shift ;;
+            --user)      shift; opt_user="${1:-}";      shift ;;
+            --no-prompt) opt_no_prompt=1;               shift ;;
+            --) shift; break ;;
+            -*) die "unknown flag: $1" ;;
+            *)  break ;;
+        esac
+    done
+
+    command -v openssl >/dev/null 2>&1 \
+        || die "openssl is required for secret generation — install it and retry"
+
+    # ---- rookery.toml -------------------------------------------------------
+    if [ ! -f "$SCRIPT_DIR/rookery.toml" ]; then
+        [ -f "$SCRIPT_DIR/rookery.toml.example" ] \
+            || die "rookery.toml.example not found — is this a complete checkout?"
+        cp "$SCRIPT_DIR/rookery.toml.example" "$SCRIPT_DIR/rookery.toml"
+        info "created rookery.toml from example"
+
+        if [ -z "$opt_domain" ] && [ "$opt_no_prompt" -eq 0 ]; then
+            printf 'rookery: primary domain (e.g. mail.example.com): ' >&2
+            read -r opt_domain
+        fi
+        if [ -z "$opt_email" ] && [ "$opt_no_prompt" -eq 0 ]; then
+            printf "rookery: Let's Encrypt contact email (Enter to skip): " >&2
+            read -r opt_email
+        fi
+        if [ -z "$opt_name" ] && [ "$opt_no_prompt" -eq 0 ]; then
+            printf 'rookery: instance display name (Enter to use domain): ' >&2
+            read -r opt_name
+        fi
+
+        if [ -n "$opt_domain" ]; then
+            sed -i "s|^domain = \"rookery.example\".*|domain = \"${opt_domain}\"|" \
+                "$SCRIPT_DIR/rookery.toml"
+        fi
+        if [ -n "$opt_email" ]; then
+            sed -i "s|^contact_email = \"admin@rookery.example\".*|contact_email = \"${opt_email}\"|" \
+                "$SCRIPT_DIR/rookery.toml"
+        fi
+        if [ -n "$opt_name" ]; then
+            sed -i "s|^instance_name = \"My Rookery\".*|instance_name = \"${opt_name}\"|" \
+                "$SCRIPT_DIR/rookery.toml"
+        fi
+    else
+        info "rookery.toml already exists — skipping"
+    fi
+
+    # ---- .env (secrets) -----------------------------------------------------
+    if [ ! -f "$SCRIPT_DIR/.env" ]; then
+        touch "$SCRIPT_DIR/.env"
+    fi
+    # Both names carry the same value: ROOKERY_DB_PASSWORD for the Go server,
+    # POSTGRES_PASSWORD for the postgres container image.
+    local db_pass
+    db_pass=$(env_get ROOKERY_DB_PASSWORD)
+    [ -z "$db_pass" ] && db_pass=$(openssl rand -hex 32)
+    env_gen ROOKERY_DB_PASSWORD "$db_pass"
+    env_gen POSTGRES_PASSWORD   "$db_pass"
+    env_gen ROOKERY_MASTER_KEY
+    env_gen ROOKERY_SESSION_KEY
+
+    # ---- Caddyfile ----------------------------------------------------------
+    if [ ! -f "$SCRIPT_DIR/Caddyfile" ]; then
+        local domain email
+        domain=$(toml_get domain)
+        email=$(toml_get contact_email)
+
+        [ -z "$domain" ] && domain="rookery.example"
+        [ "$domain" = "rookery.example" ] \
+            && info "warning: domain is still 'rookery.example' — edit rookery.toml before going live"
+
+        {
+            if [ -n "$email" ] && [ "$email" != "admin@rookery.example" ]; then
+                printf '{\n\temail %s\n}\n\n' "$email"
+            fi
+            printf '%s {\n\treverse_proxy rookery:8080\n}\n\n' "$domain"
+            printf 'openpgpkey.%s {\n\treverse_proxy rookery:8080\n}\n' "$domain"
+        } > "$SCRIPT_DIR/Caddyfile"
+        info "generated Caddyfile for domain '${domain}'"
+    else
+        info "Caddyfile already exists — skipping"
+    fi
+
+    # ---- ./rookery.service --------------------------------------------------
+    if [ ! -f "$SCRIPT_DIR/rookery.service" ]; then
+        local tmpl="$SCRIPT_DIR/docs/ops/rookery.service"
+        [ -f "$tmpl" ] || die "docs/ops/rookery.service template not found"
+        local svc_user="${opt_user:-$(whoami)}"
+        sed "s/YOUR_UNIX_USER/${svc_user}/" "$tmpl" > "$SCRIPT_DIR/rookery.service"
+        info "staged rookery.service with User=${svc_user}"
+    else
+        info "rookery.service already exists — skipping"
+    fi
+
+    printf '\n' >&2
+    info "init complete."
+    info ""
+    info "  IMPORTANT: back up .env — especially ROOKERY_MASTER_KEY."
+    info "  Losing it bricks DKIM keys, sessions, and ACME credentials."
+    info ""
+    info "Next steps:"
+    info "  sudo ./rookery install          # copy systemd unit, daemon-reload"
+    info "  sudo systemctl enable --now rookery"
+    info "  ./rookery invite create         # generate the first invite URL"
+}
+
+# ---------------------------------------------------------------------------
+# install
+# ---------------------------------------------------------------------------
+cmd_install() {
+    [ "$(id -u)" -eq 0 ] \
+        || die "rookery install must be run as root (use: sudo ./rookery install)"
+    [ -f "$SCRIPT_DIR/rookery.service" ] \
+        || die "rookery.service not found — run './rookery init' first"
+    install -m644 "$SCRIPT_DIR/rookery.service" /etc/systemd/system/rookery.service
+    systemctl daemon-reload
+    info "systemd unit installed at /etc/systemd/system/rookery.service"
+    info "Run: sudo systemctl enable --now rookery"
+}
+
+# ---------------------------------------------------------------------------
+# start [--prod] [extra docker compose up flags]
+# ---------------------------------------------------------------------------
+cmd_start() {
+    local prod=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prod) prod=1; shift ;;
+            *)      break ;;
+        esac
+    done
+    need_init
+    if [ "$prod" -eq 1 ]; then
+        dc --profile prod up --build "$@"
+    else
+        dc --profile dev up --build "$@"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# stop
+# ---------------------------------------------------------------------------
+cmd_stop() {
+    need_init
+    dc down "$@"
+}
+
+# ---------------------------------------------------------------------------
+# restart [--prod] [extra flags]
+# ---------------------------------------------------------------------------
+cmd_restart() {
+    need_init
+    cmd_stop
+    cmd_start "$@"
+}
+
+# ---------------------------------------------------------------------------
+# update
+# ---------------------------------------------------------------------------
+cmd_update() {
+    need_init
+    git -C "$SCRIPT_DIR" fetch \
+        || die "git fetch failed"
+    git -C "$SCRIPT_DIR" pull --ff-only \
+        || die "git pull --ff-only failed — branch has diverged or has local commits; resolve manually"
+    dc build
+    info "update complete — restart to apply: sudo systemctl restart rookery"
+}
+
+# ---------------------------------------------------------------------------
+# logs [service]
+# ---------------------------------------------------------------------------
+cmd_logs() {
+    dc logs -f "${1:-rookery}"
+}
+
+# ---------------------------------------------------------------------------
+# ps
+# ---------------------------------------------------------------------------
+cmd_ps() {
+    dc ps "$@"
+}
+
+# ---------------------------------------------------------------------------
+# invite create [validity_days]
+# ---------------------------------------------------------------------------
+cmd_invite_create() {
+    need_init
+
+    local validity="${1:-}"
+    case "$validity" in
+        "")       ;;
+        *[!0-9]*) die "validity_days must be a positive integer (got '${validity}')" ;;
+    esac
+
+    local domain
+    domain=$(toml_get domain)
+    [ -n "$domain" ] || die "could not read domain from rookery.toml"
+
+    local token
+    token=$(openssl rand -hex 32)
+    [ -n "$token" ] || die "failed to generate invite token"
+
+    local expires_sql
+    if [ -n "$validity" ]; then
+        expires_sql="now() + interval '${validity} days'"
+    else
+        expires_sql="NULL"
+    fi
+
+    local db_pass
+    db_pass=$(env_get POSTGRES_PASSWORD)
+    [ -n "$db_pass" ] || die "POSTGRES_PASSWORD not found in .env"
+
+    dc exec -T \
+        -e PGPASSWORD="$db_pass" \
+        postgres \
+        psql -h localhost -U rookery -d rookery -q -t \
+        -c "INSERT INTO invites (token, expires_at) VALUES ('${token}', ${expires_sql});" \
+        >/dev/null
+
+    local scheme
+    case "$domain" in
+        localhost|127.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*|::1)
+            scheme="http" ;;
+        *)
+            scheme="https" ;;
+    esac
+
+    printf '%s://%s/invite/%s\n' "$scheme" "$domain" "$token"
+}
+
+cmd_invite() {
+    case "${1:-}" in
+        create) shift; cmd_invite_create "$@" ;;
+        "")     die "usage: rookery invite create [validity_days]" ;;
+        *)      die "unknown invite subcommand '${1}' — try: rookery invite create" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# send-mail [flags] <to> [from] [subject] [body]
+# ---------------------------------------------------------------------------
+
+# Wrapper called by the encrypted path; uses the temp homedir set in
+# _SEND_MAIL_TMPDIR so we never touch the operator's own keyring.
+_send_mail_gpg() {
+    gpg --homedir "$_SEND_MAIL_TMPDIR" --batch --yes --quiet "$@"
+}
+
+_send_mail_cleanup() {
+    [ -n "$_SEND_MAIL_TMPDIR" ] && rm -rf -- "$_SEND_MAIL_TMPDIR"
+    _SEND_MAIL_TMPDIR=""
+}
+
+cmd_send_mail() {
+    local encrypted=0 pubkey_file="" fetch_key=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --encrypted) encrypted=1; shift ;;
+            --pubkey)
+                shift
+                pubkey_file="${1:-}"
+                [ -n "$pubkey_file" ] || die "--pubkey requires a file path argument"
+                shift ;;
+            --fetch-key) fetch_key=1; shift ;;
+            --) shift; break ;;
+            -*) die "unknown flag: $1" ;;
+            *)  break ;;
+        esac
+    done
+
+    local to="${1:-}"
+    local from="${2:-sender@example.com}"
+    local subject="${3:-test message $(date '+%H:%M:%S')}"
+    local body="${4:-This is a test message injected by rookery send-mail at $(date).}"
+
+    [ -n "$to" ] || {
+        printf 'usage: rookery send-mail [--encrypted --pubkey <file>|--fetch-key] <to> [from] [subject] [body]\n' >&2
+        exit 1
+    }
+
+    if [ "$encrypted" -eq 1 ] && [ -z "$pubkey_file" ] && [ "$fetch_key" -eq 0 ]; then
+        die "--encrypted requires either --pubkey <file> or --fetch-key"
+    fi
+    if [ -n "$pubkey_file" ] && [ "$fetch_key" -eq 1 ]; then
+        die "--pubkey and --fetch-key are mutually exclusive"
+    fi
+    if { [ -n "$pubkey_file" ] || [ "$fetch_key" -eq 1 ]; } && [ "$encrypted" -eq 0 ]; then
+        die "--pubkey / --fetch-key require --encrypted"
+    fi
+
+    # ---- Plaintext path -----------------------------------------------------
+    if [ "$encrypted" -eq 0 ]; then
+        printf '%s' "From: ${from}
+To: ${to}
+Subject: ${subject}
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+${body}
+" | curl -s \
+            --url "${ROOKERY_SMTP}" \
+            --mail-from "${from}" \
+            --mail-rcpt "${to}" \
+            --upload-file -
+        printf 'sent (plaintext): %s\n  from: %s\n  to:   %s\n' "$subject" "$from" "$to"
+        return 0
+    fi
+
+    # ---- Encrypted path — requires gpg --------------------------------------
+    command -v gpg >/dev/null 2>&1 \
+        || die "gpg is required for --encrypted (install gnupg2)"
+
+    _SEND_MAIL_TMPDIR="$(mktemp -d)"
+    trap '_send_mail_cleanup' EXIT INT TERM
+
+    if [ "$fetch_key" -eq 1 ]; then
+        command -v python3 >/dev/null 2>&1 \
+            || die "python3 is required for --fetch-key (WKD hash computation)"
+
+        local local_part domain_part wkd_hash http_status
+        local_part="${to%%@*}"
+        domain_part="${to##*@}"
+
+        wkd_hash=$(python3 - "$local_part" <<'PYEOF'
+import sys, hashlib
+ALPHA = "ybndrfg8ejkmcpqxot1uwisza345h769"
+local = sys.argv[1].lower().encode()
+digest = hashlib.sha1(local).digest()
+bits = int.from_bytes(digest, 'big')
+chars = []
+for _ in range(32):
+    chars.append(ALPHA[bits & 0x1f])
+    bits >>= 5
+print(''.join(reversed(chars)))
+PYEOF
+)
+        local wkd_url="${ROOKERY_HTTP}/.well-known/openpgpkey/${domain_part}/hu/${wkd_hash}"
+        pubkey_file="${_SEND_MAIL_TMPDIR}/recipient.pgp"
+        info "fetching public key via WKD: ${wkd_url}"
+        http_status=$(curl -s -o "$pubkey_file" -w "%{http_code}" "$wkd_url")
+        [ "$http_status" = "200" ] \
+            || die "WKD key fetch returned HTTP ${http_status} — ${wkd_url}"
+        _send_mail_gpg --import "$pubkey_file" 2>/dev/null
+    else
+        [ -f "$pubkey_file" ] || die "public key file not found: ${pubkey_file}"
+        _send_mail_gpg --import "$pubkey_file" 2>/dev/null
+    fi
+
+    local fingerprint
+    fingerprint=$(_send_mail_gpg --with-colons --list-keys 2>/dev/null \
+        | awk -F: '/^fpr/{print $10; exit}')
+    [ -n "$fingerprint" ] || die "could not read fingerprint from the imported key"
+    printf '%s:6:\n' "$fingerprint" | _send_mail_gpg --import-ownertrust 2>/dev/null
+
+    local body_file="${_SEND_MAIL_TMPDIR}/body.txt"
+    local cipher_file="${_SEND_MAIL_TMPDIR}/body.pgp"
+    printf '%s\n' "$body" > "$body_file"
+    _send_mail_gpg --armor \
+        --recipient "$fingerprint" \
+        --output "$cipher_file" \
+        --encrypt "$body_file" 2>/dev/null
+
+    local encrypted_body
+    encrypted_body=$(cat "$cipher_file")
+
+    local boundary="rookery_pgp_$(date '+%s')_boundary"
+    local date_hdr message_id
+    date_hdr="$(date -R 2>/dev/null || date '+%a, %d %b %Y %H:%M:%S %z')"
+    message_id="rookery-$(date '+%s')@rookery.test"
+
+    printf '%s' "From: ${from}
+To: ${to}
+Subject: ${subject}
+Date: ${date_hdr}
+Message-ID: <${message_id}>
+MIME-Version: 1.0
+Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"${boundary}\"
+
+--${boundary}
+Content-Type: application/pgp-encrypted
+
+Version: 1
+
+--${boundary}
+Content-Type: application/octet-stream; name=\"encrypted.asc\"
+Content-Disposition: inline; filename=\"encrypted.asc\"
+
+${encrypted_body}
+
+--${boundary}--
+" | curl -s \
+        --url "${ROOKERY_SMTP}" \
+        --mail-from "${from}" \
+        --mail-rcpt "${to}" \
+        --upload-file -
+
+    printf 'sent (pgp-encrypted): %s\n  from: %s\n  to:   %s\n  key:  %s\n' \
+        "$subject" "$from" "$to" "$fingerprint"
+
+    _send_mail_cleanup
+    trap - EXIT INT TERM
+}
+
+# ---------------------------------------------------------------------------
+# psql
+# ---------------------------------------------------------------------------
+cmd_psql() {
+    need_init
+    local db_pass
+    db_pass=$(env_get POSTGRES_PASSWORD)
+    dc exec -e PGPASSWORD="$db_pass" postgres psql -h localhost -U rookery -d rookery
+}
+
+# ---------------------------------------------------------------------------
+# test
+# ---------------------------------------------------------------------------
+cmd_test() {
+    need_init
+    dc --profile test run --rm test
+}
+
+# ---------------------------------------------------------------------------
+# vet
+# ---------------------------------------------------------------------------
+cmd_vet() {
+    dc --profile lint run --rm lint
+}
+
+# ---------------------------------------------------------------------------
+# exec <service> [cmd...]
+# ---------------------------------------------------------------------------
+cmd_exec() {
+    [ $# -ge 1 ] || die "usage: rookery exec <service> [cmd...]"
+    dc exec "$@"
+}
+
+# ---------------------------------------------------------------------------
+# compose <args...>
+# ---------------------------------------------------------------------------
+cmd_compose() {
+    docker compose -f "$SCRIPT_DIR/compose.yaml" "$@"
+}
+
+# ---------------------------------------------------------------------------
+# help [subcommand]
+# ---------------------------------------------------------------------------
+cmd_help() {
+    case "${1:-}" in
+        init) cat >&2 <<'EOF'
+rookery init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt]
+
+  Bootstrap a checkout. User-local; never needs sudo. Idempotent — safe
+  to re-run after a git pull. Never overwrites existing files.
+
+  Creates (if absent):
+    rookery.toml    from example; flags or prompts fill domain/email/name
+    .env            random secrets: ROOKERY_DB_PASSWORD, POSTGRES_PASSWORD,
+                    ROOKERY_MASTER_KEY, ROOKERY_SESSION_KEY
+    Caddyfile       generated from rookery.toml (inert in dev)
+    rookery.service staged systemd unit with User= filled in (inert in dev)
+
+  Flags:
+    --domain X      Primary mail domain
+    --email Y       Let's Encrypt contact email
+    --name N        Instance display name
+    --user U        Unix user for the systemd unit (default: whoami)
+    --no-prompt     Skip interactive prompts; use flag values or defaults
+
+  IMPORTANT: back up .env after init. Losing ROOKERY_MASTER_KEY bricks
+  the instance's DKIM keys, sessions, and ACME credentials.
+EOF
+            ;;
+        install) cat >&2 <<'EOF'
+sudo rookery install
+
+  Promote the staged ./rookery.service into a systemd unit:
+    install -m644 ./rookery.service /etc/systemd/system/rookery.service
+    systemctl daemon-reload
+
+  Must be run as root. Does NOT enable or start the unit — that is the
+  operator's deliberate next step:
+    sudo systemctl enable --now rookery
+EOF
+            ;;
+        start) cat >&2 <<'EOF'
+rookery start [--prod] [docker compose up flags]
+
+  Bring the stack up. Errors if rookery init has not been run.
+
+  Without --prod (dev):  rookery + postgres + mailpit on :8025. Web UI at
+                         http://localhost:8080. No Caddy, no TLS.
+  With --prod:           rookery + postgres + caddy (TLS on 80/443).
+                         The systemd unit always passes --prod.
+
+  Extra flags are forwarded to docker compose up.
+  Example: ./rookery start --prod -d    (detached; used by the systemd unit)
+EOF
+            ;;
+        stop)
+            printf 'rookery stop\n\n  Stop and remove running containers (docker compose down).\n' >&2 ;;
+        restart)
+            printf 'rookery restart [--prod]\n\n  Stop then start. Same --prod semantics as rookery start.\n' >&2 ;;
+        update) cat >&2 <<'EOF'
+rookery update
+
+  git fetch && git pull --ff-only && docker compose build.
+  Fails loudly on a divergent branch. Does NOT restart.
+  After updating: sudo systemctl restart rookery  (or ./rookery restart)
+EOF
+            ;;
+        logs)
+            printf 'rookery logs [service]\n\n  Tail logs (default: rookery). Service names: rookery, postgres, mailpit, caddy.\n' >&2 ;;
+        ps)
+            printf 'rookery ps\n\n  Show running services (docker compose ps).\n' >&2 ;;
+        invite) cat >&2 <<'EOF'
+rookery invite create [validity_days]
+
+  Generate a new invite URL and print it to stdout.
+
+  validity_days   Optional. Days before the invite expires.
+                  Omit for a non-expiring invite.
+
+  Examples:
+    ./rookery invite create        # no expiry
+    ./rookery invite create 7      # expires in 7 days
+EOF
+            ;;
+        send-mail) cat >&2 <<'EOF'
+rookery send-mail [flags] <to> [from] [subject] [body]
+
+  Inject a message into the dev stack's inbound SMTP (port 25).
+
+  Flags:  --encrypted  --pubkey <file>  --fetch-key
+
+  Examples:
+    ./rookery send-mail alice@localhost
+    ./rookery send-mail --encrypted --fetch-key alice@localhost
+    ./rookery send-mail --encrypted --pubkey /tmp/alice.asc alice@localhost
+
+  Env: ROOKERY_SMTP (default smtp://localhost:25)  ROOKERY_HTTP (default http://localhost:8080)
+  Requires: curl. Encrypted mode additionally requires: gpg, python3.
+EOF
+            ;;
+        psql)
+            printf 'rookery psql\n\n  Drop into an interactive psql shell inside the postgres container.\n' >&2 ;;
+        test)
+            printf 'rookery test\n\n  Run the Go test suite (docker compose --profile test run --rm test).\n' >&2 ;;
+        vet)
+            printf 'rookery vet\n\n  Run go vet (docker compose --profile lint run --rm lint).\n' >&2 ;;
+        exec)
+            printf 'rookery exec <service> [cmd...]\n\n  Escape hatch: docker compose exec against any service.\n' >&2 ;;
+        compose)
+            printf 'rookery compose <args...>\n\n  Escape hatch: arbitrary docker compose invocation.\n' >&2 ;;
+        ""|help) cat >&2 <<'EOF'
+rookery — operator and developer dispatcher for a rookery instance
+
+Usage: ./rookery <subcommand> [flags] [args]
+       ./rookery help <subcommand>
+
+Bootstrap (run once per checkout / host):
+  init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt]
+  sudo install
+
+Stack management:
+  start [--prod]         Bring the stack up (dev by default, --prod for TLS)
+  stop                   Stop and remove containers
+  restart [--prod]       stop then start
+  update                 git pull --ff-only && docker compose build (no restart)
+  logs [service]         Tail logs (default: rookery)
+  ps                     Show running services
+
+Operations:
+  invite create [days]                  Generate an invite URL (stdout)
+  send-mail [flags] <to> [from] [...]   Inject a message into inbound SMTP
+  psql                                  psql shell in the postgres container
+  test                                  Run the Go test suite
+  vet                                   Run go vet
+
+Escape hatches:
+  exec <service> [cmd...]   docker compose exec
+  compose <args...>         raw docker compose
+  help [subcommand]         this message, or per-subcommand usage
+EOF
+            ;;
+        *) die "unknown subcommand '${1}' — run './rookery help' for the list" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+case "${1:-}" in
+    init)      shift; cmd_init      "$@" ;;
+    install)   shift; cmd_install   "$@" ;;
+    start)     shift; cmd_start     "$@" ;;
+    stop)      shift; cmd_stop      "$@" ;;
+    restart)   shift; cmd_restart   "$@" ;;
+    update)    shift; cmd_update       ;;
+    logs)      shift; cmd_logs      "$@" ;;
+    ps)        shift; cmd_ps        "$@" ;;
+    invite)    shift; cmd_invite    "$@" ;;
+    send-mail) shift; cmd_send_mail "$@" ;;
+    psql)      shift; cmd_psql         ;;
+    test)      shift; cmd_test         ;;
+    vet)       shift; cmd_vet          ;;
+    exec)      shift; cmd_exec      "$@" ;;
+    compose)   shift; cmd_compose   "$@" ;;
+    help)      shift; cmd_help      "$@" ;;
+    "")               cmd_help;  exit 1 ;;
+    *)         die "unknown subcommand '${1}' — run './rookery help' for the list" ;;
+esac

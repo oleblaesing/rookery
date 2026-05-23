@@ -101,8 +101,8 @@ of staying competent at seven moving parts (`main.cf`, Dovecot config,
 nginx vhosts, opendkim, certbot, rspamd Lua, an IMAP-aware PGP plugin),
 each with its own config language, upgrade cycle, and CVE feed. `rookery`
 collapses that to one Go binary plus Postgres, one TOML config file, and
-one rebuild command (`git pull && docker compose up -d --build`; the
-Containerfile is the build, no registry round-trip). DKIM, ACME, WKD,
+one rebuild command (`rookery update && sudo systemctl restart rookery`;
+the Containerfile is the build, no registry round-trip). DKIM, ACME, WKD,
 MTA-STS, DMARC reporting, Autocrypt and PGP/MIME live inside the binary as
 features, not as separate packages. The operator's mental model is the
 size of one program. First-run in under 30 minutes is a consequence of

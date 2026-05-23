@@ -1,3 +1,9 @@
+# Template consumed by `rookery init`, which writes the rendered unit to
+# ./rookery.service in the working directory with User= filled in from
+# --user / `whoami`. `sudo rookery install` then copies the rendered file
+# to /etc/systemd/system/rookery.service and runs daemon-reload. See
+# docs/adr/ADR-0033.md.
+
 [Unit]
 Description=rookery mail server
 After=docker.service network-online.target
@@ -7,8 +13,8 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/rookery
-ExecStart=/opt/rookery/run.sh --profile prod up --build -d
-ExecStop=/usr/bin/docker compose down
+ExecStart=/opt/rookery/rookery start --prod -d
+ExecStop=/opt/rookery/rookery stop
 User=YOUR_UNIX_USER
 
 [Install]
