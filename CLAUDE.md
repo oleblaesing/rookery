@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `rookery` is a PGP-first, self-hostable mail server — inbound/outbound SMTP, WKD key publishing, and a server-rendered web client — in a single Go binary and one container. The server never holds users' PGP private keys. Authentication is challenge/response signed by the private key; no passphrase hash is stored server-side. See `PLAN.md` for the full design document and `docs/adr/` for architectural decision records.
 
-Current phase: **Phase 1** (inbound SMTP + basic auth + web UI). TLS, outbound SMTP, and ACME are Phase 4.
+Current phase: **Phase 3** (TLS / HTTPS for the primary domain). Phases 1 (inbound SMTP, auth, web UI) and 2 (outbound SMTP, key discovery, compose) are complete.
 
 ## Development commands
 
