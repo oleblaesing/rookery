@@ -429,12 +429,11 @@ function extractDecryptedBody(decrypted) {
   // Find Content-Type header in the decrypted payload.
   const ctMatch = decrypted.match(/^Content-Type:\s*multipart\/[^\s;]+;\s*boundary="([^"]+)"/im);
   if (!ctMatch) {
-    // Plain text payload: strip leading headers (up to first blank line).
-    const sep = decrypted.indexOf('\r\n\r\n');
-    if (sep !== -1) return decrypted.slice(sep + 4);
-    const sep2 = decrypted.indexOf('\n\n');
-    if (sep2 !== -1) return decrypted.slice(sep2 + 2);
-    return decrypted;
+    // encryptMessage() emits bare text with no MIME wrapper, so only strip a
+    // leading header block when the payload actually has one — otherwise a
+    // blank line inside the body would be mistaken for the header/body
+    // separator and the first paragraph would be silently dropped.
+    return stripMimeHeadersIfPresent(decrypted);
   }
 
   const boundary = ctMatch[1];
@@ -449,6 +448,17 @@ function extractDecryptedBody(decrypted) {
   }
 
   return decrypted;
+}
+
+function stripMimeHeadersIfPresent(text) {
+  const sepMatch = text.match(/\r?\n\r?\n/);
+  if (!sepMatch) return text;
+  const headerBlock = text.slice(0, sepMatch.index);
+  const looksLikeHeaders = headerBlock.split(/\r?\n/).every(line =>
+    /^[A-Za-z][A-Za-z0-9-]*:/.test(line) || /^[ \t]/.test(line)
+  );
+  if (!looksLikeHeaders) return text;
+  return text.slice(sepMatch.index + sepMatch[0].length);
 }
 
 /**
