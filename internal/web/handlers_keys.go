@@ -219,7 +219,7 @@ func handleAPIKeyLookup(db *pgxpool.Pool) http.HandlerFunc {
 // This handler is mounted on the openpgpkey.<domain> virtual host.
 // It serves binary (non-armored) OpenPGP public key data.
 
-func handleWKDKey(db *pgxpool.Pool, primaryDomain string) http.HandlerFunc {
+func handleWKDKey(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		hash := r.PathValue("hash")
 		if hash == "" {
@@ -227,14 +227,15 @@ func handleWKDKey(db *pgxpool.Pool, primaryDomain string) http.HandlerFunc {
 			return
 		}
 
-		// Path: /.well-known/openpgpkey/{domain}/hu/{hash}
-		// Use the domain segment from the path, not the configured primary,
-		// so requests for /<other-domain>/ don't accidentally match the
-		// primary domain's users. Phase 1 only serves the primary domain;
-		// later phases (custom domains, Phase 3) will accept any verified
-		// domain row in the domains table.
+		// Accept any domain that is verified and has WKD active. Custom domains
+		// use openpgpkey.<custom-domain> CNAME → openpgpkey.<primary> so the
+		// path segment carries the custom domain name (ADR-0036).
 		domain := r.PathValue("domain")
-		if domain != primaryDomain {
+		var wkdActive bool
+		if err := db.QueryRow(r.Context(),
+			`SELECT wkd_active FROM domains WHERE domain = $1 AND verified_at IS NOT NULL`,
+			domain,
+		).Scan(&wkdActive); err != nil || !wkdActive {
 			http.NotFound(w, r)
 			return
 		}

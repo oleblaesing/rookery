@@ -228,18 +228,29 @@ func (s *inboundSession) Logout() error {
 var ErrNoSuchUser = errors.New("no such user")
 
 // resolveRecipient maps an envelope recipient address to a user ID and the
-// canonical address. It handles plus-addressing (alice+tag → alice) and
-// checks for suspended accounts.
-func resolveRecipient(ctx context.Context, db *pgxpool.Pool, cfg *config.Config, to string) (userID, canonicalAddr string, err error) {
+// canonical address. It handles plus-addressing (alice+tag → alice), one-hop
+// aliases, and catch-all delivery on any verified domain.
+func resolveRecipient(ctx context.Context, db *pgxpool.Pool, _ *config.Config, to string) (userID, canonicalAddr string, err error) {
 	parts := strings.SplitN(to, "@", 2)
 	if len(parts) != 2 {
 		return "", "", ErrNoSuchUser
 	}
 	localRaw, domain := parts[0], parts[1]
 
-	// Accept only the primary domain in Phase 1.
-	if domain != cfg.Domain {
+	// Accept any domain that is verified by this instance.
+	var domainID string
+	var catchAllEnabled bool
+	var catchAllAddrID string // empty if NULL
+	err = db.QueryRow(ctx, `
+		SELECT id, catch_all_enabled, COALESCE(catch_all_address_id::text, '')
+		FROM   domains
+		WHERE  domain = $1 AND verified_at IS NOT NULL
+	`, domain).Scan(&domainID, &catchAllEnabled, &catchAllAddrID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", ErrNoSuchUser
+	}
+	if err != nil {
+		return "", "", err
 	}
 
 	// Strip plus-tag: alice+tag → alice.
@@ -249,20 +260,36 @@ func resolveRecipient(ctx context.Context, db *pgxpool.Pool, cfg *config.Config,
 	}
 	canonical := local + "@" + domain
 
+	// Look up address by local_part + domain_id.
 	var uid string
 	var suspended bool
 	err = db.QueryRow(ctx, `
 		SELECT u.id, u.suspended_at IS NOT NULL
-		FROM   users u
-		JOIN   addresses a ON a.id = u.primary_address_id
-		WHERE  a.address = $1
-	`, canonical).Scan(&uid, &suspended)
+		FROM   addresses a
+		JOIN   users u ON u.id = a.user_id
+		WHERE  a.local_part = $1 AND a.domain_id = $2
+	`, local, domainID).Scan(&uid, &suspended)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", ErrNoSuchUser
-	}
-	if err != nil {
+		// No direct match — try catch-all for this domain.
+		if !catchAllEnabled || catchAllAddrID == "" {
+			return "", "", ErrNoSuchUser
+		}
+		err = db.QueryRow(ctx, `
+			SELECT u.id, u.suspended_at IS NOT NULL
+			FROM   addresses a
+			JOIN   users u ON u.id = a.user_id
+			WHERE  a.id = $1
+		`, catchAllAddrID).Scan(&uid, &suspended)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", ErrNoSuchUser
+		}
+		if err != nil {
+			return "", "", err
+		}
+	} else if err != nil {
 		return "", "", err
 	}
+
 	if suspended {
 		return "", "", &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1},
 			Message: "Account suspended"}

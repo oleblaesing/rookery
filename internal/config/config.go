@@ -37,6 +37,7 @@ type Config struct {
 	Storage StorageConfig `toml:"storage"`
 	SMTP    SMTPConfig    `toml:"smtp"`
 	Policy  PolicyConfig  `toml:"policy"`
+	DNS     DNSConfig     `toml:"dns"`
 
 	// Secrets loaded from environment variables; never present in the config file.
 	Secrets Secrets `toml:"-"`
@@ -105,6 +106,15 @@ type SMTPConfig struct {
 
 	// RelayPort is the SMTP port on RelayHost. Defaults to 25.
 	RelayPort int `toml:"relay_port"`
+}
+
+// DNSConfig controls DNS resolver settings used for domain verification and
+// drift detection. The resolver defaults to Quad9 (9.9.9.9:53) for privacy.
+type DNSConfig struct {
+	// Resolver is the DNS server address (host:port) used for domain verification
+	// and drift-detection checks. Defaults to "9.9.9.9:53" (Quad9). Set to ""
+	// to use the system resolver.
+	Resolver string `toml:"resolver"`
 }
 
 // PolicyConfig controls per-instance policy toggles.
@@ -189,6 +199,9 @@ func defaults(c *Config, md toml.MetaData) {
 	}
 	if !md.IsDefined("policy", "session_expiry_days") {
 		c.Policy.SessionExpiryDays = 7
+	}
+	if !md.IsDefined("dns", "resolver") {
+		c.DNS.Resolver = "9.9.9.9:53"
 	}
 }
 

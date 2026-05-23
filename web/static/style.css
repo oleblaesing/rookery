@@ -558,6 +558,43 @@ button:disabled {
 }
 
 /* -------------------------------------------------------------------------
+   Tabs
+   ------------------------------------------------------------------------- */
+
+.tab-strip {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid #21262d;
+  margin-bottom: 1.75rem;
+}
+.tab-strip button {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  margin: 0;
+  padding: 0.5rem 1.1rem 0.45rem;
+  color: #8b949e;
+  font-size: 0.875rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
+  position: relative;
+  bottom: -1px; /* sit on top of .tab-strip border */
+}
+.tab-strip button:hover {
+  color: #e6d9c2;
+  background: none;
+  border-color: #484f58;
+}
+.tab-strip button.tab-active {
+  color: #e6d9c2;
+  border-bottom-color: #7dd3c8;
+}
+.tab-panel { display: none; }
+.tab-panel.tab-panel-active { display: block; }
+
+/* -------------------------------------------------------------------------
    Responsive (mobile-tolerated — not optimised)
    ------------------------------------------------------------------------- */
 

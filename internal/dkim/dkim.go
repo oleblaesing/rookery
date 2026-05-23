@@ -122,8 +122,14 @@ func (m *Manager) storeKey(ctx context.Context, domainID, selector, algorithm st
 // Sign DKIM-signs the message. It reads from r and writes the signed message
 // to w, with DKIM-Signature headers prepended for each active key on the domain.
 // domainName is used to look up the correct dkim_keys rows.
+//
+// For custom domains that share the primary instance's DKIM keys via CNAME
+// (ADR-0036), no dkim_keys row exists for the custom domain. Sign falls back
+// to the primary domain's keys (is_primary = TRUE) in that case, while still
+// setting d=<custom-domain> in the DKIM-Signature so the CNAME-based DNS
+// lookup by receivers resolves correctly.
 func (m *Manager) Sign(ctx context.Context, domainName string, r io.Reader) (io.Reader, error) {
-	// Load all active keys for this domain.
+	// Load all active keys for this domain; if none, fall back to primary.
 	rows, err := m.db.Query(ctx, `
 		SELECT dk.selector, dk.algorithm, dk.private_key_enc
 		FROM   dkim_keys dk
@@ -153,9 +159,35 @@ func (m *Manager) Sign(ctx context.Context, domainName string, r io.Reader) (io.
 		return nil, fmt.Errorf("dkim: iterate keys: %w", err)
 	}
 	if len(keys) == 0 {
-		// No DKIM keys configured — pass through unsigned (should not happen in normal operation).
-		slog.Warn("dkim: no active keys for domain; message not DKIM-signed", "domain", domainName)
-		return r, nil
+		// No keys for this domain — fall back to primary domain keys (ADR-0036).
+		// This is the expected path for custom domains that use CNAME-based DKIM.
+		rows, err = m.db.Query(ctx, `
+			SELECT dk.selector, dk.algorithm, dk.private_key_enc
+			FROM   dkim_keys dk
+			JOIN   domains d ON d.id = dk.domain_id
+			WHERE  d.is_primary = TRUE AND dk.is_active = TRUE
+			ORDER  BY dk.algorithm
+		`)
+		if err != nil {
+			return nil, fmt.Errorf("dkim: load primary fallback keys: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var k keyRow
+			if err := rows.Scan(&k.selector, &k.algorithm, &k.encBytes); err != nil {
+				return nil, fmt.Errorf("dkim: scan primary fallback key: %w", err)
+			}
+			keys = append(keys, k)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("dkim: iterate primary fallback keys: %w", err)
+		}
+		if len(keys) == 0 {
+			slog.Warn("dkim: no active keys for domain or primary; message not DKIM-signed",
+				"domain", domainName)
+			return r, nil
+		}
+		slog.Debug("dkim: using primary domain keys for custom domain", "domain", domainName)
 	}
 
 	// Read the full message into a buffer so we can sign it multiple times.

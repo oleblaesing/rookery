@@ -12,6 +12,7 @@ import (
 
 	"rookery/internal/auth"
 	"rookery/internal/config"
+	"rookery/internal/domains"
 	"rookery/internal/store"
 )
 
@@ -155,12 +156,14 @@ func handleInvitePage(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Confi
 // -------------------------------------------------------------------------
 
 type settingsPageData struct {
-	InstanceName string
-	User         *userProfile
-	CSRFToken    string
+	InstanceName  string
+	User          *userProfile
+	CSRFToken     string
+	Domains       []domains.Domain
+	PrimaryDomain string
 }
 
-func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
+func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
 		user, err := fetchUserByID(r.Context(), db, userID)
@@ -168,10 +171,17 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
+		domList, err := domMgr.ListForUser(r.Context(), userID)
+		if err != nil {
+			slog.Error("settings: list domains", "err", err)
+			domList = nil
+		}
 		renderTemplate(w, "settings.gohtml", settingsPageData{
-			InstanceName: cfg.InstanceName,
-			User:         user,
-			CSRFToken:    auth.CSRFTokenFromContext(r.Context()),
+			InstanceName:  cfg.InstanceName,
+			User:          user,
+			CSRFToken:     auth.CSRFTokenFromContext(r.Context()),
+			Domains:       domList,
+			PrimaryDomain: cfg.Domain,
 		})
 	}
 }

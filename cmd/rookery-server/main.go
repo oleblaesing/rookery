@@ -24,6 +24,7 @@ import (
 
 	"rookery/internal/config"
 	"rookery/internal/dkim"
+	"rookery/internal/domains"
 	"rookery/internal/queue"
 	"rookery/internal/smtp"
 	"rookery/internal/store"
@@ -92,6 +93,9 @@ func runServer() int {
 		return 1
 	}
 
+	// ---- Domain manager (custom domains, MTA-STS, DNS checks) ----
+	domMgr := domains.NewManager(st.DB, cfg.Domain, cfg.DNS.Resolver)
+
 	// ---- Outbound delivery worker ----
 	qWorker := queue.NewWorker(st.DB, st, dk, cfg, smtp.Deliver)
 
@@ -102,7 +106,7 @@ func runServer() int {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	web.RegisterRoutes(r, cfg, st.DB, st, dk)
+	web.RegisterRoutes(r, cfg, st.DB, st, dk, domMgr)
 
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTP.Host, cfg.HTTP.Port)
 	srv := &http.Server{
@@ -136,6 +140,17 @@ func runServer() int {
 
 	go qWorker.Run(ctx)
 
+	// ---- Domain background workers ----
+	go runHourlyWorker(ctx, "mta-sts-upgrade", func(ctx context.Context) error {
+		return domMgr.UpgradeMTASTSModes(ctx)
+	})
+	go runHourlyWorker(ctx, "dns-drift", func(ctx context.Context) error {
+		return domMgr.DNSCheckAll(ctx)
+	})
+	go runDailyWorker(ctx, "cert-expiry", func(ctx context.Context) error {
+		return domMgr.CheckCertExpiry(ctx)
+	})
+
 	select {
 	case <-ctx.Done():
 		slog.Info("shutdown signal received")
@@ -151,6 +166,46 @@ func runServer() int {
 
 	slog.Info("rookery stopped")
 	return 0
+}
+
+// runHourlyWorker runs fn once per hour until ctx is cancelled. Errors are
+// logged and do not stop the loop.
+func runHourlyWorker(ctx context.Context, name string, fn func(context.Context) error) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	// Run once at startup.
+	if err := fn(ctx); err != nil {
+		slog.Error("worker: startup run failed", "worker", name, "err", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := fn(ctx); err != nil {
+				slog.Error("worker: run failed", "worker", name, "err", err)
+			}
+		}
+	}
+}
+
+// runDailyWorker runs fn once per day until ctx is cancelled.
+func runDailyWorker(ctx context.Context, name string, fn func(context.Context) error) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	if err := fn(ctx); err != nil {
+		slog.Error("worker: startup run failed", "worker", name, "err", err)
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := fn(ctx); err != nil {
+				slog.Error("worker: run failed", "worker", name, "err", err)
+			}
+		}
+	}
 }
 
 // bootstrapDKIM fetches the primary domain ID and calls dkim.Manager.EnsureKeys.

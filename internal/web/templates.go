@@ -10,6 +10,21 @@ import (
 //go:embed templates/*.gohtml
 var templateFS embed.FS
 
+// renderFragment parses and executes a standalone HTML fragment template (no
+// base shell). Used for partial-page responses polled by partials.js.
+func renderFragment(w http.ResponseWriter, name string, data any) {
+	t, err := template.ParseFS(templateFS, "templates/"+name)
+	if err != nil {
+		slog.Error("render fragment: parse", "name", name, "err", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := t.Execute(w, data); err != nil {
+		slog.Error("render fragment: execute", "name", name, "err", err)
+	}
+}
+
 // baseTemplate is the parsed base shell. It is cloned for each render so
 // that page-specific {{define}} blocks (title, content, scripts) don't
 // bleed across pages.

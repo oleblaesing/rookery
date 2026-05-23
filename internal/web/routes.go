@@ -18,11 +18,12 @@ import (
 	"rookery/internal/auth"
 	"rookery/internal/config"
 	"rookery/internal/dkim"
+	"rookery/internal/domains"
 	"rookery/internal/store"
 )
 
 // RegisterRoutes mounts all HTTP routes onto r.
-func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *store.Store, dk *dkim.Manager) {
+func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, domMgr *domains.Manager) {
 	ss := auth.NewSessionStore(db, cfg)
 
 	// ---- Unauthenticated public endpoints ----
@@ -59,8 +60,18 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 	// by inspecting the Host header. The router below matches both:
 	//   - openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<hash>
 	//   - <domain>/.well-known/openpgpkey/<domain>/hu/<hash>   (fallback)
-	r.Get("/.well-known/openpgpkey/{domain}/hu/{hash}", handleWKDKey(db, cfg.Domain))
+	r.Get("/.well-known/openpgpkey/{domain}/hu/{hash}", handleWKDKey(db))
 	r.Get("/.well-known/openpgpkey/{domain}/policy", handleWKDPolicy)
+
+	// ---- MTA-STS policy (ADR-0037) ----
+	// mta-sts.<domain> CNAMEs to this server; Caddy terminates TLS.
+	// Rookery dispatches by Host header inside this handler.
+	r.Get("/.well-known/mta-sts.txt", handleMTASTS(domMgr))
+
+	// ---- Caddy on-demand TLS ask endpoint (ADR-0035) ----
+	// Called by Caddy before issuing a certificate for any hostname.
+	// Not authenticated — Caddy calls it from the same host.
+	r.Get("/internal/tls-ask", handleTLSAsk(domMgr))
 
 	// ---- Authenticated middleware group ----
 	authAPI := auth.Middleware(ss, unauthAPI)
@@ -74,7 +85,7 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/inbox", http.StatusSeeOther)
 		})
-		r.Get("/settings", handleSettingsPage(db, cfg))
+		r.Get("/settings", handleSettingsPage(db, cfg, domMgr))
 		r.Get("/inbox", handleInboxPage(db, cfg))
 		r.Get("/compose", handleComposePage(db, cfg))
 		r.Get("/partials/key-status", handleKeyStatusFragment(db))
@@ -86,6 +97,9 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		})
 		r.With(csrfHTML).Post("/messages/{id}/trash", handleTrashPost(db))
 		r.With(csrfHTML).Post("/messages/{id}/delete", handleDeletePermanentPost(db, st))
+
+		// Domain verification status fragment (GET = read-only, no CSRF needed).
+		r.Get("/partials/domains/{id}/verify-status", handleDomainVerifyStatusFragment(domMgr))
 	})
 
 	// API v1 — authenticated endpoints.
@@ -116,6 +130,14 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Get("/messages/drafts/{id}", handleAPIGetDraftByID(db))
 		r.Put("/messages/drafts/{id}", handleAPIUpdateDraft(db))
 		r.Delete("/messages/drafts/{id}", handleAPIDeleteDraftByID(db))
+
+		// Custom domains (Phase 4).
+		r.Post("/domains", handleAPIRegisterDomain(domMgr))
+		r.Get("/domains", handleAPIListDomains(domMgr))
+		r.Get("/domains/{id}", handleAPIGetDomain(domMgr))
+		r.Patch("/domains/{id}", handleAPIPatchDomain(domMgr))
+		r.Delete("/domains/{id}", handleAPIDeleteDomain(domMgr))
+		r.Post("/domains/{id}/verify", handleAPIVerifyDomain(domMgr))
 	})
 
 	// Static assets. The path is tried in order:

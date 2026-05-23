@@ -255,11 +255,18 @@ TOML
             && info "warning: domain is still 'rookery.example' — edit rookery.toml before going live"
 
         {
+            # Global options block.
             if [ -n "$email" ] && [ "$email" != "admin@rookery.example" ]; then
-                printf '{\n\temail %s\n}\n\n' "$email"
+                printf '{\n\temail %s\n\ton_demand_tls {\n\t\task http://rookery:8080/internal/tls-ask\n\t\tinterval 2m\n\t\tburst 5\n\t}\n}\n\n' "$email"
+            else
+                printf '{\n\ton_demand_tls {\n\t\task http://rookery:8080/internal/tls-ask\n\t\tinterval 2m\n\t\tburst 5\n\t}\n}\n\n'
             fi
-            printf '%s {\n\treverse_proxy rookery:8080\n}\n\n' "$domain"
-            printf 'openpgpkey.%s {\n\treverse_proxy rookery:8080\n}\n' "$domain"
+            # Primary domain + standard subdomains (explicit ACME certs).
+            printf '%s mail.%s openpgpkey.%s mta-sts.%s {\n\treverse_proxy rookery:8080\n}\n\n' \
+                "$domain" "$domain" "$domain" "$domain"
+            # Catch-all block for custom-domain CNAMEs (on-demand TLS).
+            # Caddy asks /internal/tls-ask before issuing any cert in this block.
+            printf ':443 {\n\ttls {\n\t\ton_demand\n\t}\n\treverse_proxy rookery:8080\n}\n'
         } > "$SCRIPT_DIR/Caddyfile"
         info "generated Caddyfile for domain '${domain}'"
     else

@@ -4,53 +4,231 @@
 <section class="form-page">
   <h1>settings</h1>
 
-  <h2>private key</h2>
-
-  <div class="info-block">
-    <p>Your recovery file contains your private key, encrypted with your
-    passphrase. The server does not have a copy of either.</p>
-    <p><strong>This file is your second factor.</strong> Logging in requires
-    both the file and the passphrase — a stolen passphrase is useless without
-    it, and a stolen file is useless without the passphrase. No TOTP app or
-    SMS code needed; the recovery file plays that role structurally.</p>
-    <p>Re-exporting this file with a new passphrase <strong>changes your
-    login passphrase</strong> — the server authenticates you by verifying a
-    signature from your key, not by checking a stored password. The new file
-    replaces the old one; use the new passphrase to log in on any device from
-    that point on.</p>
-    <p>If you lose both the recovery file and your browser's local storage,
-    your mail is unrecoverable. <strong>Store it off-device</strong> — a USB
-    drive, a printed copy in a sealed envelope, an encrypted external
-    backup.</p>
-    <p>While you are logged in, your private key is held in plaintext in
-    browser <code>localStorage</code>. It is cleared on logout. <strong>Log
-    out when you are done</strong>, especially on shared or untrusted
-    machines where another user or process might read browser storage.</p>
+  <div class="tab-strip" role="tablist">
+    <button role="tab" aria-controls="tab-domains"   aria-selected="true"  id="tab-btn-domains"   class="tab-active">custom domains</button>
+    <button role="tab" aria-controls="tab-privatekey" aria-selected="false" id="tab-btn-privatekey">private key</button>
   </div>
 
-  <form id="export-form">
-    <div class="field">
-      <label for="export-passphrase">private key passphrase</label>
-      <input type="password" id="export-passphrase" name="export_passphrase"
-             autocomplete="new-password" placeholder="passphrase">
-      <p class="field-hint">This passphrase encrypts your private key and acts as
-      your first factor. Your private key file is the second factor — logging in
-      requires both. Leave blank to export without a passphrase.</p>
+  {{/* ---- custom domains tab ---- */}}
+  <div id="tab-domains" role="tabpanel" aria-labelledby="tab-btn-domains" class="tab-panel tab-panel-active">
+
+    {{if .Domains}}
+    <ul class="domain-list">
+      {{range .Domains}}
+      <li class="domain-item">
+        <span class="domain-name">{{.Domain}}</span>
+        {{if .VerifiedAt}}
+        <span class="domain-status status-ok">verified</span>
+        {{else}}
+        <span class="domain-status status-pending">pending</span>
+        <div id="verify-status-{{.ID}}" class="verify-status-container">
+          <p class="field-hint">Publish the required DNS records, then click <em>check now</em>.</p>
+          <button class="button button-small"
+                  onclick="checkDomain('{{.ID}}')">check now</button>
+        </div>
+        {{end}}
+        <button class="button button-danger button-small"
+                onclick="deleteDomain('{{.ID}}', '{{.Domain}}')">remove</button>
+      </li>
+      {{end}}
+    </ul>
+    {{else}}
+    <p class="field-hint">No custom domains configured yet.</p>
+    {{end}}
+
+    <h3>add a domain</h3>
+    <form id="add-domain-form">
+      <div class="field">
+        <label for="new-domain">domain name</label>
+        <input type="text" id="new-domain" name="domain"
+               placeholder="mail.example.com" autocomplete="off">
+      </div>
+      <div class="form-actions">
+        <button type="submit" class="button">add domain</button>
+      </div>
+      <p id="add-domain-error" class="field-hint error" style="display:none"></p>
+    </form>
+
+    <div id="add-domain-dns" style="display:none">
+      <h4>publish these DNS records</h4>
+      <table class="dns-records" id="dns-records-table"></table>
+      <div id="verify-status-new" class="field-hint"></div>
+      <div class="form-actions">
+        <button class="button" id="check-new-domain-btn" style="display:none"
+                onclick="checkNewDomain()">check now</button>
+      </div>
     </div>
-    <div class="field">
-      <label for="export-passphrase-confirm">confirm private key passphrase</label>
-      <input type="password" id="export-passphrase-confirm" name="export_passphrase_confirm"
-             autocomplete="new-password" placeholder="repeat passphrase">
+
+  </div>{{/* end tab-domains */}}
+
+  {{/* ---- private key tab ---- */}}
+  <div id="tab-privatekey" role="tabpanel" aria-labelledby="tab-btn-privatekey" class="tab-panel">
+
+    <div class="info-block">
+      <p>Your recovery file contains your private key, encrypted with your
+      passphrase. The server does not have a copy of either.</p>
+      <p><strong>This file is your second factor.</strong> Logging in requires
+      both the file and the passphrase — a stolen passphrase is useless without
+      it, and a stolen file is useless without the passphrase. No TOTP app or
+      SMS code needed; the recovery file plays that role structurally.</p>
+      <p>Re-exporting this file with a new passphrase <strong>changes your
+      login passphrase</strong> — the server authenticates you by verifying a
+      signature from your key, not by checking a stored password. The new file
+      replaces the old one; use the new passphrase to log in on any device from
+      that point on.</p>
+      <p>If you lose both the recovery file and your browser's local storage,
+      your mail is unrecoverable. <strong>Store it off-device</strong> — a USB
+      drive, a printed copy in a sealed envelope, an encrypted external
+      backup.</p>
+      <p>While you are logged in, your private key is held in plaintext in
+      browser <code>localStorage</code>. It is cleared on logout. <strong>Log
+      out when you are done</strong>, especially on shared or untrusted
+      machines where another user or process might read browser storage.</p>
     </div>
-    <div class="form-actions">
-      <button type="submit" id="export-btn" class="button">export recovery file</button>
-    </div>
-    <p id="export-error" class="field-hint error" style="display:none"></p>
-  </form>
+
+    <form id="export-form">
+      <div class="field">
+        <label for="export-passphrase">private key passphrase</label>
+        <input type="password" id="export-passphrase" name="export_passphrase"
+               autocomplete="new-password" placeholder="passphrase">
+        <p class="field-hint">This passphrase encrypts your private key and acts as
+        your first factor. Your private key file is the second factor — logging in
+        requires both. Leave blank to export without a passphrase.</p>
+      </div>
+      <div class="field">
+        <label for="export-passphrase-confirm">confirm private key passphrase</label>
+        <input type="password" id="export-passphrase-confirm" name="export_passphrase_confirm"
+               autocomplete="new-password" placeholder="repeat passphrase">
+      </div>
+      <div class="form-actions">
+        <button type="submit" id="export-btn" class="button">export recovery file</button>
+      </div>
+      <p id="export-error" class="field-hint error" style="display:none"></p>
+    </form>
+
+  </div>{{/* end tab-privatekey */}}
+
 </section>
 {{end}}
 
 {{define "scripts"}}
 <script src="/static/crypto.js" defer></script>
 <script src="/static/settings.js" defer></script>
+<script>
+(function () {
+  'use strict';
+
+  // ---- Tab switching ----
+  var tabs = document.querySelectorAll('.tab-strip [role="tab"]');
+  tabs.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.forEach(function (b) {
+        b.classList.remove('tab-active');
+        b.setAttribute('aria-selected', 'false');
+        document.getElementById(b.getAttribute('aria-controls'))
+                .classList.remove('tab-panel-active');
+      });
+      btn.classList.add('tab-active');
+      btn.setAttribute('aria-selected', 'true');
+      document.getElementById(btn.getAttribute('aria-controls'))
+              .classList.add('tab-panel-active');
+    });
+  });
+
+  // ---- Domain management ----
+  var newDomainID = null;
+
+  function csrfToken() {
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.getAttribute('content') : '';
+  }
+
+  function showError(id, msg) {
+    var el = document.getElementById(id);
+    if (el) { el.textContent = msg; el.style.display = ''; }
+  }
+  function hideError(id) {
+    var el = document.getElementById(id);
+    if (el) { el.style.display = 'none'; }
+  }
+
+  var form = document.getElementById('add-domain-form');
+  if (form) {
+    form.addEventListener('submit', async function (e) {
+      e.preventDefault();
+      hideError('add-domain-error');
+      var domain = document.getElementById('new-domain').value.trim();
+      if (!domain) return;
+
+      var resp = await fetch('/api/v1/domains', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
+        body: JSON.stringify({ domain: domain }),
+        credentials: 'same-origin',
+      });
+      if (!resp.ok) {
+        var body = await resp.json().catch(function () { return {}; });
+        showError('add-domain-error', body.message || 'Could not add domain.');
+        return;
+      }
+      var data = await resp.json();
+      newDomainID = data.id;
+      renderDNSTable(data.pending_dns || []);
+      document.getElementById('add-domain-dns').style.display = '';
+      document.getElementById('check-new-domain-btn').style.display = '';
+      form.style.display = 'none';
+    });
+  }
+
+  function renderDNSTable(entries) {
+    var t = document.getElementById('dns-records-table');
+    if (!t) return;
+    var html = '<thead><tr><th>name</th><th>type</th><th>value</th></tr></thead><tbody>';
+    entries.forEach(function (e) {
+      html += '<tr><td><code>' + esc(e.name) + '</code></td><td>' + esc(e.type) +
+              '</td><td><code>' + esc(e.value) + '</code></td></tr>';
+    });
+    html += '</tbody>';
+    t.innerHTML = html;
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  window.checkNewDomain = async function () {
+    if (!newDomainID) return;
+    document.getElementById('verify-status-new').textContent = 'Checking…';
+    await swapVerifyStatus(newDomainID, 'verify-status-new');
+  };
+
+  window.checkDomain = async function (id) {
+    await swapVerifyStatus(id, 'verify-status-' + id);
+  };
+
+  async function swapVerifyStatus(id, targetID) {
+    var el = document.getElementById(targetID);
+    if (!el) return;
+    await partials.swap(el, '/partials/domains/' + id + '/verify-status');
+    if (el.querySelector('[data-poll-stop="true"]')) {
+      window.location.reload();
+    }
+  }
+
+  window.deleteDomain = async function (id, name) {
+    if (!confirm('Remove domain ' + name + '?')) return;
+    var resp = await fetch('/api/v1/domains/' + id, {
+      method: 'DELETE',
+      headers: { 'X-CSRF-Token': csrfToken() },
+      credentials: 'same-origin',
+    });
+    if (resp.ok || resp.status === 204) {
+      window.location.reload();
+    } else {
+      var body = await resp.json().catch(function () { return {}; });
+      alert(body.message || 'Could not remove domain.');
+    }
+  };
+}());
+</script>
 {{end}}

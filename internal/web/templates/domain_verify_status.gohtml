@@ -1,0 +1,26 @@
+{{- /*
+  domain_verify_status.gohtml — fragment for domain verification status polling.
+  Rendered by handleDomainVerifyStatusFragment; swapped in by partials.js.
+  When verified, data-poll-stop="true" stops the polling loop.
+*/ -}}
+<div class="verify-status"{{if not .Result.Verified}} data-poll-stop="false"{{else}} data-poll-stop="true"{{end}}>
+  {{if .Result.Verified}}
+  <p class="status-ok">Domain verified.</p>
+  {{else}}
+  <p class="status-pending">Waiting for DNS propagation. The following records must be present:</p>
+  {{end}}
+  <table class="dns-records">
+    <thead>
+      <tr><th>record</th><th>status</th><th>expected value</th></tr>
+    </thead>
+    <tbody>
+      {{range .Result.Records}}
+      <tr class="record-{{.Status}}">
+        <td><code>{{.Key}}</code></td>
+        <td>{{.Status}}</td>
+        <td><code>{{.Expected}}</code></td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</div>
