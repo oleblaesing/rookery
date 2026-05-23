@@ -479,12 +479,114 @@ function extractPGPBlock(raw) {
 /**
  * extractTextBody(rawRFC5322) → string
  *
- * Splits headers from body at the first blank line.
+ * Parses the MIME structure and returns the text/plain body.
+ * Handles multipart/signed, multipart/mixed, and simple text/plain messages.
+ * Decodes quoted-printable and base64 transfer encodings.
  */
 function extractTextBody(raw) {
-  const sep = raw.indexOf('\r\n\r\n');
-  if (sep !== -1) return raw.slice(sep + 4);
-  const sep2 = raw.indexOf('\n\n');
-  if (sep2 !== -1) return raw.slice(sep2 + 2);
-  return raw;
+  const { headers, body } = mimeSplit(raw);
+  const text = mimeExtractText(headers, body);
+  return text !== null ? text : body;
+}
+
+function mimeSplit(text) {
+  const crlf = text.indexOf('\r\n\r\n');
+  if (crlf !== -1) return { headers: text.slice(0, crlf), body: text.slice(crlf + 4) };
+  const lf = text.indexOf('\n\n');
+  if (lf !== -1) return { headers: text.slice(0, lf), body: text.slice(lf + 2) };
+  return { headers: '', body: text };
+}
+
+function mimeHeader(headers, name) {
+  const unfolded = headers.replace(/\r?\n[ \t]+/g, ' ');
+  const lines = unfolded.split(/\r?\n/);
+  const lower = name.toLowerCase();
+  for (const line of lines) {
+    const colon = line.indexOf(':');
+    if (colon === -1) continue;
+    if (line.slice(0, colon).trim().toLowerCase() === lower) {
+      return line.slice(colon + 1).trim();
+    }
+  }
+  return '';
+}
+
+function mimeBoundary(ct) {
+  const m = ct.match(/;\s*boundary="([^"]+)"/i) || ct.match(/;\s*boundary=([^\s;]+)/i);
+  return m ? m[1] : null;
+}
+
+function mimeMultipartParts(body, boundary) {
+  const delim = '--' + boundary;
+  const parts = [];
+  const lines = body.split(/\r?\n/);
+  let inPart = false;
+  let partLines = [];
+
+  for (const line of lines) {
+    if (line === delim + '--' || line === delim + '-- ') break;
+    if (line === delim || line === delim + ' ') {
+      if (inPart && partLines.length > 0) {
+        parts.push(partLines.join('\n'));
+        partLines = [];
+      }
+      inPart = true;
+      continue;
+    }
+    if (inPart) partLines.push(line);
+  }
+  if (inPart && partLines.length > 0) parts.push(partLines.join('\n'));
+  return parts;
+}
+
+function mimeExtractText(headers, body) {
+  const ct = mimeHeader(headers, 'Content-Type') || 'text/plain';
+  const mediaType = ct.split(';')[0].trim().toLowerCase();
+
+  if (mediaType === 'text/plain') {
+    const enc = mimeHeader(headers, 'Content-Transfer-Encoding').toLowerCase().trim();
+    return mimeDecodeBody(body.replace(/\r?\n$/, ''), enc);
+  }
+
+  if (mediaType.startsWith('multipart/')) {
+    const boundary = mimeBoundary(ct);
+    if (!boundary) return null;
+    for (const part of mimeMultipartParts(body, boundary)) {
+      const { headers: ph, body: pb } = mimeSplit(part);
+      const pct = mimeHeader(ph, 'Content-Type') || 'text/plain';
+      const pMedia = pct.split(';')[0].trim().toLowerCase();
+      if (pMedia === 'application/pgp-signature' || pMedia === 'application/pgp-keys') continue;
+      const result = mimeExtractText(ph, pb);
+      if (result !== null) return result;
+    }
+  }
+
+  return null;
+}
+
+function mimeDecodeBody(body, encoding) {
+  if (encoding === 'quoted-printable') {
+    const unfolded = body.replace(/=\r?\n/g, '');
+    const bytes = [];
+    let i = 0;
+    while (i < unfolded.length) {
+      if (unfolded[i] === '=' && i + 2 < unfolded.length && /[0-9A-Fa-f]{2}/.test(unfolded.slice(i + 1, i + 3))) {
+        bytes.push(parseInt(unfolded.slice(i + 1, i + 3), 16));
+        i += 3;
+      } else {
+        bytes.push(unfolded.charCodeAt(i));
+        i++;
+      }
+    }
+    return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+  }
+  if (encoding === 'base64') {
+    try {
+      const b = atob(body.replace(/\s+/g, ''));
+      const arr = new Uint8Array(b.length);
+      for (let i = 0; i < b.length; i++) arr[i] = b.charCodeAt(i);
+      return new TextDecoder('utf-8').decode(arr);
+    } catch { return body; }
+  }
+  return body;
 }
