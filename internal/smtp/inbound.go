@@ -38,6 +38,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"rookery/internal/config"
+	"rookery/internal/keydir"
 	"rookery/internal/store"
 )
 
@@ -133,7 +134,7 @@ func (s *inboundSession) Rcpt(to string, _ *smtp.RcptOptions) error {
 	// Check that the recipient is a user on this instance.
 	userID, _, err := resolveRecipient(context.Background(), s.backend.db, s.backend.cfg, to)
 	if err != nil {
-		if errors.Is(err, errNoSuchUser) {
+		if errors.Is(err, ErrNoSuchUser) {
 			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1},
 				Message: "No such user"}
 		}
@@ -181,6 +182,10 @@ func (s *inboundSession) Data(r io.Reader) error {
 	// Parse MIME headers for metadata (subject, date, to, cc, security state).
 	meta := parseMeta(rawMsg)
 
+	// Harvest any auto-attached PGP public keys from the message. This is done
+	// once per message (not per recipient) since the key belongs to the sender.
+	harvestedKey := extractAttachedPublicKey(rawMsg)
+
 	for _, to := range s.recipients {
 		userID, _, err := resolveRecipient(ctx, s.backend.db, s.backend.cfg, to)
 		if err != nil {
@@ -192,7 +197,14 @@ func (s *inboundSession) Data(r io.Reader) error {
 			// Continue to next recipient.
 			continue
 		}
-		slog.Info("smtp: message delivered", "to", to, "from", s.from, "subject", meta.subject, "blob", blobDigest)
+		slog.Info("smtp: message delivered", "to", to, "from", s.from, "subject", meta.Subject, "blob", blobDigest)
+
+		// Cache the sender's harvested key into this recipient's known_keys.
+		if harvestedKey != "" {
+			if err := harvestKey(ctx, s.backend.db, userID, s.from, harvestedKey); err != nil {
+				slog.Debug("smtp: key harvest failed", "from", s.from, "err", err)
+			}
+		}
 	}
 	return nil
 }
@@ -210,7 +222,9 @@ func (s *inboundSession) Logout() error {
 // Recipient resolution (plus-addressing, reserved local-parts)
 // -------------------------------------------------------------------------
 
-var errNoSuchUser = errors.New("no such user")
+// ErrNoSuchUser is returned by ResolveRecipient and DeliverLocal when the
+// address is not a known local user.
+var ErrNoSuchUser = errors.New("no such user")
 
 // resolveRecipient maps an envelope recipient address to a user ID and the
 // canonical address. It handles plus-addressing (alice+tag → alice) and
@@ -218,13 +232,13 @@ var errNoSuchUser = errors.New("no such user")
 func resolveRecipient(ctx context.Context, db *pgxpool.Pool, cfg *config.Config, to string) (userID, canonicalAddr string, err error) {
 	parts := strings.SplitN(to, "@", 2)
 	if len(parts) != 2 {
-		return "", "", errNoSuchUser
+		return "", "", ErrNoSuchUser
 	}
 	localRaw, domain := parts[0], parts[1]
 
 	// Accept only the primary domain in Phase 1.
 	if domain != cfg.Domain {
-		return "", "", errNoSuchUser
+		return "", "", ErrNoSuchUser
 	}
 
 	// Strip plus-tag: alice+tag → alice.
@@ -243,7 +257,7 @@ func resolveRecipient(ctx context.Context, db *pgxpool.Pool, cfg *config.Config,
 		WHERE  a.address = $1
 	`, canonical).Scan(&uid, &suspended)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", errNoSuchUser
+		return "", "", ErrNoSuchUser
 	}
 	if err != nil {
 		return "", "", err
@@ -259,20 +273,23 @@ func resolveRecipient(ctx context.Context, db *pgxpool.Pool, cfg *config.Config,
 // Message metadata parsing
 // -------------------------------------------------------------------------
 
-type msgMeta struct {
-	subject         string
-	messageDate     time.Time
-	to              []string
-	cc              []string
-	securityState   string // pgp_encrypted | pgp_signed_plaintext | plaintext
-	signatureStatus string // verified | unknown_key | invalid | none
-	hasAttachments  bool
+// MsgMeta holds the parsed metadata fields extracted from an RFC 5322 message.
+type MsgMeta struct {
+	Subject         string
+	MessageDate     time.Time
+	To              []string
+	Cc              []string
+	SecurityState   string // pgp_encrypted | pgp_signed_plaintext | plaintext
+	SignatureStatus string // verified | unknown_key | invalid | none
+	HasAttachments  bool
 }
 
-func parseMeta(raw []byte) msgMeta {
-	m := msgMeta{
-		securityState:   "plaintext",
-		signatureStatus: "none",
+// ParseMeta parses MIME headers and structure from a raw RFC 5322 message and
+// returns the metadata fields used when inserting a messages row.
+func ParseMeta(raw []byte) MsgMeta {
+	m := MsgMeta{
+		SecurityState:   "plaintext",
+		SignatureStatus: "none",
 	}
 
 	entity, err := gomessage.Read(strings.NewReader(string(raw)))
@@ -281,28 +298,28 @@ func parseMeta(raw []byte) msgMeta {
 	}
 
 	header := entity.Header
-	m.subject = header.Get("Subject")
+	m.Subject = header.Get("Subject")
 
 	if dateStr := header.Get("Date"); dateStr != "" {
 		if t, err := netmail.ParseDate(dateStr); err == nil {
-			m.messageDate = t
+			m.MessageDate = t
 		}
 	}
-	if m.messageDate.IsZero() {
-		m.messageDate = time.Now().UTC()
+	if m.MessageDate.IsZero() {
+		m.MessageDate = time.Now().UTC()
 	}
 
-	m.to = addressList(header.Get("To"))
-	m.cc = addressList(header.Get("Cc"))
+	m.To = addressList(header.Get("To"))
+	m.Cc = addressList(header.Get("Cc"))
 
 	// Detect PGP/MIME structure.
 	ct, _, _ := entity.Header.ContentType()
 	switch {
 	case ct == "multipart/encrypted":
-		m.securityState = "pgp_encrypted"
+		m.SecurityState = "pgp_encrypted"
 	case ct == "multipart/signed":
-		m.securityState = "pgp_signed_plaintext"
-		m.signatureStatus = "unknown_key" // JS module verifies on read
+		m.SecurityState = "pgp_signed_plaintext"
+		m.SignatureStatus = "unknown_key" // JS module verifies on read
 	}
 
 	// Detect attachments: walk MIME parts.
@@ -314,12 +331,31 @@ func parseMeta(raw []byte) msgMeta {
 			}
 			disp, _, _ := part.Header.ContentDisposition()
 			if strings.EqualFold(disp, "attachment") {
-				m.hasAttachments = true
+				m.HasAttachments = true
 				break
 			}
 		}
 	}
 	return m
+}
+
+// parseMeta is an unexported alias kept for internal use.
+func parseMeta(raw []byte) MsgMeta { return ParseMeta(raw) }
+
+// DeliverLocal stores rawMsg directly into a local user's inbox without going
+// through external SMTP. Used by the outbound queue worker for same-domain
+// delivery so that @local messages never leave the host.
+func DeliverLocal(ctx context.Context, db *pgxpool.Pool, st *store.Store, cfg *config.Config, from, to string, rawMsg []byte) error {
+	userID, _, err := resolveRecipient(ctx, db, cfg, to)
+	if err != nil {
+		return err
+	}
+	blobDigest, err := st.WriteBlob(rawMsg)
+	if err != nil {
+		return fmt.Errorf("local delivery: write blob: %w", err)
+	}
+	meta := ParseMeta(rawMsg)
+	return storeMessage(ctx, db, userID, from, meta, blobDigest, int64(len(rawMsg)))
 }
 
 // addressList parses an RFC 5322 address-list header value (To, Cc) into
@@ -371,7 +407,7 @@ func fallbackAddressList(header string) []string {
 // -------------------------------------------------------------------------
 
 func storeMessage(ctx context.Context, db *pgxpool.Pool,
-	userID, from string, meta msgMeta, blobDigest string, sizeBytes int64) error {
+	userID, from string, meta MsgMeta, blobDigest string, sizeBytes int64) error {
 
 	_, err := db.Exec(ctx, `
 		INSERT INTO messages
@@ -381,9 +417,9 @@ func storeMessage(ctx context.Context, db *pgxpool.Pool,
 		VALUES ($1, 'inbox', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`,
 		userID, from,
-		meta.to, meta.cc,
-		meta.subject, meta.messageDate, sizeBytes, blobDigest,
-		meta.securityState, meta.signatureStatus, meta.hasAttachments,
+		meta.To, meta.Cc,
+		meta.Subject, meta.MessageDate, sizeBytes, blobDigest,
+		meta.SecurityState, meta.SignatureStatus, meta.HasAttachments,
 	)
 	if err != nil {
 		return fmt.Errorf("storeMessage: %w", err)
@@ -395,4 +431,63 @@ func storeMessage(ctx context.Context, db *pgxpool.Pool,
 		sizeBytes, userID)
 
 	return nil
+}
+
+// -------------------------------------------------------------------------
+// Key harvest — extract and cache auto-attached PGP public keys
+// -------------------------------------------------------------------------
+
+// extractAttachedPublicKey walks the MIME structure looking for an
+// application/pgp-keys part and returns its content (ASCII armored) if found.
+// Returns "" when no key part is present.
+func extractAttachedPublicKey(raw []byte) string {
+	entity, err := gomessage.Read(strings.NewReader(string(raw)))
+	if err != nil {
+		return ""
+	}
+	return walkForKey(entity)
+}
+
+func walkForKey(entity *gomessage.Entity) string {
+	ct, _, _ := entity.Header.ContentType()
+	if strings.EqualFold(ct, "application/pgp-keys") {
+		body, err := io.ReadAll(entity.Body)
+		if err == nil && len(body) > 0 {
+			return string(body)
+		}
+	}
+	mr := entity.MultipartReader()
+	if mr == nil {
+		return ""
+	}
+	for {
+		part, err := mr.NextPart()
+		if err != nil {
+			break
+		}
+		if key := walkForKey(part); key != "" {
+			return key
+		}
+	}
+	return ""
+}
+
+// harvestKey upserts a sender's PGP public key into the recipient user's
+// known_keys cache tagged as "auto_attach".
+func harvestKey(ctx context.Context, db *pgxpool.Pool, userID, fromAddress, armoredKey string) error {
+	if !strings.Contains(armoredKey, "BEGIN PGP PUBLIC KEY BLOCK") {
+		return nil
+	}
+	fp, _, err := keydir.ParsePublicKey(armoredKey)
+	if err != nil {
+		return fmt.Errorf("harvestKey: parse key: %w", err)
+	}
+	_, err = db.Exec(ctx, `
+		INSERT INTO known_keys (user_id, address, fingerprint, armored_public_key, source)
+		VALUES ($1, $2, $3, $4, 'auto_attach')
+		ON CONFLICT (user_id, fingerprint) DO UPDATE
+		  SET armored_public_key = EXCLUDED.armored_public_key,
+		      last_seen_at = now()
+	`, userID, fromAddress, fp, armoredKey)
+	return err
 }

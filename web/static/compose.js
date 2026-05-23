@@ -1,0 +1,223 @@
+/**
+ * compose.js — compose page behaviour for rookery.
+ *
+ * Responsibilities:
+ *   - Debounced key-status hint fetch for the To field (via partials.swap).
+ *   - On send: builds a complete RFC 5322 message in the browser.
+ *     - If the recipient has a known public key (indicated by the key-status
+ *       hint's data-key-b64 attribute): PGP/MIME encrypt + sign.
+ *     - Otherwise: plaintext.
+ *   - Auto-attaches the sender's public key inside the encrypted payload.
+ *   - Base64-encodes the message and POSTs to POST /api/v1/messages.
+ *   - Redirects to /inbox?folder=sent on success.
+ *
+ * Server-side data is passed via data-* attributes on #compose-form:
+ *   data-from          — sender's email address
+ *   data-sender-key    — sender's armored public key (for auto-attach)
+ *   data-in-reply-to   — In-Reply-To header value (reply flow)
+ *   data-reply-to-id   — server message UUID being replied to
+ *   data-references    — References header value (reply flow)
+ *
+ * Depends on:
+ *   window.RookeryCrypto  — bundled from web/crypto/index.js
+ *   window.partials       — partials.js
+ *
+ * No build step; shipped as-is alongside partials.js.
+ */
+
+(function () {
+  'use strict';
+
+  function ready(fn) {
+    if (document.readyState !== 'loading') { fn(); return; }
+    document.addEventListener('DOMContentLoaded', fn);
+  }
+
+  function csrfToken() {
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.content : '';
+  }
+
+  // RFC 2822 date string.
+  function rfc2822Date(d) {
+    const days   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const pad    = n => n < 10 ? '0' + n : '' + n;
+    const tz     = -d.getTimezoneOffset();
+    const tzSign = tz >= 0 ? '+' : '-';
+    const tzH    = pad(Math.floor(Math.abs(tz) / 60));
+    const tzM    = pad(Math.abs(tz) % 60);
+    return days[d.getDay()] + ', ' + d.getDate() + ' ' + months[d.getMonth()] + ' ' +
+      d.getFullYear() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' +
+      pad(d.getSeconds()) + ' ' + tzSign + tzH + tzM;
+  }
+
+  function randomHex(n) {
+    return Array.from(crypto.getRandomValues(new Uint8Array(n)))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function generateBoundary() {
+    return 'rk-' + randomHex(12);
+  }
+
+  function generateMessageID(domain) {
+    return '<' + randomHex(16) + '@' + domain + '>';
+  }
+
+  // Encode a string as base64 correctly handling non-ASCII (UTF-8 → bytes → base64).
+  function toBase64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    const len  = bytes.length;
+    for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
+
+  // Build a PGP/MIME multipart/encrypted message from the given PGP block.
+  function buildPGPMIME(headers, pgpBlock) {
+    const boundary = generateBoundary();
+    const mimeHeaders = headers.concat([
+      'Content-Type: multipart/encrypted; protocol="application/pgp-encrypted";',
+      '\tboundary="' + boundary + '"',
+    ]);
+
+    const body = [
+      '--' + boundary,
+      'Content-Type: application/pgp-encrypted',
+      '',
+      'Version: 1',
+      '',
+      '--' + boundary,
+      'Content-Type: application/octet-stream; name="encrypted.asc"',
+      'Content-Disposition: inline; filename="encrypted.asc"',
+      '',
+      pgpBlock,
+      '--' + boundary + '--',
+    ].join('\r\n');
+
+    return mimeHeaders.join('\r\n') + '\r\n\r\n' + body;
+  }
+
+  // Build a plaintext RFC 5322 message.
+  function buildPlaintextMessage(headers, body) {
+    const fullHeaders = headers.concat([
+      'Content-Type: text/plain; charset=utf-8',
+    ]);
+    return fullHeaders.join('\r\n') + '\r\n\r\n' + body;
+  }
+
+  ready(async function () {
+    const form = document.getElementById('compose-form');
+    if (!form) return;
+
+    const fromAddress = form.dataset.from    || '';
+    const senderKey   = form.dataset.senderKey || '';
+    const inReplyTo   = form.dataset.inReplyTo  || '';
+    const references  = form.dataset.references || '';
+    const domain      = fromAddress.includes('@') ? fromAddress.split('@')[1] : 'localhost';
+
+    const toInput  = document.getElementById('compose-to');
+    const keyHint  = document.getElementById('key-status-hint');
+    const statusEl = document.getElementById('compose-status');
+    const sendBtn  = document.getElementById('send-btn');
+
+    // ---- Debounced key-status hint ----
+
+    function fetchKeyStatus(address) {
+      if (!address || !address.includes('@')) {
+        if (keyHint) keyHint.innerHTML = '';
+        return;
+      }
+      partials.swap(keyHint, '/partials/key-status?address=' + encodeURIComponent(address));
+    }
+
+    const debouncedFetch = partials.debounce(fetchKeyStatus, 400);
+
+    if (toInput) {
+      toInput.addEventListener('input', function () {
+        debouncedFetch(this.value.trim());
+      });
+      if (toInput.value.trim()) {
+        fetchKeyStatus(toInput.value.trim());
+      }
+    }
+
+    // ---- Form submit ----
+
+    partials.onSubmit('#compose-form', async function (formData) {
+      sendBtn.disabled = true;
+      statusEl.textContent = 'preparing…';
+
+      const to      = (formData.get('to')      || '').trim();
+      const subject = (formData.get('subject') || '').trim();
+      const body    = (formData.get('body')    || '').trim();
+
+      if (!to || !body) {
+        statusEl.textContent = 'To address and message body are required.';
+        sendBtn.disabled = false;
+        return;
+      }
+
+      try {
+        const baseHeaders = [
+          'From: ' + fromAddress,
+          'To: ' + to,
+          'Subject: ' + (subject || '(no subject)'),
+          'Date: ' + rfc2822Date(new Date()),
+          'Message-ID: ' + generateMessageID(domain),
+          'MIME-Version: 1.0',
+        ];
+        if (inReplyTo)  baseHeaders.push('In-Reply-To: ' + inReplyTo);
+        if (references) baseHeaders.push('References: ' + references);
+
+        // Check whether the key-status hint has a recipient public key.
+        const hintEl = keyHint ? keyHint.querySelector('[data-key-b64]') : null;
+        const recipientKeyB64 = hintEl ? hintEl.dataset.keyB64 : null;
+
+        let rawMessage;
+
+        if (recipientKeyB64) {
+          statusEl.textContent = 'encrypting…';
+          const recipientKeyArmored = atob(recipientKeyB64);
+
+          const { loadSessionKey, encryptMessage } = window.RookeryCrypto;
+          const privateKey = await loadSessionKey();
+
+          const pgpBlock = await encryptMessage(
+            body,
+            [recipientKeyArmored],
+            senderKey || null,
+            privateKey || null,
+          );
+
+          rawMessage = buildPGPMIME(baseHeaders, pgpBlock);
+        } else {
+          statusEl.textContent = 'sending (no key — plaintext)…';
+          rawMessage = buildPlaintextMessage(baseHeaders, body);
+        }
+
+        const resp = await fetch('/api/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrfToken(),
+          },
+          credentials: 'same-origin',
+          body: JSON.stringify({ message: toBase64(rawMessage), bcc: [] }),
+        });
+
+        if (resp.ok) {
+          window.location.href = '/inbox?folder=sent';
+        } else {
+          const err = await resp.json().catch(() => ({ message: 'unknown error' }));
+          statusEl.textContent = 'Error: ' + (err.message || resp.status);
+          sendBtn.disabled = false;
+        }
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+        sendBtn.disabled = false;
+      }
+    });
+  });
+})();

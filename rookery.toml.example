@@ -79,6 +79,12 @@ outbound_daily_limit_per_user = 1000
 # Per-destination-domain outbound rate limit: messages per hour. Default: 5000.
 outbound_rate_limit_per_domain = 5000
 
+# Route all outbound SMTP through a relay host instead of direct MX lookup.
+# Useful when outbound port 25 is blocked (ISP/cloud NAT) or in development.
+# Leave unset for direct MX delivery (production default).
+# relay_host = "smtp-relay.example.com"
+# relay_port = 25
+
 # --------------------------------------------------------------------------- #
 # Per-instance policy
 # --------------------------------------------------------------------------- #

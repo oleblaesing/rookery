@@ -337,31 +337,3 @@ func handleAPIDeleteMessage(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 	}
 }
 
-// -------------------------------------------------------------------------
-// Phase 2 stubs — send and drafts endpoints
-// -------------------------------------------------------------------------
-
-func handleAPIPostMessage(w http.ResponseWriter, _ *http.Request) {
-	respondError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
-		"Outbound mail (POST /messages) is implemented in Phase 2.")
-}
-
-func handleAPIPostDraft(w http.ResponseWriter, _ *http.Request) {
-	respondError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
-		"Drafts are implemented in Phase 2.")
-}
-
-func handleAPIGetDraft(w http.ResponseWriter, _ *http.Request) {
-	respondError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
-		"Drafts are implemented in Phase 2.")
-}
-
-func handleAPIPutDraft(w http.ResponseWriter, _ *http.Request) {
-	respondError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
-		"Drafts are implemented in Phase 2.")
-}
-
-func handleAPIDeleteDraft(w http.ResponseWriter, _ *http.Request) {
-	respondError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
-		"Drafts are implemented in Phase 2.")
-}

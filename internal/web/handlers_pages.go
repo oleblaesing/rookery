@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/base64"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -253,10 +254,11 @@ func handleInboxPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 // -------------------------------------------------------------------------
 
 type readPageData struct {
-	InstanceName string
-	User         *userProfile
-	Message      messageListItem
-	CSRFToken    string
+	InstanceName       string
+	User               *userProfile
+	Message            messageListItem
+	CSRFToken          string
+	SenderPublicKeyB64 string // base64-encoded armored public key for signature verification
 }
 
 func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
@@ -305,11 +307,29 @@ func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			m.IsRead = true
 		}
 
+		// Look up the sender's public key for client-side signature verification.
+		var senderKeyB64 string
+		if m.FromAddress != "" {
+			var armoredKey string
+			err := db.QueryRow(r.Context(), `
+				SELECT COALESCE(k.armored_public_key, '')
+				FROM   addresses a
+				JOIN   users u ON u.id = a.user_id
+				JOIN   user_keys k ON k.user_id = u.id AND k.is_active = TRUE
+				WHERE  a.address = $1
+				LIMIT  1
+			`, m.FromAddress).Scan(&armoredKey)
+			if err == nil && armoredKey != "" {
+				senderKeyB64 = base64.StdEncoding.EncodeToString([]byte(armoredKey))
+			}
+		}
+
 		renderTemplate(w, "read.gohtml", readPageData{
-			InstanceName: cfg.InstanceName,
-			User:         user,
-			Message:      m,
-			CSRFToken:    auth.CSRFTokenFromContext(r.Context()),
+			InstanceName:       cfg.InstanceName,
+			User:               user,
+			Message:            m,
+			CSRFToken:          auth.CSRFTokenFromContext(r.Context()),
+			SenderPublicKeyB64: senderKeyB64,
 		})
 	}
 }

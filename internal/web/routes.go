@@ -17,11 +17,12 @@ import (
 
 	"rookery/internal/auth"
 	"rookery/internal/config"
+	"rookery/internal/dkim"
 	"rookery/internal/store"
 )
 
 // RegisterRoutes mounts all HTTP routes onto r.
-func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *store.Store) {
+func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *store.Store, dk *dkim.Manager) {
 	ss := auth.NewSessionStore(db, cfg)
 
 	// ---- Unauthenticated public endpoints ----
@@ -75,6 +76,8 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		})
 		r.Get("/settings", handleSettingsPage(db, cfg))
 		r.Get("/inbox", handleInboxPage(db, cfg))
+		r.Get("/compose", handleComposePage(db, cfg))
+		r.Get("/partials/key-status", handleKeyStatusFragment(db))
 		r.Get("/messages/{id}", handleReadPage(db, cfg))
 
 		// Form POSTs from HTML pages — these run CSRF middleware inline.
@@ -107,12 +110,12 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Patch("/messages/{id}", handleAPIPatchMessage(db))
 		r.Delete("/messages/{id}", handleAPIDeleteMessage(db, st))
 
-		// Phase 2 stubs.
-		r.Post("/messages", handleAPIPostMessage)
-		r.Post("/messages/drafts", handleAPIPostDraft)
-		r.Get("/messages/drafts/{id}", handleAPIGetDraft)
-		r.Put("/messages/drafts/{id}", handleAPIPutDraft)
-		r.Delete("/messages/drafts/{id}", handleAPIDeleteDraft)
+		// Outbound mail and drafts (Phase 2).
+		r.Post("/messages", handleAPISendMessage(db, st, dk, cfg))
+		r.Post("/messages/drafts", handleAPICreateDraft(db))
+		r.Get("/messages/drafts/{id}", handleAPIGetDraftByID(db))
+		r.Put("/messages/drafts/{id}", handleAPIUpdateDraft(db))
+		r.Delete("/messages/drafts/{id}", handleAPIDeleteDraftByID(db))
 	})
 
 	// Static assets. The path is tried in order:

@@ -49,7 +49,8 @@
   <div class="message-body" id="message-body"
        data-message-id="{{.Message.ID}}"
        data-security-state="{{.Message.SecurityState}}"
-       data-key-fingerprint="{{.User.PublicKeyFingerprint}}">
+       data-key-fingerprint="{{.User.PublicKeyFingerprint}}"
+       data-sender-key-b64="{{.SenderPublicKeyB64}}">
     {{- if eq .Message.SecurityState "pgp_encrypted"}}
     <p class="decrypting-notice" id="decrypting-notice" aria-live="polite">
       decrypting…
@@ -73,6 +74,7 @@
     </form>
     {{- else}}
     <a href="/inbox" class="button-link">← back to inbox</a>
+    <a href="/compose?reply_to={{.Message.ID}}" class="button-link">reply</a>
     <form method="post" action="/messages/{{.Message.ID}}/trash" class="inline-form">
       <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
       <button type="submit" class="button-danger">move to trash</button>

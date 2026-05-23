@@ -45,7 +45,7 @@
 
 import * as openpgp from 'openpgp';
 
-export const ROOKERY_CRYPTO_VERSION = "0.1.0-phase1";
+export const ROOKERY_CRYPTO_VERSION = "0.1.0-phase2";
 
 // --------------------------------------------------------------------------
 // Key generation
@@ -125,19 +125,20 @@ export function buildRecoveryBlob(encryptedPrivateKeyArmored) {
 // --------------------------------------------------------------------------
 
 /**
- * decryptMessage(rawRFC5322, privateKey)
+ * decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmored?)
  *   → { body: string, signatureStatus: string }
  *
  * rawRFC5322: the raw RFC 5322 message bytes (fetched from
  *             /api/v1/messages/{id}/raw).
  * privateKey: the unlocked openpgp.PrivateKey object, or null for plaintext.
+ * senderPublicKeyArmored: optional armored public key for signature verification.
  *
  * Returns:
  *   body            — decrypted plaintext body (or extracted body for
  *                     non-PGP messages)
  *   signatureStatus — "verified" | "unknown_key" | "invalid" | "none"
  */
-export async function decryptMessage(rawRFC5322, privateKey) {
+export async function decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmored = null) {
   const pgpBlock = extractPGPBlock(rawRFC5322);
 
   if (!pgpBlock || !privateKey) {
@@ -146,6 +147,7 @@ export async function decryptMessage(rawRFC5322, privateKey) {
   }
 
   try {
+    // First pass: decrypt to get the plaintext payload.
     const message = await openpgp.readMessage({ armoredMessage: pgpBlock });
     const { data, signatures } = await openpgp.decrypt({
       message,
@@ -153,17 +155,30 @@ export async function decryptMessage(rawRFC5322, privateKey) {
       expectSigned: false,
     });
 
-    let signatureStatus = 'none';
-    if (signatures && signatures.length > 0) {
-      try {
-        await signatures[0].verified;
-        signatureStatus = 'verified';
-      } catch {
-        signatureStatus = 'unknown_key';
-      }
+    const body = extractDecryptedBody(data);
+
+    if (!signatures || signatures.length === 0) {
+      return { body, signatureStatus: 'none' };
     }
 
-    return { body: data, signatureStatus };
+    if (!senderPublicKeyArmored) {
+      return { body, signatureStatus: 'unknown_key' };
+    }
+
+    try {
+      const senderKey = await openpgp.readKey({ armoredKey: senderPublicKeyArmored });
+      const message2 = await openpgp.readMessage({ armoredMessage: pgpBlock });
+      const { signatures: sigs2 } = await openpgp.decrypt({
+        message: message2,
+        decryptionKeys: privateKey,
+        verificationKeys: senderKey,
+        expectSigned: false,
+      });
+      await sigs2[0].verified;
+      return { body, signatureStatus: 'verified' };
+    } catch {
+      return { body, signatureStatus: 'invalid' };
+    }
   } catch (err) {
     throw new Error('Decryption failed: ' + err.message);
   }
@@ -354,8 +369,87 @@ export async function signChallenge(privateKey, nonce) {
 }
 
 // --------------------------------------------------------------------------
+// Encryption (compose page)
+// --------------------------------------------------------------------------
+
+/**
+ * encryptMessage(bodyText, recipientArmoredKeys, senderPublicKeyArmored, signingKey)
+ *   → string (armored PGP MESSAGE block)
+ *
+ * Encrypts bodyText for all recipientArmoredKeys. If senderPublicKeyArmored is
+ * non-empty the sender's public key is auto-attached as an application/pgp-keys
+ * MIME part inside the encrypted payload so the recipient can harvest it.
+ * If signingKey is provided (unlocked openpgp.PrivateKey) the message is also
+ * signed. Returns the ASCII-armored PGP MESSAGE block suitable for wrapping in
+ * a PGP/MIME multipart/encrypted structure.
+ *
+ * recipientArmoredKeys: string[]  — ASCII-armored public keys
+ * senderPublicKeyArmored: string | null
+ * signingKey: openpgp.PrivateKey | null
+ */
+export async function encryptMessage(bodyText, recipientArmoredKeys, senderPublicKeyArmored, signingKey) {
+  const encryptionKeys = await Promise.all(
+    recipientArmoredKeys.map(k => openpgp.readKey({ armoredKey: k }))
+  );
+
+  // Also encrypt to the sender so they can decrypt their own sent mail.
+  // Key distribution uses WKD; no need to embed the key in the payload.
+  if (signingKey) {
+    encryptionKeys.push(signingKey.toPublic());
+  }
+
+  const message = await openpgp.createMessage({ text: bodyText });
+  return openpgp.encrypt({
+    message,
+    encryptionKeys,
+    signingKeys: signingKey || undefined,
+    format: 'armored',
+  });
+}
+
+function _randomHex(n) {
+  return Array.from(crypto.getRandomValues(new Uint8Array(n)))
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// --------------------------------------------------------------------------
 // Internal helpers
 // --------------------------------------------------------------------------
+
+/**
+ * extractDecryptedBody(decrypted) → string
+ *
+ * The decrypted PGP payload may be either:
+ *   a) plain text  — when no sender key was attached
+ *   b) multipart/mixed  — body part + application/pgp-keys part
+ *
+ * In case (b) we extract just the text/plain part body.
+ */
+function extractDecryptedBody(decrypted) {
+  // Find Content-Type header in the decrypted payload.
+  const ctMatch = decrypted.match(/^Content-Type:\s*multipart\/[^\s;]+;\s*boundary="([^"]+)"/im);
+  if (!ctMatch) {
+    // Plain text payload: strip leading headers (up to first blank line).
+    const sep = decrypted.indexOf('\r\n\r\n');
+    if (sep !== -1) return decrypted.slice(sep + 4);
+    const sep2 = decrypted.indexOf('\n\n');
+    if (sep2 !== -1) return decrypted.slice(sep2 + 2);
+    return decrypted;
+  }
+
+  const boundary = ctMatch[1];
+  const parts = decrypted.split('--' + boundary);
+  for (const part of parts) {
+    if (!part || part.startsWith('--')) continue; // delimiter or epilogue
+    if (!/Content-Type:\s*text\/plain/i.test(part)) continue;
+    const sep = part.indexOf('\r\n\r\n');
+    if (sep !== -1) return part.slice(sep + 4).replace(/\r\n$/, '');
+    const sep2 = part.indexOf('\n\n');
+    if (sep2 !== -1) return part.slice(sep2 + 2).replace(/\n$/, '');
+  }
+
+  return decrypted;
+}
 
 /**
  * extractPGPBlock(rawRFC5322) → string | null

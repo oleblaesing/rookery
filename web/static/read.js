@@ -35,6 +35,8 @@
     const msgID          = bodyDiv.dataset.messageId;
     const secState       = bodyDiv.dataset.securityState;
     const keyFingerprint = bodyDiv.dataset.keyFingerprint;
+    const senderKeyB64   = bodyDiv.dataset.senderKeyB64 || '';
+    const senderKey      = senderKeyB64 ? atob(senderKeyB64) : null;
     const csrfToken      = document.querySelector('meta[name="csrf-token"]')?.content || '';
 
     async function fetchRaw() {
@@ -115,7 +117,7 @@
     try {
       if (noticeEl) noticeEl.textContent = 'decrypting…';
       const raw = await fetchRaw();
-      const { body, signatureStatus } = await decryptMessage(raw, privateKey);
+      const { body, signatureStatus } = await decryptMessage(raw, privateKey, senderKey);
       renderBody(body);
       updateBadge(signatureStatus, secState);
     } catch (err) {

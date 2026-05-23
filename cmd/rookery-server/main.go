@@ -23,6 +23,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"rookery/internal/config"
+	"rookery/internal/dkim"
+	"rookery/internal/queue"
 	"rookery/internal/smtp"
 	"rookery/internal/store"
 	"rookery/internal/web"
@@ -83,6 +85,16 @@ func runServer() int {
 		return 1
 	}
 
+	// ---- DKIM key management ----
+	dk := dkim.NewManager(st.DB, cfg.Secrets.MasterKey)
+	if err := bootstrapDKIM(ctx, st, cfg, dk); err != nil {
+		slog.Error("bootstrap: DKIM key generation failed", "err", err)
+		return 1
+	}
+
+	// ---- Outbound delivery worker ----
+	qWorker := queue.NewWorker(st.DB, st, dk, cfg, smtp.Deliver)
+
 	// ---- HTTP server ----
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -90,7 +102,7 @@ func runServer() int {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	web.RegisterRoutes(r, cfg, st.DB, st)
+	web.RegisterRoutes(r, cfg, st.DB, st, dk)
 
 	httpAddr := fmt.Sprintf("%s:%d", cfg.HTTP.Host, cfg.HTTP.Port)
 	srv := &http.Server{
@@ -124,6 +136,8 @@ func runServer() int {
 		}
 	}()
 
+	go qWorker.Run(ctx)
+
 	select {
 	case <-ctx.Done():
 		slog.Info("shutdown signal received")
@@ -139,6 +153,19 @@ func runServer() int {
 
 	slog.Info("rookery stopped")
 	return 0
+}
+
+// bootstrapDKIM fetches the primary domain ID and calls dkim.Manager.EnsureKeys.
+// It generates ed25519 + RSA-2048 DKIM keypairs on first run and logs the DNS
+// TXT records the operator must publish.
+func bootstrapDKIM(ctx context.Context, st *store.Store, cfg *config.Config, dk *dkim.Manager) error {
+	var domainID string
+	if err := st.DB.QueryRow(ctx,
+		`SELECT id FROM domains WHERE domain = $1`, cfg.Domain,
+	).Scan(&domainID); err != nil {
+		return fmt.Errorf("bootstrap dkim: lookup domain id: %w", err)
+	}
+	return dk.EnsureKeys(ctx, domainID, cfg.Domain)
 }
 
 // bootstrapPrimaryDomain inserts the primary domain row on first run if it

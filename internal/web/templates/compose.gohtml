@@ -1,0 +1,50 @@
+{{define "title"}}{{if .ReplyToID}}reply{{else}}compose{{end}} — {{.InstanceName}}{{end}}
+
+{{define "content"}}
+<section class="compose">
+  <h1>{{if .ReplyToID}}reply{{else}}new message{{end}}</h1>
+
+  <form id="compose-form" class="compose-form"
+        data-from="{{.FromAddress}}"
+        data-in-reply-to="{{.ReplyToHeader}}"
+        data-reply-to-id="{{.ReplyToID}}"
+        data-references="{{.References}}">
+
+    <div class="field">
+      <label for="compose-from">from</label>
+      <input id="compose-from" type="text" value="{{.FromAddress}}" disabled>
+    </div>
+
+    <div class="field">
+      <label for="compose-to">to</label>
+      <div class="compose-to-row">
+        <input id="compose-to" name="to" type="email" required autocomplete="email"
+               value="{{.ToAddress}}" placeholder="recipient@example.com">
+        <span id="key-status-hint" class="key-status-hint" aria-live="polite"></span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="compose-subject">subject</label>
+      <input id="compose-subject" name="subject" type="text"
+             value="{{.Subject}}" placeholder="(no subject)">
+    </div>
+
+    <div class="field field-body">
+      <label for="compose-body">message</label>
+      <textarea id="compose-body" name="body" rows="20" required
+                placeholder="Write your message here…"></textarea>
+    </div>
+
+    <div class="compose-actions">
+      <div id="compose-status" class="compose-status" aria-live="polite"></div>
+      <button type="submit" id="send-btn" class="button">send</button>
+    </div>
+  </form>
+</section>
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/crypto.js" defer></script>
+<script src="/static/compose.js" defer></script>
+{{end}}

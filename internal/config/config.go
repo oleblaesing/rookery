@@ -96,6 +96,15 @@ type SMTPConfig struct {
 	// OutboundDailyLimitPerUser is the maximum outbound messages per day per user.
 	// Defaults to 1000. Set explicitly to 0 to disable the limit. See §11.4.
 	OutboundDailyLimitPerUser int `toml:"outbound_daily_limit_per_user"`
+
+	// RelayHost, if non-empty, routes all outbound SMTP deliveries through this
+	// relay host instead of direct MX lookup. Useful in development (set to the
+	// mailpit service name) or behind a NAT that blocks outbound port 25.
+	// Defaults to "" (direct MX delivery).
+	RelayHost string `toml:"relay_host"`
+
+	// RelayPort is the SMTP port on RelayHost. Defaults to 25.
+	RelayPort int `toml:"relay_port"`
 }
 
 // PolicyConfig controls per-instance policy toggles.
@@ -168,6 +177,9 @@ func defaults(c *Config, md toml.MetaData) {
 	}
 	if !md.IsDefined("smtp", "outbound_daily_limit_per_user") {
 		c.SMTP.OutboundDailyLimitPerUser = 1000
+	}
+	if !md.IsDefined("smtp", "relay_port") {
+		c.SMTP.RelayPort = 25
 	}
 	if !md.IsDefined("policy", "default_quota_bytes") {
 		c.Policy.DefaultQuotaBytes = 5 * 1024 * 1024 * 1024 // 5 GiB
