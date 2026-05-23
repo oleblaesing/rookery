@@ -294,15 +294,20 @@ cmd_invite_create() {
         -c "INSERT INTO invites (token, expires_at) VALUES ('${token}', ${expires_sql});" \
         >/dev/null
 
-    local scheme
     case "$domain" in
         localhost|127.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*|::1)
-            scheme="http" ;;
+            # Read the HTTP port from rookery.toml; default 8080.
+            local http_port
+            http_port=$(grep -E "^[[:space:]]*port[[:space:]]*=" \
+                "$SCRIPT_DIR/rookery.toml" 2>/dev/null \
+                | head -1 | sed 's/.*=[[:space:]]*//' | tr -d ' "')
+            [ -z "$http_port" ] && http_port="8080"
+            printf 'http://%s:%s/invite/%s\n' "$domain" "$http_port" "$token"
+            ;;
         *)
-            scheme="https" ;;
+            printf 'https://%s/invite/%s\n' "$domain" "$token"
+            ;;
     esac
-
-    printf '%s://%s/invite/%s\n' "$scheme" "$domain" "$token"
 }
 
 cmd_invite() {
