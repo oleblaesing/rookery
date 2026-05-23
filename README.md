@@ -233,7 +233,6 @@ docs/
     rookery.service     systemd unit template
 rookery                 Operator + developer dispatcher (single POSIX shell script)
 compose.yaml            Service definitions consumed by the dispatcher
-rookery.toml.example    Annotated config file schema
 Containerfile           The build (multi-stage; also a valid Dockerfile)
 PLAN.md                 Full design document
 LICENSE                 AGPLv3
