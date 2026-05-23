@@ -123,8 +123,6 @@ func runServer() int {
 	serverErr := make(chan error, 2)
 
 	go func() {
-		// Phase 0/1 serves plaintext HTTP. TLS termination via ACME (certmagic)
-		// lands in Phase 4 (§11.7 of PLAN.md).
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			serverErr <- fmt.Errorf("http: %w", err)
 		}
@@ -190,7 +188,7 @@ func bootstrapPrimaryDomain(ctx context.Context, st *store.Store, cfg *config.Co
 func runHealthcheck() int {
 	port := os.Getenv("ROOKERY_HEALTHCHECK_PORT")
 	if port == "" {
-		port = "80"
+		port = "8080"
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%s/healthz", port)
 

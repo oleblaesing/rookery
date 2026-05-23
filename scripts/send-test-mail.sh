@@ -17,7 +17,7 @@
 #   --fetch-key      Fetch the recipient's public key from the local rookery
 #                    instance via WKD (/.well-known/openpgpkey/...).
 #                    Requires ROOKERY_HTTP to point at the running instance
-#                    (default: http://localhost:80).
+#                    (default: http://localhost:8080).
 #
 # Examples:
 #   # Plaintext (original behaviour)
@@ -32,7 +32,7 @@
 #
 # Environment variables:
 #   ROOKERY_SMTP   SMTP endpoint  (default: smtp://localhost:25)
-#   ROOKERY_HTTP   HTTP base URL  (default: http://localhost:80)
+#   ROOKERY_HTTP   HTTP base URL  (default: http://localhost:8080)
 #                  Used only with --fetch-key.
 #
 # Requires: curl, running dev stack (docker compose --profile dev up)
@@ -87,7 +87,7 @@ FROM="${2:-sender@example.com}"
 SUBJECT="${3:-test message $(date '+%H:%M:%S')}"
 BODY="${4:-This is a test message sent via send-test-mail.sh at $(date).}"
 ROOKERY_SMTP="${ROOKERY_SMTP:-smtp://localhost:25}"
-ROOKERY_HTTP="${ROOKERY_HTTP:-http://localhost:80}"
+ROOKERY_HTTP="${ROOKERY_HTTP:-http://localhost:8080}"
 
 if [ -z "$TO" ]; then
     echo "Usage: $0 [--encrypted --pubkey <file> | --fetch-key] <to> [from] [subject] [body]" >&2

@@ -3,6 +3,7 @@
 
 # Operator config — contains instance-specific values
 rookery.toml
+Caddyfile
 
 # Go build output
 rookery-server

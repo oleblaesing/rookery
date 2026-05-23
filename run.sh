@@ -68,6 +68,47 @@ gen ROOKERY_MASTER_KEY
 gen ROOKERY_SESSION_KEY
 
 # ---------------------------------------------------------------------------
+# Caddyfile generation — only when --profile prod is requested
+# ---------------------------------------------------------------------------
+USES_PROD=false
+prev=""
+for arg in "$@"; do
+  if [ "$arg" = "prod" ] && [ "$prev" = "--profile" ]; then
+    USES_PROD=true
+  fi
+  prev="$arg"
+done
+
+if $USES_PROD && [ ! -f "$SCRIPT_DIR/Caddyfile" ]; then
+  DOMAIN=$(grep -E '^\s*domain\s*=' "$SCRIPT_DIR/rookery.toml" \
+    | head -1 | sed 's/.*=\s*"\([^"]*\)".*/\1/')
+
+  if [ -z "$DOMAIN" ]; then
+    echo "run.sh: could not read domain from rookery.toml — set it before using --profile prod." >&2
+    exit 1
+  fi
+  if [ "$DOMAIN" = "rookery.example" ]; then
+    echo "run.sh: domain is still 'rookery.example' in rookery.toml — change it to your real domain first." >&2
+    exit 1
+  fi
+
+  # contact_email is optional; include it in Caddy's global block if set.
+  EMAIL=$(grep -E '^\s*contact_email\s*=' "$SCRIPT_DIR/rookery.toml" \
+    | head -1 | sed 's/.*=\s*"\([^"]*\)".*/\1/' || true)
+
+  {
+    if [ -n "$EMAIL" ] && [ "$EMAIL" != "admin@rookery.example" ]; then
+      printf '{\n\temail %s\n}\n\n' "$EMAIL"
+    fi
+    # Primary domain — web UI, API, and WKD key discovery endpoint.
+    printf '%s {\n\treverse_proxy rookery:8080\n}\n\nopenpgpkey.%s {\n\treverse_proxy rookery:8080\n}\n' \
+      "$DOMAIN" "$DOMAIN"
+  } > "$SCRIPT_DIR/Caddyfile"
+
+  echo "run.sh: generated Caddyfile for domain '$DOMAIN'"
+fi
+
+# ---------------------------------------------------------------------------
 # Hand off to docker compose, forwarding all arguments unchanged
 # ---------------------------------------------------------------------------
 exec docker compose "$@"

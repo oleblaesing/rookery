@@ -91,7 +91,7 @@ COPY web/static/ /opt/rookery/web/static/
 # placeholder in the source tree cannot silently shadow the real bundle.
 COPY --from=js-build /out/crypto.js /opt/rookery/web/static/crypto.js
 
-EXPOSE 80 443 25 465 587
+EXPOSE 8080 443 25 465 587
 
 # Healthcheck is defined in compose.yaml rather than here, so the compose file
 # remains the single source of truth for runtime behaviour. The

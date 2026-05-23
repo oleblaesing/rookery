@@ -47,12 +47,12 @@ type HTTPConfig struct {
 	// Host is the bind address. Defaults to "0.0.0.0".
 	Host string `toml:"host"`
 
-	// Port is the HTTP listener port.
+	// Port is the HTTP listener port. Defaults to 8080.
 	//
-	// Phase 0 serves plaintext HTTP only and defaults to 80. TLS termination
-	// via ACME (certmagic) on 443 is a Phase 4 deliverable (§11.7 of PLAN.md);
-	// once that lands, the default will move to 443 and port 80 will be kept
-	// for ACME HTTP-01 challenges.
+	// In production, Caddy (or another reverse proxy) handles TLS termination
+	// and forwards plain HTTP to rookery on this port. In development you hit
+	// this port directly in your browser. Change it only if 8080 conflicts with
+	// something else on your host.
 	Port int `toml:"port"`
 }
 
@@ -158,7 +158,7 @@ func defaults(c *Config, md toml.MetaData) {
 		c.HTTP.Host = "0.0.0.0"
 	}
 	if !md.IsDefined("http", "port") {
-		c.HTTP.Port = 80
+		c.HTTP.Port = 8080
 	}
 	if !md.IsDefined("log", "level") {
 		c.Log.Level = "info"

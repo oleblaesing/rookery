@@ -51,8 +51,9 @@ type Server struct {
 }
 
 // NewServer creates (but does not start) the inbound SMTP server.
-// tlsConfig may be nil in Phase 1 (no TLS cert yet); when non-nil, STARTTLS
-// is advertised and used. Phase 4 wires this up via certmagic.
+// tlsConfig may be nil (no STARTTLS); when non-nil, STARTTLS is advertised.
+// SMTP STARTTLS provisioning is deferred — Caddy handles HTTP TLS but cannot
+// terminate SMTP, so a separate cert-management solution is needed for port 25.
 func NewServer(cfg *config.Config, db *pgxpool.Pool, st *store.Store, tlsCfg *tls.Config) *Server {
 	s := &Server{cfg: cfg, db: db, st: st}
 

@@ -19,10 +19,10 @@
 # Users can add their own custom domains later (see §5.2b of PLAN.md).
 domain = "rookery.example"        # CHANGE_ME
 
-# Let's Encrypt contact email. Unused in Phase 0 (no TLS yet); becomes required
-# once ACME provisioning lands in Phase 4 (§11.7 of PLAN.md). Set it now if you
-# already know the address, to avoid a config change later.
-contact_email = "admin@rookery.example"   # CHANGE_ME (optional in Phase 0)
+# Let's Encrypt contact email. Used by Caddy (the reverse proxy that handles
+# TLS) for expiry notices. Set it in Caddyfile too. Optional here — it is not
+# read by the rookery binary itself.
+contact_email = "admin@rookery.example"   # CHANGE_ME (optional)
 
 # Human-readable display name shown to users on signup pages.
 # Defaults to the value of `domain` if not set.
@@ -35,10 +35,13 @@ instance_name = "My Rookery"      # optional
 # Bind address. 0.0.0.0 = all interfaces.
 host = "0.0.0.0"
 
-# Port for the HTTP server. Phase 0 serves plaintext HTTP on 80; TLS
-# termination via ACME (certmagic) on 443 lands in Phase 4 (§11.7 of PLAN.md).
-# Change this only if you know what you are doing.
-port = 80
+# Port for the HTTP server. Default: 8080.
+#
+# rookery always serves plain HTTP. TLS termination is handled by Caddy (the
+# reverse proxy defined in Caddyfile). In development you hit this port
+# directly in your browser. In production Caddy forwards HTTPS traffic here.
+# Change this only if 8080 conflicts with something else on your host.
+port = 8080
 
 # --------------------------------------------------------------------------- #
 # Logging
