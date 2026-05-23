@@ -110,6 +110,32 @@ docker compose exec -T postgres sh /scripts/new-invite.sh
 
 ---
 
+## Running as a system service
+
+To start rookery automatically on boot, install the provided systemd unit:
+
+```sh
+# Copy the template, set User= to the unix user that owns /opt/rookery.
+sudo cp docs/ops/rookery.service /etc/systemd/system/rookery.service
+sudo $EDITOR /etc/systemd/system/rookery.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now rookery
+```
+
+The unit calls `run.sh --profile prod up --build -d`, so it rebuilds the image on
+every start. Upgrading is:
+
+```sh
+git -C /opt/rookery pull
+sudo systemctl restart rookery
+```
+
+Logs: `sudo journalctl -u rookery -f` (systemd) or `docker compose logs -f rookery`
+(container stdout).
+
+---
+
 ## Local development
 
 Everything runs through `compose.yaml`. No Makefile, no host-side toolchain required
@@ -159,6 +185,7 @@ docs/
   adr/                  Architecture decision records
   api/                  HTTP API documentation
   ops/                  Deployment, DNS, TLS, operator runbook
+    rookery.service     systemd unit template
 compose.yaml            Dev server, test runner, linter, mailpit — single entry point
 rookery.toml.example    Annotated config file schema
 Containerfile           The build (multi-stage; also a valid Dockerfile)

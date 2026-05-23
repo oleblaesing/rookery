@@ -1,0 +1,15 @@
+[Unit]
+Description=rookery mail server
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/rookery
+ExecStart=/opt/rookery/run.sh --profile prod up --build -d
+ExecStop=/usr/bin/docker compose down
+User=YOUR_UNIX_USER
+
+[Install]
+WantedBy=multi-user.target
