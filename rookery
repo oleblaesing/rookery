@@ -656,15 +656,20 @@ cmd_check_dns() {
     # --- DNS lookup helpers ---------------------------------------------------
     # These functions reference $use_dig and $dig_resolver via dynamic scoping.
 
-    _dnscheck_a() {
-        # First A or AAAA for $1, or empty string.
+    # $1 = host, $2 = "A" or "AAAA". Returns the first matching address, or empty.
+    _dnscheck_addr() {
+        local host="$1" rrtype="$2"
         if [ "$use_dig" -eq 1 ]; then
-            { dig +short +time=5 $dig_resolver "$1" A
-              dig +short +time=5 $dig_resolver "$1" AAAA; } 2>/dev/null \
+            dig +short +time=5 $dig_resolver "$host" "$rrtype" 2>/dev/null \
                 | grep -v '^;;' | grep -v '^$' | head -1
         else
-            host -t A "$1" 2>/dev/null \
-                | grep "has address" | awk '{print $NF}' | head -1
+            local pattern
+            case "$rrtype" in
+                AAAA) pattern="has IPv6 address" ;;
+                *)    pattern="has address" ;;
+            esac
+            host -t "$rrtype" "$host" 2>/dev/null \
+                | grep "$pattern" | awk '{print $NF}' | head -1
         fi
     }
 
@@ -753,15 +758,21 @@ cmd_check_dns() {
     printf '\nDNS records for %s\n' "$domain"
     printf '%s\n' "$sep"
 
-    # A / AAAA
-    printf '\nA / AAAA  (all must resolve to your server IP)\n'
-    local h a
+    # A / AAAA  (every host needs at least one; both is fine)
+    printf '\nA / AAAA  (each host needs at least one address record)\n'
+    local h v4 v6
     for h in "$domain" "openpgpkey.${domain}" "mta-sts.${domain}"; do
-        a=$(_dnscheck_a "$h")
-        if [ -n "$a" ]; then
-            _dnscheck_row ok   "$h" "$a"
+        v4=$(_dnscheck_addr "$h" A)
+        v6=$(_dnscheck_addr "$h" AAAA)
+        if [ -n "$v4" ]; then
+            _dnscheck_row ok   "${h} (A)" "$v4"
         else
-            _dnscheck_row miss "$h" "(needs A or AAAA pointing to your server)"
+            _dnscheck_row miss "${h} (A)" "(needs A pointing to your server)"
+        fi
+        if [ -n "$v6" ]; then
+            _dnscheck_row ok   "${h} (AAAA)" "$v6"
+        else
+            _dnscheck_row miss "${h} (AAAA)" "(needs AAAA pointing to your server)"
         fi
     done
 

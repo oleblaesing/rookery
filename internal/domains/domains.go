@@ -76,10 +76,11 @@ type Domain struct {
 // RecordStatus holds a per-DNS-record verification/drift result.
 type RecordStatus struct {
 	Name     string // DNS record name, e.g. "rookery-ed25519._domainkey.example.com"
+	Type     string // DNS RR type: "A", "AAAA", "TXT", "MX", "CNAME"
 	Key      string // internal identifier, e.g. "MX", "DKIM_ED25519_CNAME"
 	Expected string
 	Actual   string // empty = not found
-	Status   string // "ok" | "drifted" | "unknown" | "missing"
+	Status   string // "" (unchecked) | "ok" | "drifted" | "unknown" | "missing"
 }
 
 // VerificationResult is returned by CheckVerification.
@@ -536,7 +537,7 @@ func (m *Manager) checkDNSRecords(ctx context.Context, d *Domain, token string) 
 }
 
 func (m *Manager) checkTXT(ctx context.Context, name, expected, key string) RecordStatus {
-	rs := RecordStatus{Name: name, Key: key, Expected: expected}
+	rs := RecordStatus{Name: name, Type: "TXT", Key: key, Expected: expected}
 	records, err := m.lookup().LookupTXT(ctx, name)
 	if err != nil {
 		rs.Status = dnsErrStatus(err)
@@ -557,7 +558,7 @@ func (m *Manager) checkTXT(ctx context.Context, name, expected, key string) Reco
 }
 
 func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, key string) RecordStatus {
-	rs := RecordStatus{Name: name, Key: key, Expected: prefix + " ..."}
+	rs := RecordStatus{Name: name, Type: "TXT", Key: key, Expected: prefix + " ..."}
 	records, err := m.lookup().LookupTXT(ctx, name)
 	if err != nil {
 		rs.Status = dnsErrStatus(err)
@@ -578,7 +579,7 @@ func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, key string) 
 }
 
 func (m *Manager) checkMX(ctx context.Context, name, expectedHost string) RecordStatus {
-	rs := RecordStatus{Name: name, Key: "MX", Expected: expectedHost}
+	rs := RecordStatus{Name: name, Type: "MX", Key: "MX", Expected: expectedHost}
 	mxs, err := m.lookup().LookupMX(ctx, name)
 	if err != nil {
 		rs.Status = dnsErrStatus(err)
@@ -600,7 +601,7 @@ func (m *Manager) checkMX(ctx context.Context, name, expectedHost string) Record
 }
 
 func (m *Manager) checkCNAME(ctx context.Context, name, expectedTarget, key string) RecordStatus {
-	rs := RecordStatus{Name: name, Key: key, Expected: expectedTarget}
+	rs := RecordStatus{Name: name, Type: "CNAME", Key: key, Expected: expectedTarget}
 	target, err := m.lookup().LookupCNAME(ctx, name)
 	if err != nil {
 		rs.Status = dnsErrStatus(err)

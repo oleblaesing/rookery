@@ -21,14 +21,36 @@
         <span class="domain-status status-ok">verified</span>
         {{else}}
         <span class="domain-status status-pending">pending</span>
-        <div id="verify-status-{{.ID}}" class="verify-status-container">
-          <p class="field-hint">Publish the required DNS records, then click <em>check now</em>.</p>
-          <button class="button button-small"
-                  onclick="checkDomain('{{.ID}}')">check now</button>
-        </div>
         {{end}}
         <button class="button button-danger button-small"
                 onclick="deleteDomain('{{.ID}}', '{{.Domain}}')">remove</button>
+        {{if not .VerifiedAt}}
+        <div id="verify-status-{{.ID}}" class="verify-status-container">
+          <p class="field-hint">Publish the records below, then click <em>check now</em>.</p>
+          <div class="form-actions">
+            <button class="button button-small"
+                    onclick="checkDomain('{{.ID}}')">check now</button>
+          </div>
+          <table class="dns-records">
+            <thead>
+              <tr><th>name</th><th>type</th><th>value</th><th>status</th></tr>
+            </thead>
+            <tbody>
+              {{range .PendingGroups}}
+              <tr class="dns-group-heading"><td colspan="4">{{.Label}}</td></tr>
+              {{range .Records}}
+              <tr>
+                <td><code>{{.Name}}</code></td>
+                <td class="dns-type">{{.Type}}</td>
+                <td><code>{{.Expected}}</code></td>
+                <td class="dns-status">—</td>
+              </tr>
+              {{end}}
+              {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{end}}
       </li>
       {{end}}
     </ul>
@@ -183,15 +205,17 @@
   function renderDNSTable(entries) {
     var t = document.getElementById('dns-records-table');
     if (!t) return;
-    var html = '<thead><tr><th>name</th><th>type</th><th>value</th></tr></thead><tbody>';
+    var html = '<thead><tr><th>name</th><th>type</th><th>value</th><th>status</th></tr></thead><tbody>';
     var lastGroup = null;
     entries.forEach(function (e) {
       if (e.group && e.group !== lastGroup) {
-        html += '<tr class="dns-group-heading"><td colspan="3">' + esc(e.group) + '</td></tr>';
+        html += '<tr class="dns-group-heading"><td colspan="4">' + esc(e.group) + '</td></tr>';
         lastGroup = e.group;
       }
-      html += '<tr><td><code>' + esc(e.name) + '</code></td><td class="dns-type">' + esc(e.type) +
-              '</td><td><code>' + esc(e.value) + '</code></td></tr>';
+      html += '<tr><td><code>' + esc(e.name) + '</code></td>' +
+              '<td class="dns-type">' + esc(e.type) + '</td>' +
+              '<td><code>' + esc(e.value) + '</code></td>' +
+              '<td class="dns-status">—</td></tr>';
     });
     html += '</tbody>';
     t.innerHTML = html;

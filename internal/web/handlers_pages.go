@@ -155,11 +155,18 @@ func handleInvitePage(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Confi
 // GET /settings — account settings page
 // -------------------------------------------------------------------------
 
+// settingsDomain wraps a Domain with the pre-grouped pending-records table
+// for the settings page. PendingGroups is nil for verified domains.
+type settingsDomain struct {
+	domains.Domain
+	PendingGroups []recordGroup
+}
+
 type settingsPageData struct {
 	InstanceName  string
 	User          *userProfile
 	CSRFToken     string
-	Domains       []domains.Domain
+	Domains       []settingsDomain
 	PrimaryDomain string
 }
 
@@ -176,12 +183,21 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Ma
 			slog.Error("settings: list domains", "err", err)
 			domList = nil
 		}
+		primary := cfg.Domain
+		settingsDomains := make([]settingsDomain, 0, len(domList))
+		for i := range domList {
+			sd := settingsDomain{Domain: domList[i]}
+			if domList[i].VerifiedAt == nil {
+				sd.PendingGroups = groupRecords(requiredRecords(&domList[i], primary))
+			}
+			settingsDomains = append(settingsDomains, sd)
+		}
 		renderTemplate(w, "settings.gohtml", settingsPageData{
 			InstanceName:  cfg.InstanceName,
 			User:          user,
 			CSRFToken:     auth.CSRFTokenFromContext(r.Context()),
-			Domains:       domList,
-			PrimaryDomain: cfg.Domain,
+			Domains:       settingsDomains,
+			PrimaryDomain: primary,
 		})
 	}
 }

@@ -145,6 +145,48 @@ func domainToResponse(d *domains.Domain, primaryDomain string) domainResponse {
 	return r
 }
 
+// requiredRecords mirrors buildRequiredDNS but emits []domains.RecordStatus
+// (with empty Status) for the inline "pending" table on the settings page.
+// Used to render the same table layout the verify-status fragment uses, with
+// no DNS lookups performed yet.
+func requiredRecords(d *domains.Domain, primary string) []domains.RecordStatus {
+	entries := buildRequiredDNS(d, primary)
+	out := make([]domains.RecordStatus, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, domains.RecordStatus{
+			Name:     e.Name,
+			Type:     e.Type,
+			Key:      keyForEntry(e),
+			Expected: e.Value,
+		})
+	}
+	return out
+}
+
+// keyForEntry maps a buildRequiredDNS dnsEntry to the RecordStatus.Key value
+// that checkDNSRecords would emit for the same record. Keeps grouping in sync.
+func keyForEntry(e dnsEntry) string {
+	switch {
+	case e.Type == "TXT" && strings.HasPrefix(e.Name, "_rookery-challenge."):
+		return "CHALLENGE"
+	case e.Type == "MX":
+		return "MX"
+	case e.Type == "TXT" && strings.HasPrefix(e.Value, "v=spf1"):
+		return "SPF"
+	case e.Type == "CNAME" && strings.HasPrefix(e.Name, "rookery-ed25519."):
+		return "DKIM_ED25519_CNAME"
+	case e.Type == "CNAME" && strings.HasPrefix(e.Name, "rookery-rsa."):
+		return "DKIM_RSA_CNAME"
+	case e.Type == "CNAME" && strings.HasPrefix(e.Name, "openpgpkey."):
+		return "WKD_CNAME"
+	case e.Type == "CNAME" && strings.HasPrefix(e.Name, "mta-sts."):
+		return "MTA_STS_CNAME"
+	case e.Type == "TXT" && strings.HasPrefix(e.Name, "_mta-sts."):
+		return "MTA_STS_TXT"
+	}
+	return ""
+}
+
 func buildRequiredDNS(d *domains.Domain, primary string) []dnsEntry {
 	var entries []dnsEntry
 
