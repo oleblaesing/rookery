@@ -681,16 +681,21 @@ cmd_check_dns() {
 
     # First TXT for $1 whose value begins with literal $2 (case-insensitive),
     # or empty. $2 is matched as a literal string, not a regex.
+    # The `|| true` on each command-substitution guards `set -e`: grep exits 1
+    # when nothing matches (NXDOMAIN, no propagation), which would otherwise
+    # abort the whole check-dns run mid-section.
     _dnscheck_txt() {
         local lookup="$1" prefix="$2"
-        local raw
+        local raw=""
         if [ "$use_dig" -eq 1 ]; then
             raw=$(dig +short +time=5 $dig_resolver "$lookup" TXT 2>/dev/null \
-                | tr -d '"' | grep -v '^;;' | grep -v '^$')
+                | tr -d '"' | grep -v '^;;' | grep -v '^$' || true)
         else
             raw=$(host -t TXT "$lookup" 2>/dev/null \
-                | grep "descriptive text" | sed 's/.*descriptive text //' | tr -d '"')
+                | grep "descriptive text" \
+                | sed 's/.*descriptive text //' | tr -d '"' || true)
         fi
+        [ -n "$raw" ] || return 0
         printf '%s\n' "$raw" \
             | awk -v p="$prefix" 'tolower(substr($0,1,length(p)))==tolower(p){print; exit}'
     }

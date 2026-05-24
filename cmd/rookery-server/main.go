@@ -10,6 +10,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -224,17 +226,36 @@ func bootstrapDKIM(ctx context.Context, st *store.Store, cfg *config.Config, dk 
 // bootstrapPrimaryDomain inserts the primary domain row on first run if it
 // does not already exist. This is the only server-managed row that must exist
 // before any user can register. §11.8 / ADR-0008: no interactive setup wizard.
+//
+// The mta_sts_id is generated here (mirroring what Register does for custom
+// domains); ON CONFLICT backfills it for instances bootstrapped before this
+// fix landed.
 func bootstrapPrimaryDomain(ctx context.Context, st *store.Store, cfg *config.Config) error {
-	_, err := st.DB.Exec(ctx, `
-		INSERT INTO domains (domain, is_primary, verified_at, wkd_active)
-		VALUES ($1, TRUE, now(), TRUE)
-		ON CONFLICT (domain) DO NOTHING
-	`, cfg.Domain)
+	mtsID, err := generateMTASTSID()
+	if err != nil {
+		return fmt.Errorf("bootstrap primary domain: generate mta-sts id: %w", err)
+	}
+	_, err = st.DB.Exec(ctx, `
+		INSERT INTO domains (domain, is_primary, verified_at, wkd_active, mta_sts_id)
+		VALUES ($1, TRUE, now(), TRUE, $2)
+		ON CONFLICT (domain) DO UPDATE
+		  SET mta_sts_id = COALESCE(domains.mta_sts_id, EXCLUDED.mta_sts_id)
+	`, cfg.Domain, mtsID)
 	if err != nil {
 		return fmt.Errorf("bootstrap primary domain: %w", err)
 	}
 	slog.Info("bootstrap: primary domain ready", "domain", cfg.Domain)
 	return nil
+}
+
+// generateMTASTSID returns a 16-char URL-safe base64 string suitable for use
+// as an MTA-STS policy id. Matches the format used by domains.Register.
+func generateMTASTSID() (string, error) {
+	b := make([]byte, 12) // 12 bytes → 16 base64url chars
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // runHealthcheck is invoked as `rookery-server healthcheck` from the container
