@@ -117,12 +117,34 @@
   // header ProtonMail (and other strict clients) reject the message — either
   // as a decryption error, or with "The MIMEType only allows 'text/html', or
   // 'text/plain'" when the user hits reply.
-  function buildInnerMIME(body) {
+  //
+  // When senderKey is supplied we additionally attach it as an
+  // application/pgp-keys part so the recipient's mail client can auto-harvest
+  // it for future encrypted replies (ProtonMail, Thunderbird/Enigmail, etc.
+  // all recognise this convention).
+  function buildInnerMIME(body, senderKey) {
     const normalized = body.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
-    return 'Content-Type: text/plain; charset=utf-8\r\n' +
-           'Content-Transfer-Encoding: 8bit\r\n' +
+    const textPart =
+      'Content-Type: text/plain; charset=utf-8\r\n' +
+      'Content-Transfer-Encoding: 8bit\r\n' +
+      '\r\n' +
+      normalized;
+
+    if (!senderKey) return textPart;
+
+    const boundary = 'rk-inner-' + randomHex(12);
+    const keyNormalized = senderKey.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+    return 'Content-Type: multipart/mixed; boundary="' + boundary + '"\r\n' +
            '\r\n' +
-           normalized;
+           '--' + boundary + '\r\n' +
+           textPart + '\r\n' +
+           '--' + boundary + '\r\n' +
+           'Content-Type: application/pgp-keys\r\n' +
+           'Content-Disposition: attachment; filename="publickey.asc"\r\n' +
+           'Content-Transfer-Encoding: 7bit\r\n' +
+           '\r\n' +
+           keyNormalized + '\r\n' +
+           '--' + boundary + '--\r\n';
   }
 
   ready(async function () {
@@ -210,7 +232,7 @@
           const privateKey = await loadSessionKey();
 
           const pgpBlock = await encryptMessage(
-            buildInnerMIME(body),
+            buildInnerMIME(body, senderKey),
             [recipientKeyArmored],
             senderKey || null,
             privateKey || null,

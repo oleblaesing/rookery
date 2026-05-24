@@ -377,8 +377,10 @@ export async function signChallenge(privateKey, nonce) {
  *   → string (armored PGP MESSAGE block)
  *
  * Encrypts bodyText for all recipientArmoredKeys. If senderPublicKeyArmored is
- * non-empty the sender's public key is auto-attached as an application/pgp-keys
- * MIME part inside the encrypted payload so the recipient can harvest it.
+ * non-empty the sender's public key is added to the encryption recipient list
+ * so the sender can self-decrypt the message they sent. (Attaching the key as
+ * an application/pgp-keys MIME part for recipient harvesting is the caller's
+ * job — see buildInnerMIME in compose.js.)
  * If signingKey is provided (unlocked openpgp.PrivateKey) the message is also
  * signed. Returns the ASCII-armored PGP MESSAGE block suitable for wrapping in
  * a PGP/MIME multipart/encrypted structure.
