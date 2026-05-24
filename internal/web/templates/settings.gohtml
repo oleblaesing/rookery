@@ -5,12 +5,12 @@
   <h1>settings</h1>
 
   <div class="tab-strip" role="tablist">
-    <button role="tab" aria-controls="tab-domains"   aria-selected="true"  id="tab-btn-domains"   class="tab-active">custom domains</button>
-    <button role="tab" aria-controls="tab-privatekey" aria-selected="false" id="tab-btn-privatekey">private key</button>
+    <button role="tab" aria-controls="tab-privatekey" aria-selected="true"  id="tab-btn-privatekey" class="tab-active">private key</button>
+    <button role="tab" aria-controls="tab-domains"    aria-selected="false" id="tab-btn-domains">custom domains</button>
   </div>
 
   {{/* ---- custom domains tab ---- */}}
-  <div id="tab-domains" role="tabpanel" aria-labelledby="tab-btn-domains" class="tab-panel tab-panel-active">
+  <div id="tab-domains" role="tabpanel" aria-labelledby="tab-btn-domains" class="tab-panel">
 
     {{if .Domains}}
     <ul class="domain-list">
@@ -62,7 +62,7 @@
   </div>{{/* end tab-domains */}}
 
   {{/* ---- private key tab ---- */}}
-  <div id="tab-privatekey" role="tabpanel" aria-labelledby="tab-btn-privatekey" class="tab-panel">
+  <div id="tab-privatekey" role="tabpanel" aria-labelledby="tab-btn-privatekey" class="tab-panel tab-panel-active">
 
     <div class="info-block">
       <p>Your recovery file contains your private key, encrypted with your
