@@ -205,7 +205,7 @@ TOML
         info "created rookery.toml"
 
         if [ -z "$opt_domain" ] && [ "$opt_no_prompt" -eq 0 ]; then
-            printf 'rookery: primary domain (e.g. mail.example.com): ' >&2
+            printf 'rookery: primary domain (e.g. rookery.example.com): ' >&2
             read -r opt_domain
         fi
         if [ -z "$opt_email" ] && [ "$opt_no_prompt" -eq 0 ]; then
@@ -265,8 +265,8 @@ TOML
                 printf '{\n\ton_demand_tls {\n\t\task http://rookery:8080/internal/tls-ask\n\t\tinterval 2m\n\t\tburst 5\n\t}\n}\n\n'
             fi
             # Primary domain + standard subdomains (explicit ACME certs).
-            printf '%s mail.%s openpgpkey.%s mta-sts.%s {\n\treverse_proxy rookery:8080\n}\n\n' \
-                "$domain" "$domain" "$domain" "$domain"
+            printf '%s openpgpkey.%s mta-sts.%s {\n\treverse_proxy rookery:8080\n}\n\n' \
+                "$domain" "$domain" "$domain"
             # Catch-all block for custom-domain CNAMEs (on-demand TLS).
             # Caddy asks /internal/tls-ask before issuing any cert in this block.
             printf ':443 {\n\ttls {\n\t\ton_demand\n\t}\n\treverse_proxy rookery:8080\n}\n'
@@ -619,6 +619,240 @@ ${encrypted_body}
 }
 
 # ---------------------------------------------------------------------------
+# check-dns [--resolver <addr>]
+# ---------------------------------------------------------------------------
+cmd_check_dns() {
+    need_init
+
+    local domain resolver=""
+    domain=$(toml_get domain)
+    [ -n "$domain" ] || die "could not read domain from rookery.toml"
+
+    # Defence against SQL string interpolation below: domains contain only
+    # letters, digits, hyphens, and dots — anything else is operator error.
+    case "$domain" in
+        ''|*[!a-zA-Z0-9.-]*|.*|*.|*..*) die "invalid domain '$domain' in rookery.toml" ;;
+    esac
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --resolver)
+                [ $# -ge 2 ] || die "--resolver requires a value (e.g. --resolver 9.9.9.9)"
+                case "$2" in -*|'') die "--resolver value missing or looks like a flag: '$2'" ;; esac
+                resolver="$2"; shift 2 ;;
+            --) shift; break ;;
+            -*) die "unknown flag: $1" ;;
+            *)  break ;;
+        esac
+    done
+
+    command -v dig >/dev/null 2>&1 || command -v host >/dev/null 2>&1 \
+        || die "check-dns requires 'dig' (dnsutils) or 'host'"
+    local use_dig=0
+    command -v dig >/dev/null 2>&1 && use_dig=1
+    local dig_resolver=""
+    [ -n "$resolver" ] && dig_resolver="@${resolver}"
+
+    # --- DNS lookup helpers ---------------------------------------------------
+    # These functions reference $use_dig and $dig_resolver via dynamic scoping.
+
+    _dnscheck_a() {
+        # First A or AAAA for $1, or empty string.
+        if [ "$use_dig" -eq 1 ]; then
+            { dig +short +time=5 $dig_resolver "$1" A
+              dig +short +time=5 $dig_resolver "$1" AAAA; } 2>/dev/null \
+                | grep -v '^;;' | grep -v '^$' | head -1
+        else
+            host -t A "$1" 2>/dev/null \
+                | grep "has address" | awk '{print $NF}' | head -1
+        fi
+    }
+
+    _dnscheck_mx() {
+        # Lowest-priority MX answer for $1 (e.g. "10 example.com."), or empty string.
+        if [ "$use_dig" -eq 1 ]; then
+            dig +short +time=5 $dig_resolver "$1" MX 2>/dev/null \
+                | grep -v '^;;' | grep -v '^$' | sort -n | head -1
+        else
+            host -t MX "$1" 2>/dev/null \
+                | grep "mail is handled" | head -1 | sed 's/.*handled by //'
+        fi
+    }
+
+    # First TXT for $1 whose value begins with literal $2 (case-insensitive),
+    # or empty. $2 is matched as a literal string, not a regex.
+    _dnscheck_txt() {
+        local lookup="$1" prefix="$2"
+        local raw
+        if [ "$use_dig" -eq 1 ]; then
+            raw=$(dig +short +time=5 $dig_resolver "$lookup" TXT 2>/dev/null \
+                | tr -d '"' | grep -v '^;;' | grep -v '^$')
+        else
+            raw=$(host -t TXT "$lookup" 2>/dev/null \
+                | grep "descriptive text" | sed 's/.*descriptive text //' | tr -d '"')
+        fi
+        printf '%s\n' "$raw" \
+            | awk -v p="$prefix" 'tolower(substr($0,1,length(p)))==tolower(p){print; exit}'
+    }
+
+    # $1=ok|miss|hint  $2=record-name  $3=note (optional)
+    _dnscheck_row() {
+        local tag
+        case "$1" in
+            ok)   tag="[  ok  ]" ;;
+            miss) tag="[MISSING]" ;;
+            hint) tag="[ hint ]" ;;
+            *)    tag="[  ??  ]" ;;
+        esac
+        printf '  %s  %-50s  %s\n' "$tag" "$2" "${3:-}"
+    }
+
+    # Continuation line showing what to add when a record is missing.
+    _dnscheck_add() {
+        printf '             add: "%s"\n' "$1"
+    }
+
+    # --- Query database for values that only the server knows ----------------
+    local db_pass dkim_ed="" dkim_rsa="" mtasts_id=""
+    db_pass=$(env_get POSTGRES_PASSWORD)
+    if [ -n "$db_pass" ]; then
+        # $domain is validated above; trim leading/trailing whitespace from psql -t output
+        # but preserve interior spaces so the suggested DKIM TXT matches what the server logs.
+        dkim_ed=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
+            psql -h localhost -U rookery -d rookery -t -q -A \
+            -c "SELECT 'v=DKIM1; k=ed25519; p='
+                    || replace(encode(public_key_der,'base64'),chr(10),'')
+                FROM dkim_keys dk JOIN domains d ON d.id = dk.domain_id
+                WHERE d.domain='${domain}'
+                  AND dk.selector='rookery-ed25519'
+                  AND dk.is_active=TRUE LIMIT 1;" \
+            2>/dev/null | tr -d '\n')
+        dkim_rsa=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
+            psql -h localhost -U rookery -d rookery -t -q -A \
+            -c "SELECT 'v=DKIM1; k=rsa; p='
+                    || replace(encode(public_key_der,'base64'),chr(10),'')
+                FROM dkim_keys dk JOIN domains d ON d.id = dk.domain_id
+                WHERE d.domain='${domain}'
+                  AND dk.selector='rookery-rsa'
+                  AND dk.is_active=TRUE LIMIT 1;" \
+            2>/dev/null | tr -d '\n')
+        mtasts_id=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
+            psql -h localhost -U rookery -d rookery -t -q -A \
+            -c "SELECT mta_sts_id FROM domains
+                WHERE domain='${domain}' AND is_primary=TRUE LIMIT 1;" \
+            2>/dev/null | tr -d '\n')
+    fi
+
+    # --- Output ---------------------------------------------------------------
+    local sep="=============================================================="
+    printf '\nDNS records for %s\n' "$domain"
+    printf '%s\n' "$sep"
+
+    # A / AAAA
+    printf '\nA / AAAA  (all must resolve to your server IP)\n'
+    local h a
+    for h in "$domain" "openpgpkey.${domain}" "mta-sts.${domain}"; do
+        a=$(_dnscheck_a "$h")
+        if [ -n "$a" ]; then
+            _dnscheck_row ok   "$h" "$a"
+        else
+            _dnscheck_row miss "$h" "(needs A or AAAA pointing to your server)"
+        fi
+    done
+
+    # MX (must point to the bare primary, not a mail.* subdomain)
+    printf '\nMX\n'
+    local mx mx_host want_host
+    mx=$(_dnscheck_mx "$domain")
+    want_host=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
+    if [ -z "$mx" ]; then
+        _dnscheck_row miss "$domain" "(e.g.  10 ${domain}.)"
+    else
+        mx_host=$(printf '%s\n' "$mx" \
+            | awk '{ h=$NF; sub(/\.$/,"",h); print tolower(h) }')
+        if [ "$mx_host" = "$want_host" ]; then
+            _dnscheck_row ok "$domain" "$mx"
+        else
+            _dnscheck_row miss "$domain" "(found '$mx' — expected target '${domain}.')"
+        fi
+    fi
+
+    # SPF
+    printf '\nSPF TXT\n'
+    local spf
+    spf=$(_dnscheck_txt "$domain" "v=spf1")
+    if [ -n "$spf" ]; then
+        _dnscheck_row ok "$domain" "$spf"
+    else
+        _dnscheck_row miss "$domain"
+        _dnscheck_add "v=spf1 a -all"
+    fi
+
+    # DKIM  (key values come from the database; start the server first)
+    printf '\nDKIM TXT\n'
+    local dkim_ed_name="rookery-ed25519._domainkey.${domain}"
+    local dkim_rsa_name="rookery-rsa._domainkey.${domain}"
+    local dkim_ed_dns dkim_rsa_dns
+    dkim_ed_dns=$(_dnscheck_txt "$dkim_ed_name" "v=DKIM1")
+    dkim_rsa_dns=$(_dnscheck_txt "$dkim_rsa_name" "v=DKIM1")
+
+    if [ -n "$dkim_ed_dns" ]; then
+        _dnscheck_row ok "$dkim_ed_name"
+    elif [ -n "$dkim_ed" ]; then
+        _dnscheck_row miss "$dkim_ed_name"
+        _dnscheck_add "$dkim_ed"
+    else
+        _dnscheck_row miss "$dkim_ed_name" "(start the server first to generate keys)"
+    fi
+
+    if [ -n "$dkim_rsa_dns" ]; then
+        _dnscheck_row ok "$dkim_rsa_name"
+    elif [ -n "$dkim_rsa" ]; then
+        _dnscheck_row miss "$dkim_rsa_name"
+        _dnscheck_add "$dkim_rsa"
+    else
+        _dnscheck_row miss "$dkim_rsa_name" "(start the server first to generate keys)"
+    fi
+
+    # DMARC
+    printf '\nDMARC TXT\n'
+    local dmarc
+    dmarc=$(_dnscheck_txt "_dmarc.${domain}" "v=DMARC1")
+    if [ -n "$dmarc" ]; then
+        _dnscheck_row ok "_dmarc.${domain}" "$dmarc"
+    else
+        _dnscheck_row miss "_dmarc.${domain}"
+        _dnscheck_add "v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain}"
+    fi
+
+    # MTA-STS TXT
+    printf '\nMTA-STS TXT\n'
+    local mtasts_txt
+    mtasts_txt=$(_dnscheck_txt "_mta-sts.${domain}" "v=STSv1")
+    if [ -n "$mtasts_txt" ]; then
+        _dnscheck_row ok "_mta-sts.${domain}" "$mtasts_txt"
+    elif [ -n "$mtasts_id" ]; then
+        _dnscheck_row miss "_mta-sts.${domain}"
+        _dnscheck_add "v=STSv1; id=${mtasts_id}"
+    else
+        _dnscheck_row miss "_mta-sts.${domain}" "(start server to get the id value)"
+    fi
+
+    # TLS-RPT (optional but recommended)
+    printf '\nTLS-RPT TXT  (recommended)\n'
+    local tlsrpt
+    tlsrpt=$(_dnscheck_txt "_smtp._tls.${domain}" "v=TLSRPTv1")
+    if [ -n "$tlsrpt" ]; then
+        _dnscheck_row ok "_smtp._tls.${domain}" "$tlsrpt"
+    else
+        _dnscheck_row hint "_smtp._tls.${domain}"
+        _dnscheck_add "v=TLSRPTv1; rua=mailto:postmaster@${domain}"
+    fi
+
+    printf '\n%s\n\n' "$sep"
+}
+
+# ---------------------------------------------------------------------------
 # psql
 # ---------------------------------------------------------------------------
 cmd_psql() {
@@ -758,6 +992,31 @@ rookery send-mail [flags] <to> [from] [subject] [body]
   Requires: curl. Encrypted mode additionally requires: gpg, python3.
 EOF
             ;;
+        check-dns) cat >&2 <<'EOF'
+rookery check-dns [--resolver <addr>]
+
+  Check all required DNS records for the primary domain and print their
+  current status. Reads the domain from rookery.toml. Requires 'dig'
+  (dnsutils / bind-utils) or 'host'.
+
+  When the stack is running the DKIM public key values and MTA-STS ID
+  are read directly from the database so the full required TXT values
+  are shown next to any missing record.
+
+  Records checked:
+    A / AAAA    domain, openpgpkey.*, mta-sts.*
+    MX          inbound mail delivery (target must be the bare primary)
+    SPF TXT     outbound sender policy
+    DKIM TXT    rookery-ed25519 and rookery-rsa selectors
+    DMARC TXT   email authentication policy
+    MTA-STS TXT strict TLS enforcement signal
+    TLS-RPT TXT (recommended) TLS failure reporting
+
+  Flags:
+    --resolver <addr>   Query this resolver instead of the system default.
+                        Useful to bypass local cache: --resolver 9.9.9.9
+EOF
+            ;;
         psql)
             printf 'rookery psql\n\n  Drop into an interactive psql shell inside the postgres container.\n' >&2 ;;
         test)
@@ -789,6 +1048,7 @@ Stack management:
 Operations:
   invite create [days]                  Generate an invite URL (stdout)
   send-mail [flags] <to> [from] [...]   Inject a message into inbound SMTP
+  check-dns [--resolver <addr>]        Check and display all required DNS records
   psql                                  psql shell in the postgres container
   test                                  Run the Go test suite
   vet                                   Run go vet
@@ -815,9 +1075,10 @@ case "${1:-}" in
     update)    shift; cmd_update       ;;
     logs)      shift; cmd_logs      "$@" ;;
     ps)        shift; cmd_ps        "$@" ;;
-    invite)    shift; cmd_invite    "$@" ;;
-    send-mail) shift; cmd_send_mail "$@" ;;
-    psql)      shift; cmd_psql         ;;
+    invite)     shift; cmd_invite     "$@" ;;
+    send-mail)  shift; cmd_send_mail  "$@" ;;
+    check-dns)  shift; cmd_check_dns  "$@" ;;
+    psql)       shift; cmd_psql          ;;
     test)      shift; cmd_test         ;;
     vet)       shift; cmd_vet          ;;
     exec)      shift; cmd_exec      "$@" ;;

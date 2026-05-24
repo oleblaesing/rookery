@@ -558,6 +558,58 @@ button:disabled {
 }
 
 /* -------------------------------------------------------------------------
+   DNS records table (custom domain setup + verify status)
+   ------------------------------------------------------------------------- */
+
+.dns-records {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8125rem;
+  margin: 0.75rem 0 1rem;
+}
+.dns-records th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #484f58;
+  padding: 0.3rem 0.6rem;
+  border-bottom: 1px solid #21262d;
+}
+.dns-records td {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid #161b22;
+  vertical-align: top;
+  color: #8b949e;
+  word-break: break-all;
+}
+.dns-records tr:last-child td { border-bottom: none; }
+.dns-records code { color: #c9bfa8; font-size: 0.8rem; }
+
+.dns-group-heading td {
+  padding: 0.6rem 0.6rem 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #484f58;
+  border-bottom: none;
+  border-top: 1px solid #21262d;
+}
+.dns-records tbody tr:first-child.dns-group-heading td { border-top: none; }
+
+.dns-type { color: #484f58; white-space: nowrap; }
+.dns-status { white-space: nowrap; }
+.dns-actual { margin-top: 0.2rem; font-size: 0.75rem; color: #f0883e; }
+.dns-actual code { color: #f0883e; }
+
+.record-ok     .dns-status { color: #3fb950; }
+.record-missing .dns-status,
+.record-drifted .dns-status { color: #f85149; }
+.record-unknown .dns-status { color: #d29922; }
+
+/* -------------------------------------------------------------------------
    Tabs
    ------------------------------------------------------------------------- */
 

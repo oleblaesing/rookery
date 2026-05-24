@@ -9,8 +9,9 @@
 //     the public keys in DNS.
 //
 // Per §11.7 / ADR-0024: ed25519 primary, RSA-2048 fallback, distinct selectors.
-// The selector format is "<algo>-1" (e.g. "ed25519-1", "rsa-1"); rotation
-// tooling (Phase 7) will increment the counter.
+// Selectors are "rookery-ed25519" and "rookery-rsa"; custom-domain owners CNAME
+// `<selector>._domainkey.<their-domain>` to `<selector>._domainkey.<primary>`
+// (ADR-0036/0038). Rotation tooling (Phase 7) will rename to a versioned form.
 package dkim
 
 import (
@@ -59,7 +60,7 @@ func (m *Manager) EnsureKeys(ctx context.Context, domainID, domainName string) e
 		return fmt.Errorf("dkim: check keys: %w", err)
 	}
 	if count >= 2 {
-		m.logDNSRecords(ctx, domainID, domainName)
+		m.logDNSRecords(ctx, domainID, domainName, false)
 		return nil
 	}
 
@@ -70,7 +71,7 @@ func (m *Manager) EnsureKeys(ctx context.Context, domainID, domainName string) e
 	if err != nil {
 		return fmt.Errorf("dkim: generate ed25519: %w", err)
 	}
-	if err := m.storeKey(ctx, domainID, "ed25519-1", "ed25519", edPub, edPriv); err != nil {
+	if err := m.storeKey(ctx, domainID, "rookery-ed25519", "ed25519", edPub, edPriv); err != nil {
 		return fmt.Errorf("dkim: store ed25519 key: %w", err)
 	}
 
@@ -84,12 +85,12 @@ func (m *Manager) EnsureKeys(ctx context.Context, domainID, domainName string) e
 	if err != nil {
 		return fmt.Errorf("dkim: marshal rsa private key: %w", err)
 	}
-	if err := m.storeKey(ctx, domainID, "rsa-1", "rsa2048", rsaPubDER, rsaPrivDER); err != nil {
+	if err := m.storeKey(ctx, domainID, "rookery-rsa", "rsa2048", rsaPubDER, rsaPrivDER); err != nil {
 		return fmt.Errorf("dkim: store rsa key: %w", err)
 	}
 
 	slog.Info("dkim: keypairs generated", "domain", domainName)
-	m.logDNSRecords(ctx, domainID, domainName)
+	m.logDNSRecords(ctx, domainID, domainName, true)
 	return nil
 }
 
@@ -287,7 +288,8 @@ func (m *Manager) DNSRecords(ctx context.Context, domainName string) ([][2]strin
 }
 
 // logDNSRecords logs the DNS TXT records the operator needs to publish.
-func (m *Manager) logDNSRecords(ctx context.Context, domainID, domainName string) {
+// newKeys=true (key generation) logs at Warn; false (startup reminder) logs at Info.
+func (m *Manager) logDNSRecords(ctx context.Context, domainID, domainName string, newKeys bool) {
 	records, err := m.DNSRecords(ctx, domainName)
 	if err != nil {
 		slog.Error("dkim: could not retrieve DNS records for logging", "err", err)
@@ -296,12 +298,17 @@ func (m *Manager) logDNSRecords(ctx context.Context, domainID, domainName string
 	for _, r := range records {
 		selector := r[0]
 		txt := r[1]
-		slog.Info("DNS: DKIM TXT record required",
+		attrs := []any{
 			"domain", domainName,
-			"name", selector+"._domainkey."+domainName,
+			"name", selector + "._domainkey." + domainName,
 			"type", "TXT",
 			"value", txt,
-		)
+		}
+		if newKeys {
+			slog.Warn("DNS: DKIM TXT record required — publish in your DNS provider", attrs...)
+		} else {
+			slog.Info("DNS: DKIM TXT record", attrs...)
+		}
 	}
 }
 

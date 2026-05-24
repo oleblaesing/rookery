@@ -11,15 +11,23 @@
   {{end}}
   <table class="dns-records">
     <thead>
-      <tr><th>record</th><th>status</th><th>expected value</th></tr>
+      <tr><th>name</th><th>value</th><th>status</th></tr>
     </thead>
     <tbody>
-      {{range .Result.Records}}
+      {{range .Groups}}
+      <tr class="dns-group-heading"><td colspan="3">{{.Label}}</td></tr>
+      {{range .Records}}
       <tr class="record-{{.Status}}">
-        <td><code>{{.Key}}</code></td>
-        <td>{{.Status}}</td>
-        <td><code>{{.Expected}}</code></td>
+        <td><code>{{.Name}}</code></td>
+        <td>
+          <code>{{.Expected}}</code>
+          {{if and (eq .Status "drifted") .Actual}}
+          <div class="dns-actual">found: <code>{{.Actual}}</code></div>
+          {{end}}
+        </td>
+        <td class="dns-status">{{.Status}}</td>
       </tr>
+      {{end}}
       {{end}}
     </tbody>
   </table>

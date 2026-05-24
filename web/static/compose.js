@@ -117,7 +117,14 @@
     if (!form) return;
 
     const fromAddress = form.dataset.from    || '';
-    const senderKey   = form.dataset.senderKey ? atob(form.dataset.senderKey) : '';
+    let senderKey = '';
+    if (form.dataset.senderKey) {
+      try {
+        senderKey = atob(form.dataset.senderKey);
+      } catch (e) {
+        console.error('compose: data-sender-key is not valid base64; outgoing mail will not be signed', e);
+      }
+    }
     const inReplyTo   = form.dataset.inReplyTo  || '';
     const references  = form.dataset.references || '';
     const domain      = fromAddress.includes('@') ? fromAddress.split('@')[1] : 'localhost';

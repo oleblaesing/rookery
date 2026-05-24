@@ -121,6 +121,7 @@ type dnsEntry struct {
 	Name  string `json:"name"`
 	Type  string `json:"type"`
 	Value string `json:"value"`
+	Group string `json:"group"`
 }
 
 func domainToResponse(d *domains.Domain, primaryDomain string) domainResponse {
@@ -158,41 +159,49 @@ func buildRequiredDNS(d *domains.Domain, primary string) []dnsEntry {
 
 	entries = append(entries,
 		dnsEntry{
+			Group: "verification",
 			Name:  "_rookery-challenge." + d.Domain,
 			Type:  "TXT",
 			Value: token,
 		},
 		dnsEntry{
+			Group: "mail routing",
 			Name:  d.Domain,
 			Type:  "MX",
 			Value: "10 " + primary,
 		},
 		dnsEntry{
+			Group: "sender authentication",
 			Name:  d.Domain,
 			Type:  "TXT",
 			Value: "v=spf1 include:_spf." + primary + " ~all",
 		},
 		dnsEntry{
+			Group: "sender authentication",
 			Name:  "rookery-ed25519._domainkey." + d.Domain,
 			Type:  "CNAME",
 			Value: "rookery-ed25519._domainkey." + primary,
 		},
 		dnsEntry{
+			Group: "sender authentication",
 			Name:  "rookery-rsa._domainkey." + d.Domain,
 			Type:  "CNAME",
 			Value: "rookery-rsa._domainkey." + primary,
 		},
 		dnsEntry{
+			Group: "web key directory",
 			Name:  "openpgpkey." + d.Domain,
 			Type:  "CNAME",
 			Value: "openpgpkey." + primary,
 		},
 		dnsEntry{
+			Group: "mta-sts",
 			Name:  "mta-sts." + d.Domain,
 			Type:  "CNAME",
 			Value: "mta-sts." + primary,
 		},
 		dnsEntry{
+			Group: "mta-sts",
 			Name:  "_mta-sts." + d.Domain,
 			Type:  "TXT",
 			Value: "v=STSv1; id=" + mtsID,
@@ -391,10 +400,59 @@ func handleAPIPatchDomain(domMgr *domains.Manager) http.HandlerFunc {
 // When verified, sets data-poll-stop="true" to stop polling.
 // -------------------------------------------------------------------------
 
+// recordGroup is a labelled set of DNS records for grouped template rendering.
+type recordGroup struct {
+	Label   string
+	Records []domains.RecordStatus
+}
+
+// recordKeyGroup maps internal RecordStatus.Key values to display group labels.
+var recordKeyGroup = map[string]string{
+	"CHALLENGE":          "verification",
+	"MX":                 "mail routing",
+	"SPF":                "sender authentication",
+	"DKIM_ED25519_CNAME": "sender authentication",
+	"DKIM_RSA_CNAME":     "sender authentication",
+	"WKD_CNAME":          "web key directory",
+	"MTA_STS_CNAME":      "mta-sts",
+	"MTA_STS_TXT":        "mta-sts",
+}
+
+var recordGroupOrder = []string{
+	"verification",
+	"mail routing",
+	"sender authentication",
+	"web key directory",
+	"mta-sts",
+	"other",
+}
+
+// groupRecords folds a flat record list into labelled groups. The output order
+// follows recordGroupOrder exactly; any record whose Key isn't in recordKeyGroup
+// lands in the "other" group, which is the final entry of recordGroupOrder.
+func groupRecords(records []domains.RecordStatus) []recordGroup {
+	byLabel := make(map[string][]domains.RecordStatus)
+	for _, r := range records {
+		label := recordKeyGroup[r.Key]
+		if label == "" {
+			label = "other"
+		}
+		byLabel[label] = append(byLabel[label], r)
+	}
+	out := make([]recordGroup, 0, len(byLabel))
+	for _, label := range recordGroupOrder {
+		if recs, ok := byLabel[label]; ok {
+			out = append(out, recordGroup{Label: label, Records: recs})
+		}
+	}
+	return out
+}
+
 type verifyStatusData struct {
-	Domain     *domains.Domain
-	Result     *domains.VerificationResult
+	Domain        *domains.Domain
+	Result        *domains.VerificationResult
 	PrimaryDomain string
+	Groups        []recordGroup
 }
 
 func handleDomainVerifyStatusFragment(domMgr *domains.Manager) http.HandlerFunc {
@@ -425,6 +483,7 @@ func handleDomainVerifyStatusFragment(domMgr *domains.Manager) http.HandlerFunc 
 			Domain:        d,
 			Result:        result,
 			PrimaryDomain: domMgr.PrimaryDomain(),
+			Groups:        groupRecords(result.Records),
 		})
 	}
 }

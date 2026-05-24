@@ -70,12 +70,13 @@ type Domain struct {
 
 	// DNS drift
 	DNSLastCheckedAt *time.Time
-	DNSStatus        map[string]string // record key → "ok" | "drifted" | "unknown"
+	DNSStatus        map[string]string // record key → "ok" | "drifted" | "missing" | "unknown"
 }
 
 // RecordStatus holds a per-DNS-record verification/drift result.
 type RecordStatus struct {
-	Key      string // e.g. "MX", "DKIM_ED25519_CNAME"
+	Name     string // DNS record name, e.g. "rookery-ed25519._domainkey.example.com"
+	Key      string // internal identifier, e.g. "MX", "DKIM_ED25519_CNAME"
 	Expected string
 	Actual   string // empty = not found
 	Status   string // "ok" | "drifted" | "unknown" | "missing"
@@ -265,7 +266,7 @@ func (m *Manager) CheckVerification(ctx context.Context, id string) (*Verificati
 	}
 
 	result := &VerificationResult{}
-	result.Records = m.checkDNSRecords(ctx, d.Domain, *d.VerificationToken)
+	result.Records = m.checkDNSRecords(ctx, d, *d.VerificationToken)
 
 	// Gate: challenge TXT + MX must both be present.
 	var challengeOK, mxOK bool
@@ -483,8 +484,9 @@ func (m *Manager) UpgradeMTASTSModes(ctx context.Context) error {
 
 // checkDNSRecords performs DNS lookups for all Phase 4 records and returns
 // per-record status.
-func (m *Manager) checkDNSRecords(ctx context.Context, domain, token string) []RecordStatus {
+func (m *Manager) checkDNSRecords(ctx context.Context, d *Domain, token string) []RecordStatus {
 	primary := m.primaryDomain
+	domain := d.Domain
 	lookupCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -522,14 +524,22 @@ func (m *Manager) checkDNSRecords(ctx context.Context, domain, token string) []R
 		"mta-sts."+primary,
 		"MTA_STS_CNAME"))
 
+	// MTA-STS policy-version TXT. The id value is generated at registration
+	// time (Register) and stored on the domains row, so it's always available.
+	// Exact match: the id rotates when the policy changes, so a stale id is drift.
+	if d.MTASTSID != nil && *d.MTASTSID != "" {
+		results = append(results, m.checkTXT(lookupCtx, "_mta-sts."+domain,
+			"v=STSv1; id="+*d.MTASTSID, "MTA_STS_TXT"))
+	}
+
 	return results
 }
 
 func (m *Manager) checkTXT(ctx context.Context, name, expected, key string) RecordStatus {
-	rs := RecordStatus{Key: key, Expected: expected}
+	rs := RecordStatus{Name: name, Key: key, Expected: expected}
 	records, err := m.lookup().LookupTXT(ctx, name)
 	if err != nil {
-		rs.Status = "unknown"
+		rs.Status = dnsErrStatus(err)
 		return rs
 	}
 	for _, r := range records {
@@ -547,10 +557,10 @@ func (m *Manager) checkTXT(ctx context.Context, name, expected, key string) Reco
 }
 
 func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, key string) RecordStatus {
-	rs := RecordStatus{Key: key, Expected: prefix + " ..."}
+	rs := RecordStatus{Name: name, Key: key, Expected: prefix + " ..."}
 	records, err := m.lookup().LookupTXT(ctx, name)
 	if err != nil {
-		rs.Status = "unknown"
+		rs.Status = dnsErrStatus(err)
 		return rs
 	}
 	for _, r := range records {
@@ -568,10 +578,10 @@ func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, key string) 
 }
 
 func (m *Manager) checkMX(ctx context.Context, name, expectedHost string) RecordStatus {
-	rs := RecordStatus{Key: "MX", Expected: expectedHost}
+	rs := RecordStatus{Name: name, Key: "MX", Expected: expectedHost}
 	mxs, err := m.lookup().LookupMX(ctx, name)
 	if err != nil {
-		rs.Status = "unknown"
+		rs.Status = dnsErrStatus(err)
 		return rs
 	}
 	for _, mx := range mxs {
@@ -590,10 +600,10 @@ func (m *Manager) checkMX(ctx context.Context, name, expectedHost string) Record
 }
 
 func (m *Manager) checkCNAME(ctx context.Context, name, expectedTarget, key string) RecordStatus {
-	rs := RecordStatus{Key: key, Expected: expectedTarget}
+	rs := RecordStatus{Name: name, Key: key, Expected: expectedTarget}
 	target, err := m.lookup().LookupCNAME(ctx, name)
 	if err != nil {
-		rs.Status = "unknown"
+		rs.Status = dnsErrStatus(err)
 		return rs
 	}
 	target = strings.TrimSuffix(target, ".")
@@ -613,6 +623,17 @@ func (m *Manager) checkCNAME(ctx context.Context, name, expectedTarget, key stri
 	return rs
 }
 
+// dnsErrStatus maps a DNS lookup error to a record status string.
+// A confirmed "not found" (NXDOMAIN / no records) becomes "missing";
+// transient or indeterminate failures become "unknown".
+func dnsErrStatus(err error) string {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+		return "missing"
+	}
+	return "unknown"
+}
+
 func (m *Manager) lookup() *net.Resolver {
 	if m.resolver != nil {
 		return m.resolver
@@ -624,7 +645,7 @@ func (m *Manager) lookup() *net.Resolver {
 // dns_status + dns_last_checked_at. Called by the background drift worker.
 func (m *Manager) DNSCheckAll(ctx context.Context) error {
 	rows, err := m.db.Query(ctx, `
-		SELECT id, domain, verification_token
+		SELECT id, domain, verification_token, mta_sts_id
 		FROM   domains
 		WHERE  is_primary = FALSE AND verified_at IS NOT NULL
 		ORDER  BY dns_last_checked_at ASC NULLS FIRST
@@ -636,12 +657,13 @@ func (m *Manager) DNSCheckAll(ctx context.Context) error {
 
 	type dRow struct {
 		id, domain, token string
+		mtsID             *string
 	}
 	var domains []dRow
 	for rows.Next() {
 		var dr dRow
 		var tok *string
-		if err := rows.Scan(&dr.id, &dr.domain, &tok); err != nil {
+		if err := rows.Scan(&dr.id, &dr.domain, &tok, &dr.mtsID); err != nil {
 			return err
 		}
 		if tok != nil {
@@ -654,7 +676,8 @@ func (m *Manager) DNSCheckAll(ctx context.Context) error {
 	}
 
 	for _, dr := range domains {
-		records := m.checkDNSRecords(ctx, dr.domain, dr.token)
+		d := &Domain{Domain: dr.domain, MTASTSID: dr.mtsID}
+		records := m.checkDNSRecords(ctx, d, dr.token)
 		status := make(map[string]string, len(records))
 		for _, r := range records {
 			status[r.Key] = r.Status

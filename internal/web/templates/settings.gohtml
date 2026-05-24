@@ -184,8 +184,13 @@
     var t = document.getElementById('dns-records-table');
     if (!t) return;
     var html = '<thead><tr><th>name</th><th>type</th><th>value</th></tr></thead><tbody>';
+    var lastGroup = null;
     entries.forEach(function (e) {
-      html += '<tr><td><code>' + esc(e.name) + '</code></td><td>' + esc(e.type) +
+      if (e.group && e.group !== lastGroup) {
+        html += '<tr class="dns-group-heading"><td colspan="3">' + esc(e.group) + '</td></tr>';
+        lastGroup = e.group;
+      }
+      html += '<tr><td><code>' + esc(e.name) + '</code></td><td class="dns-type">' + esc(e.type) +
               '</td><td><code>' + esc(e.value) + '</code></td></tr>';
     });
     html += '</tbody>';
