@@ -117,7 +117,7 @@
     if (!form) return;
 
     const fromAddress = form.dataset.from    || '';
-    const senderKey   = form.dataset.senderKey || '';
+    const senderKey   = form.dataset.senderKey ? atob(form.dataset.senderKey) : '';
     const inReplyTo   = form.dataset.inReplyTo  || '';
     const references  = form.dataset.references || '';
     const domain      = fromAddress.includes('@') ? fromAddress.split('@')[1] : 'localhost';
