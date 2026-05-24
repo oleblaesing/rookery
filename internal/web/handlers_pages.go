@@ -155,10 +155,15 @@ func handleInvitePage(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Confi
 // GET /settings — account settings page
 // -------------------------------------------------------------------------
 
-// settingsDomain wraps a Domain with the pre-grouped pending-records table
-// for the settings page. PendingGroups is nil for verified domains.
+// settingsDomain holds the fields the settings template needs for one
+// domain row, plus the pre-grouped pending-records table. PendingGroups is
+// nil for verified domains. Flat fields (not an embedded domains.Domain)
+// because embedding promotes a .Domain field that collides with the string
+// field of the same name and breaks template resolution.
 type settingsDomain struct {
-	domains.Domain
+	ID            string
+	Name          string
+	VerifiedAt    *time.Time
 	PendingGroups []recordGroup
 }
 
@@ -186,7 +191,11 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Ma
 		primary := cfg.Domain
 		settingsDomains := make([]settingsDomain, 0, len(domList))
 		for i := range domList {
-			sd := settingsDomain{Domain: domList[i]}
+			sd := settingsDomain{
+				ID:         domList[i].ID,
+				Name:       domList[i].Domain,
+				VerifiedAt: domList[i].VerifiedAt,
+			}
 			if domList[i].VerifiedAt == nil {
 				sd.PendingGroups = groupRecords(requiredRecords(&domList[i], primary))
 			}

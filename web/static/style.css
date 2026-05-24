@@ -138,6 +138,15 @@ main {
   max-width: 440px;
 }
 
+/* settings page is tabbed and contains wide DNS tables, so it uses the full
+   main-column width; narrow sub-forms inside it opt in via .narrow-form. */
+.settings-page {
+  max-width: none;
+}
+.narrow-form {
+  max-width: 440px;
+}
+
 .field + .field {
   margin-top: 1rem;
 }
@@ -563,6 +572,7 @@ button:disabled {
 
 .dns-records {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 0.8125rem;
   margin: 0.75rem 0 1rem;
@@ -577,8 +587,9 @@ button:disabled {
   padding: 0.3rem 0.6rem;
   border-bottom: 1px solid #21262d;
 }
+.dns-records th:last-child { width: 6rem; text-align: right; }
 .dns-records td {
-  padding: 0.35rem 0.6rem;
+  padding: 0.45rem 0.6rem;
   border-bottom: 1px solid #161b22;
   vertical-align: top;
   color: #8b949e;
@@ -587,21 +598,29 @@ button:disabled {
 .dns-records tr:last-child td { border-bottom: none; }
 .dns-records code { color: #c9bfa8; font-size: 0.8rem; }
 
+.dns-records .dns-name { color: #e6d9c2; }
+.dns-records .dns-value {
+  margin-top: 0.25rem;
+  padding-left: 0.9rem;
+  border-left: 2px solid #21262d;
+  color: #8b949e;
+}
+.dns-records .dns-value code { color: #8b949e; }
+
 .dns-group-heading td {
-  padding: 0.6rem 0.6rem 0.25rem;
+  padding: 0.85rem 0.6rem 0.3rem;
   font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: #484f58;
+  color: #7dd3c8;
   border-bottom: none;
   border-top: 1px solid #21262d;
 }
 .dns-records tbody tr:first-child.dns-group-heading td { border-top: none; }
 
-.dns-type { color: #484f58; white-space: nowrap; }
-.dns-status { white-space: nowrap; }
-.dns-actual { margin-top: 0.2rem; font-size: 0.75rem; color: #f0883e; }
+.dns-status { white-space: nowrap; text-align: right; }
+.dns-actual { margin-top: 0.25rem; font-size: 0.75rem; color: #f0883e; }
 .dns-actual code { color: #f0883e; }
 
 .record-ok     .dns-status { color: #3fb950; }

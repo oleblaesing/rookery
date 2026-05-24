@@ -1,7 +1,7 @@
 {{define "title"}}settings — {{.InstanceName}}{{end}}
 
 {{define "content"}}
-<section class="form-page">
+<section class="settings-page">
   <h1>settings</h1>
 
   <div class="tab-strip" role="tablist">
@@ -16,14 +16,14 @@
     <ul class="domain-list">
       {{range .Domains}}
       <li class="domain-item">
-        <span class="domain-name">{{.Domain}}</span>
+        <span class="domain-name">{{.Name}}</span>
         {{if .VerifiedAt}}
         <span class="domain-status status-ok">verified</span>
         {{else}}
         <span class="domain-status status-pending">pending</span>
         {{end}}
         <button class="button button-danger button-small"
-                onclick="deleteDomain('{{.ID}}', '{{.Domain}}')">remove</button>
+                onclick="deleteDomain('{{.ID}}', '{{.Name}}')">remove</button>
         {{if not .VerifiedAt}}
         <div id="verify-status-{{.ID}}" class="verify-status-container">
           <p class="field-hint">Publish the records below, then click <em>check now</em>.</p>
@@ -33,16 +33,17 @@
           </div>
           <table class="dns-records">
             <thead>
-              <tr><th>name</th><th>type</th><th>value</th><th>status</th></tr>
+              <tr><th>record</th><th>status</th></tr>
             </thead>
             <tbody>
               {{range .PendingGroups}}
-              <tr class="dns-group-heading"><td colspan="4">{{.Label}}</td></tr>
+              <tr class="dns-group-heading"><td colspan="2">{{.Label}}</td></tr>
               {{range .Records}}
               <tr>
-                <td><code>{{.Name}}</code></td>
-                <td class="dns-type">{{.Type}}</td>
-                <td><code>{{.Expected}}</code></td>
+                <td>
+                  <code class="dns-name">{{.Name}}</code>
+                  <div class="dns-value"><code>{{.Expected}}</code></div>
+                </td>
                 <td class="dns-status">—</td>
               </tr>
               {{end}}
@@ -59,7 +60,7 @@
     {{end}}
 
     <h3>add a domain</h3>
-    <form id="add-domain-form">
+    <form id="add-domain-form" class="narrow-form">
       <div class="field">
         <label for="new-domain">domain name</label>
         <input type="text" id="new-domain" name="domain"
@@ -86,7 +87,7 @@
   {{/* ---- private key tab ---- */}}
   <div id="tab-privatekey" role="tabpanel" aria-labelledby="tab-btn-privatekey" class="tab-panel tab-panel-active">
 
-    <div class="info-block">
+    <div class="info-block narrow-form">
       <p>Your recovery file contains your private key, encrypted with your
       passphrase. The server does not have a copy of either.</p>
       <p><strong>This file is your second factor.</strong> Logging in requires
@@ -108,7 +109,7 @@
       machines where another user or process might read browser storage.</p>
     </div>
 
-    <form id="export-form">
+    <form id="export-form" class="narrow-form">
       <div class="field">
         <label for="export-passphrase">private key passphrase</label>
         <input type="password" id="export-passphrase" name="export_passphrase"
@@ -205,16 +206,17 @@
   function renderDNSTable(entries) {
     var t = document.getElementById('dns-records-table');
     if (!t) return;
-    var html = '<thead><tr><th>name</th><th>type</th><th>value</th><th>status</th></tr></thead><tbody>';
+    var html = '<thead><tr><th>record</th><th>status</th></tr></thead><tbody>';
     var lastGroup = null;
     entries.forEach(function (e) {
       if (e.group && e.group !== lastGroup) {
-        html += '<tr class="dns-group-heading"><td colspan="4">' + esc(e.group) + '</td></tr>';
+        html += '<tr class="dns-group-heading"><td colspan="2">' + esc(e.group) + '</td></tr>';
         lastGroup = e.group;
       }
-      html += '<tr><td><code>' + esc(e.name) + '</code></td>' +
-              '<td class="dns-type">' + esc(e.type) + '</td>' +
-              '<td><code>' + esc(e.value) + '</code></td>' +
+      html += '<tr><td>' +
+                '<code class="dns-name">' + esc(e.name) + '</code>' +
+                '<div class="dns-value"><code>' + esc(e.value) + '</code></div>' +
+              '</td>' +
               '<td class="dns-status">—</td></tr>';
     });
     html += '</tbody>';

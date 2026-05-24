@@ -201,49 +201,49 @@ func buildRequiredDNS(d *domains.Domain, primary string) []dnsEntry {
 
 	entries = append(entries,
 		dnsEntry{
-			Group: "verification",
+			Group: "verification (TXT)",
 			Name:  "_rookery-challenge." + d.Domain,
 			Type:  "TXT",
 			Value: token,
 		},
 		dnsEntry{
-			Group: "mail routing",
+			Group: "mail routing (MX)",
 			Name:  d.Domain,
 			Type:  "MX",
 			Value: "10 " + primary,
 		},
 		dnsEntry{
-			Group: "sender authentication",
+			Group: "SPF (TXT)",
 			Name:  d.Domain,
 			Type:  "TXT",
 			Value: "v=spf1 include:_spf." + primary + " ~all",
 		},
 		dnsEntry{
-			Group: "sender authentication",
+			Group: "DKIM (CNAME)",
 			Name:  "rookery-ed25519._domainkey." + d.Domain,
 			Type:  "CNAME",
 			Value: "rookery-ed25519._domainkey." + primary,
 		},
 		dnsEntry{
-			Group: "sender authentication",
+			Group: "DKIM (CNAME)",
 			Name:  "rookery-rsa._domainkey." + d.Domain,
 			Type:  "CNAME",
 			Value: "rookery-rsa._domainkey." + primary,
 		},
 		dnsEntry{
-			Group: "web key directory",
+			Group: "web key directory (CNAME)",
 			Name:  "openpgpkey." + d.Domain,
 			Type:  "CNAME",
 			Value: "openpgpkey." + primary,
 		},
 		dnsEntry{
-			Group: "mta-sts",
+			Group: "MTA-STS policy (CNAME)",
 			Name:  "mta-sts." + d.Domain,
 			Type:  "CNAME",
 			Value: "mta-sts." + primary,
 		},
 		dnsEntry{
-			Group: "mta-sts",
+			Group: "MTA-STS version (TXT)",
 			Name:  "_mta-sts." + d.Domain,
 			Type:  "TXT",
 			Value: "v=STSv1; id=" + mtsID,
@@ -449,23 +449,26 @@ type recordGroup struct {
 }
 
 // recordKeyGroup maps internal RecordStatus.Key values to display group labels.
+// Labels include the DNS record type so the per-row type column can be dropped.
 var recordKeyGroup = map[string]string{
-	"CHALLENGE":          "verification",
-	"MX":                 "mail routing",
-	"SPF":                "sender authentication",
-	"DKIM_ED25519_CNAME": "sender authentication",
-	"DKIM_RSA_CNAME":     "sender authentication",
-	"WKD_CNAME":          "web key directory",
-	"MTA_STS_CNAME":      "mta-sts",
-	"MTA_STS_TXT":        "mta-sts",
+	"CHALLENGE":          "verification (TXT)",
+	"MX":                 "mail routing (MX)",
+	"SPF":                "SPF (TXT)",
+	"DKIM_ED25519_CNAME": "DKIM (CNAME)",
+	"DKIM_RSA_CNAME":     "DKIM (CNAME)",
+	"WKD_CNAME":          "web key directory (CNAME)",
+	"MTA_STS_CNAME":      "MTA-STS policy (CNAME)",
+	"MTA_STS_TXT":        "MTA-STS version (TXT)",
 }
 
 var recordGroupOrder = []string{
-	"verification",
-	"mail routing",
-	"sender authentication",
-	"web key directory",
-	"mta-sts",
+	"verification (TXT)",
+	"mail routing (MX)",
+	"SPF (TXT)",
+	"DKIM (CNAME)",
+	"web key directory (CNAME)",
+	"MTA-STS policy (CNAME)",
+	"MTA-STS version (TXT)",
 	"other",
 }
 
