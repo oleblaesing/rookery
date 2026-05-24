@@ -432,34 +432,28 @@ function _randomHex(n) {
  * extractDecryptedBody(decrypted) → string
  *
  * The decrypted PGP payload may be either:
- *   a) plain text  — when no sender key was attached
- *   b) multipart/mixed  — body part + application/pgp-keys part
+ *   a) plain text  — bare body emitted by rookery's encryptMessage()
+ *   b) a full MIME message  — as sent by Proton Mail and other clients that
+ *      encrypt a MIME structure (multipart/mixed with a text/plain part and
+ *      an application/pgp-keys part, using any boundary quoting style and any
+ *      Content-Transfer-Encoding on the text part).
  *
- * In case (b) we extract just the text/plain part body.
+ * Uses the existing mimeExtractText helper so that unquoted boundaries and
+ * quoted-printable / base64 transfer encodings are handled correctly.
  */
 function extractDecryptedBody(decrypted) {
-  // Find Content-Type header in the decrypted payload.
-  const ctMatch = decrypted.match(/^Content-Type:\s*multipart\/[^\s;]+;\s*boundary="([^"]+)"/im);
-  if (!ctMatch) {
-    // encryptMessage() emits bare text with no MIME wrapper, so only strip a
-    // leading header block when the payload actually has one — otherwise a
-    // blank line inside the body would be mistaken for the header/body
-    // separator and the first paragraph would be silently dropped.
-    return stripMimeHeadersIfPresent(decrypted);
+  // If the payload has MIME headers (Content-Type present before the first
+  // blank line), parse it as a full MIME message.
+  const { headers, body } = mimeSplit(decrypted);
+  if (headers && mimeHeader(headers, 'Content-Type')) {
+    const result = mimeExtractText(headers, body);
+    if (result !== null) return result;
   }
-
-  const boundary = ctMatch[1];
-  const parts = decrypted.split('--' + boundary);
-  for (const part of parts) {
-    if (!part || part.startsWith('--')) continue; // delimiter or epilogue
-    if (!/Content-Type:\s*text\/plain/i.test(part)) continue;
-    const sep = part.indexOf('\r\n\r\n');
-    if (sep !== -1) return part.slice(sep + 4).replace(/\r\n$/, '');
-    const sep2 = part.indexOf('\n\n');
-    if (sep2 !== -1) return part.slice(sep2 + 2).replace(/\n$/, '');
-  }
-
-  return decrypted;
+  // encryptMessage() emits bare text with no MIME wrapper, so only strip a
+  // leading header block when the payload actually has one — otherwise a
+  // blank line inside the body would be mistaken for the header/body
+  // separator and the first paragraph would be silently dropped.
+  return stripMimeHeadersIfPresent(decrypted);
 }
 
 function stripMimeHeadersIfPresent(text) {
