@@ -24,12 +24,12 @@
         {{end}}
         <button class="button button-danger button-small"
                 onclick="deleteDomain('{{.ID}}', '{{.Name}}')">remove</button>
+        <div class="form-actions">
+          <button class="button button-small"
+                  onclick="checkDomain('{{.ID}}')">check now</button>
+        </div>
         <div id="verify-status-{{.ID}}" class="verify-status-container">
           <p class="field-hint">Publish the records below, then click <em>check now</em>.</p>
-          <div class="form-actions">
-            <button class="button button-small"
-                    onclick="checkDomain('{{.ID}}')">check now</button>
-          </div>
           <table class="dns-records">
             <thead>
               <tr><th>record</th><th>status</th></tr>
