@@ -278,10 +278,24 @@ TOML
 
     # ---- ./rookery.service --------------------------------------------------
     if [ ! -f "$SCRIPT_DIR/rookery.service" ]; then
-        local tmpl="$SCRIPT_DIR/docs/ops/rookery.service"
-        [ -f "$tmpl" ] || die "docs/ops/rookery.service template not found"
         local svc_user="${opt_user:-$(whoami)}"
-        sed "s/YOUR_UNIX_USER/${svc_user}/" "$tmpl" > "$SCRIPT_DIR/rookery.service"
+        cat > "$SCRIPT_DIR/rookery.service" << EOF
+[Unit]
+Description=rookery mail server
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/rookery
+ExecStart=/opt/rookery/rookery start --prod -d
+ExecStop=/opt/rookery/rookery stop
+User=${svc_user}
+
+[Install]
+WantedBy=multi-user.target
+EOF
         info "staged rookery.service with User=${svc_user}"
     else
         info "rookery.service already exists — skipping"
