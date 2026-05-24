@@ -46,7 +46,7 @@ func handleMTASTS(domMgr *domains.Manager) http.HandlerFunc {
 			return
 		}
 
-		mxHost := "mail." + domMgr.PrimaryDomain()
+		mxHost := domMgr.PrimaryDomain()
 		maxAge := 86400
 		if mode == "enforce" {
 			maxAge = 604800
@@ -79,7 +79,6 @@ func handleTLSAsk(domMgr *domains.Manager) http.HandlerFunc {
 		// Always allow the primary domain and its standard subdomains.
 		switch domain {
 		case primary,
-			"mail." + primary,
 			"mta-sts." + primary,
 			"openpgpkey." + primary:
 			w.WriteHeader(http.StatusOK)
@@ -166,7 +165,7 @@ func buildRequiredDNS(d *domains.Domain, primary string) []dnsEntry {
 		dnsEntry{
 			Name:  d.Domain,
 			Type:  "MX",
-			Value: "10 mail." + primary,
+			Value: "10 " + primary,
 		},
 		dnsEntry{
 			Name:  d.Domain,

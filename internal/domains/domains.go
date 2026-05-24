@@ -89,9 +89,9 @@ type VerificationResult struct {
 
 // Manager handles domain lifecycle for an instance.
 type Manager struct {
-	db          *pgxpool.Pool
+	db            *pgxpool.Pool
 	primaryDomain string
-	resolver    *net.Resolver
+	resolver      *net.Resolver
 }
 
 // NewManager creates a Manager. resolverAddr is the DNS resolver to use for
@@ -494,7 +494,7 @@ func (m *Manager) checkDNSRecords(ctx context.Context, domain, token string) []R
 	results = append(results, m.checkTXT(lookupCtx, "_rookery-challenge."+domain, token, "CHALLENGE"))
 
 	// MX
-	results = append(results, m.checkMX(lookupCtx, domain, "mail."+primary))
+	results = append(results, m.checkMX(lookupCtx, domain, primary))
 
 	// SPF TXT
 	results = append(results, m.checkTXTPrefix(lookupCtx, domain,
