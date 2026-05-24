@@ -10,10 +10,24 @@ import (
 //go:embed templates/*.gohtml
 var templateFS embed.FS
 
+// AssetVersion is injected at build time via ldflags
+// (-X rookery/internal/web.AssetVersion=<git-hash>) and appended as a
+// cache-busting query string to static asset URLs via the assetURL template func.
+var AssetVersion string
+
+var tmplFuncs = template.FuncMap{
+	"assetURL": func(path string) string {
+		if AssetVersion == "" {
+			return path
+		}
+		return path + "?v=" + AssetVersion
+	},
+}
+
 // renderFragment parses and executes a standalone HTML fragment template (no
 // base shell). Used for partial-page responses polled by partials.js.
 func renderFragment(w http.ResponseWriter, name string, data any) {
-	t, err := template.ParseFS(templateFS, "templates/"+name)
+	t, err := template.New(name).Funcs(tmplFuncs).ParseFS(templateFS, "templates/"+name)
 	if err != nil {
 		slog.Error("render fragment: parse", "name", name, "err", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -38,7 +52,7 @@ var baseTemplate *template.Template
 
 func init() {
 	var err error
-	baseTemplate, err = template.New("base.gohtml").ParseFS(templateFS, "templates/base.gohtml")
+	baseTemplate, err = template.New("base.gohtml").Funcs(tmplFuncs).ParseFS(templateFS, "templates/base.gohtml")
 	if err != nil {
 		panic("web: parse base template: " + err.Error())
 	}

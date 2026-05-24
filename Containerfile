@@ -24,6 +24,7 @@ FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.25-bookworm AS go-buil
 
 ARG TARGETARCH
 ARG TARGETOS=linux
+ARG GIT_REVISION=dev
 
 WORKDIR /src
 
@@ -35,7 +36,7 @@ COPY . .
 
 # CGO_ENABLED=0 produces a fully static binary compatible with distroless.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} \
-    go build -trimpath -ldflags="-s -w" \
+    go build -trimpath -ldflags="-s -w -X rookery/internal/web.AssetVersion=${GIT_REVISION}" \
     -o /out/rookery-server \
     ./cmd/rookery-server/
 

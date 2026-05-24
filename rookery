@@ -17,6 +17,9 @@ ROOKERY_SMTP="${ROOKERY_SMTP:-smtp://localhost:25}"
 ROOKERY_HTTP="${ROOKERY_HTTP:-http://localhost:8080}"
 # Global used by the send-mail encrypted path for temp-dir cleanup.
 _SEND_MAIL_TMPDIR=""
+# Passed as a build arg so the binary embeds the git hash for cache busting.
+GIT_REVISION="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo dev)"
+export GIT_REVISION
 
 # ---------------------------------------------------------------------------
 # Utilities

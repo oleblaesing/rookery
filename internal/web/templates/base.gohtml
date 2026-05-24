@@ -17,8 +17,8 @@
   {{- if .CSRFToken}}
   <meta name="csrf-token" content="{{.CSRFToken}}">
   {{- end}}
-  <link rel="icon" href="/static/favicon.ico">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="{{assetURL "/static/favicon.ico"}}">
+  <link rel="stylesheet" href="{{assetURL "/static/style.css"}}">
 </head>
 <body>
   <header class="site-header">
@@ -36,7 +36,7 @@
   <main>
     {{block "content" .}}{{end}}
   </main>
-  <script src="/static/partials.js" defer></script>
+  <script src="{{assetURL "/static/partials.js"}}" defer></script>
   {{block "scripts" .}}{{end}}
   <footer class="site-footer">
     <span>powered by <a href="https://github.com/anomalyco/rookery">rookery</a></span>

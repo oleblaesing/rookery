@@ -52,6 +52,8 @@ services:
     build:
       context: .
       dockerfile: Containerfile
+      args:
+        GIT_REVISION: ${GIT_REVISION:-dev}
     image: rookery:latest
     restart: unless-stopped
     depends_on:
