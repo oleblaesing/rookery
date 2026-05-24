@@ -112,6 +112,19 @@
     return fullHeaders.join('\r\n') + '\r\n\r\n' + body;
   }
 
+  // RFC 3156 §4: the encrypted payload inside the application/octet-stream
+  // part is itself a MIME entity, not bare text. Without the Content-Type
+  // header ProtonMail (and other strict clients) reject the message — either
+  // as a decryption error, or with "The MIMEType only allows 'text/html', or
+  // 'text/plain'" when the user hits reply.
+  function buildInnerMIME(body) {
+    const normalized = body.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+    return 'Content-Type: text/plain; charset=utf-8\r\n' +
+           'Content-Transfer-Encoding: 8bit\r\n' +
+           '\r\n' +
+           normalized;
+  }
+
   ready(async function () {
     const form = document.getElementById('compose-form');
     if (!form) return;
@@ -197,7 +210,7 @@
           const privateKey = await loadSessionKey();
 
           const pgpBlock = await encryptMessage(
-            body,
+            buildInnerMIME(body),
             [recipientKeyArmored],
             senderKey || null,
             privateKey || null,
