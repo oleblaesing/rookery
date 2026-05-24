@@ -496,12 +496,15 @@ func (m *Manager) checkDNSRecords(ctx context.Context, d *Domain, token string) 
 	// Challenge TXT
 	results = append(results, m.checkTXT(lookupCtx, "_rookery-challenge."+domain, token, "CHALLENGE"))
 
-	// MX
-	results = append(results, m.checkMX(lookupCtx, domain, primary))
+	// MX — match by host (any priority is fine), surface the full record
+	// value (priority + host) as the suggested publishable form.
+	results = append(results, m.checkMX(lookupCtx, domain, primary, "10 "+primary))
 
-	// SPF TXT
+	// SPF TXT — match by prefix (operators may append qualifiers), but
+	// surface the full recommended value as the suggested record to publish.
 	results = append(results, m.checkTXTPrefix(lookupCtx, domain,
-		"v=spf1 include:_spf."+primary, "SPF"))
+		"v=spf1 include:_spf."+primary,
+		"v=spf1 include:_spf."+primary+" ~all", "SPF"))
 
 	// DKIM CNAMEs
 	results = append(results, m.checkCNAME(lookupCtx,
@@ -557,8 +560,12 @@ func (m *Manager) checkTXT(ctx context.Context, name, expected, key string) Reco
 	return rs
 }
 
-func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, key string) RecordStatus {
-	rs := RecordStatus{Name: name, Type: "TXT", Key: key, Expected: prefix + " ..."}
+// checkTXTPrefix verifies that some TXT record at name starts with prefix.
+// suggested is the full record value displayed to the operator as the
+// recommended publishable form; the actual match is prefix-only so operators
+// can append qualifiers (e.g. SPF "include:..." chains).
+func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, suggested, key string) RecordStatus {
+	rs := RecordStatus{Name: name, Type: "TXT", Key: key, Expected: suggested}
 	records, err := m.lookup().LookupTXT(ctx, name)
 	if err != nil {
 		rs.Status = dnsErrStatus(err)
@@ -578,8 +585,11 @@ func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, key string) 
 	return rs
 }
 
-func (m *Manager) checkMX(ctx context.Context, name, expectedHost string) RecordStatus {
-	rs := RecordStatus{Name: name, Type: "MX", Key: "MX", Expected: expectedHost}
+// checkMX verifies that some MX record at name points to expectedHost. The
+// MX priority is ignored — operators may use any value. suggested is the full
+// record (priority + host) shown to the operator as the recommended form.
+func (m *Manager) checkMX(ctx context.Context, name, expectedHost, suggested string) RecordStatus {
+	rs := RecordStatus{Name: name, Type: "MX", Key: "MX", Expected: suggested}
 	mxs, err := m.lookup().LookupMX(ctx, name)
 	if err != nil {
 		rs.Status = dnsErrStatus(err)
@@ -588,13 +598,13 @@ func (m *Manager) checkMX(ctx context.Context, name, expectedHost string) Record
 	for _, mx := range mxs {
 		host := strings.TrimSuffix(mx.Host, ".")
 		if strings.EqualFold(host, expectedHost) {
-			rs.Actual = host
+			rs.Actual = fmt.Sprintf("%d %s", mx.Pref, host)
 			rs.Status = "ok"
 			return rs
 		}
 	}
 	if len(mxs) > 0 {
-		rs.Actual = strings.TrimSuffix(mxs[0].Host, ".")
+		rs.Actual = fmt.Sprintf("%d %s", mxs[0].Pref, strings.TrimSuffix(mxs[0].Host, "."))
 	}
 	rs.Status = "drifted"
 	return rs
