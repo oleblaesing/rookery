@@ -170,7 +170,7 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 		deliveryErr = smtppkg.DeliverLocal(ctx, w.db, w.st, w.cfg, fromAddress, recipient, rawMsg)
 		if deliveryErr == nil {
 			w.markDelivered(ctx, queueID)
-			slog.Info("queue: locally delivered", "queue_id", queueID, "to", recipient)
+			slog.Info("queue: locally delivered", "queue_id", queueID)
 			return true, nil
 		}
 	} else {
@@ -196,13 +196,12 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 
 		if deliveryErr == nil {
 			w.markDelivered(ctx, queueID)
-			slog.Info("queue: delivered", "queue_id", queueID, "to", recipient, "attempts", attempts+1)
+			slog.Info("queue: delivered", "queue_id", queueID, "attempts", attempts+1)
 			return true, nil
 		}
 	}
 
-	slog.Warn("queue: delivery failed", "queue_id", queueID, "to", recipient,
-		"attempt", attempts+1, "err", deliveryErr)
+	slog.Warn("queue: delivery failed", "queue_id", queueID, "attempt", attempts+1, "err", deliveryErr)
 
 	// ErrNoSuchUser is a hard failure — bounce immediately.
 	isHard := errors.Is(deliveryErr, smtppkg.ErrNoSuchUser) || isHardFailure(deliveryErr)

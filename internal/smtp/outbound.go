@@ -58,7 +58,7 @@ func DeliverViaRelay(ctx context.Context, relayHost string, relayPort int, from,
 		relayPort = 25
 	}
 	addr := net.JoinHostPort(relayHost, strconv.Itoa(relayPort))
-	slog.Debug("outbound: delivering via relay", "relay", addr, "to", to)
+	slog.Debug("outbound: delivering via relay", "relay", addr)
 	return tryDeliver(ctx, relayHost, addr, relayHost, from, to, message)
 }
 

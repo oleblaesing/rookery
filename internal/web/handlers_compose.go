@@ -288,11 +288,7 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			}
 		}
 
-		slog.Info("send: message queued",
-			"from", fromAddress,
-			"recipients", len(allRecipients),
-			"subject", meta.Subject,
-		)
+		slog.Info("send: message queued", "recipients", len(allRecipients))
 
 		respondJSON(w, http.StatusCreated, map[string]string{"id": messageID})
 	}

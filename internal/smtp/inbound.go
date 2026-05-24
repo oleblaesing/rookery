@@ -139,7 +139,7 @@ func (s *inboundSession) Rcpt(to string, _ *smtp.RcptOptions) error {
 			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1},
 				Message: "No such user"}
 		}
-		slog.Error("smtp: rcpt lookup failed", "to", to, "err", err)
+		slog.Error("smtp: rcpt lookup failed", "err", err)
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 0, 0},
 			Message: "Temporary error, try again later"}
 	}
@@ -190,7 +190,7 @@ func (s *inboundSession) Data(r io.Reader) error {
 	for _, to := range s.recipients {
 		userID, _, err := resolveRecipient(ctx, s.backend.db, s.backend.cfg, to)
 		if err != nil {
-			slog.Warn("smtp: recipient resolve failed at delivery time", "to", to, "err", err)
+			slog.Warn("smtp: recipient resolve failed at delivery time", "err", err)
 			continue
 		}
 		if err := storeMessage(ctx, s.backend.db, userID, s.from, meta, blobDigest, int64(len(rawMsg))); err != nil {
@@ -198,12 +198,12 @@ func (s *inboundSession) Data(r io.Reader) error {
 			// Continue to next recipient.
 			continue
 		}
-		slog.Info("smtp: message delivered", "to", to, "from", s.from, "subject", meta.Subject, "blob", blobDigest)
+		slog.Info("smtp: message delivered", "blob", blobDigest)
 
 		// Cache the sender's harvested key into this recipient's known_keys.
 		if harvestedKey != "" {
 			if err := harvestKey(ctx, s.backend.db, userID, s.from, harvestedKey); err != nil {
-				slog.Debug("smtp: key harvest failed", "from", s.from, "err", err)
+				slog.Debug("smtp: key harvest failed", "err", err)
 			}
 		}
 	}
