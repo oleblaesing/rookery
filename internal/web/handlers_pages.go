@@ -196,9 +196,7 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Ma
 				Name:       domList[i].Domain,
 				VerifiedAt: domList[i].VerifiedAt,
 			}
-			if domList[i].VerifiedAt == nil {
-				sd.PendingGroups = groupRecords(requiredRecords(&domList[i], primary))
-			}
+			sd.PendingGroups = groupRecords(requiredRecords(&domList[i], primary))
 			settingsDomains = append(settingsDomains, sd)
 		}
 		renderTemplate(w, "settings.gohtml", settingsPageData{

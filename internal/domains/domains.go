@@ -269,17 +269,15 @@ func (m *Manager) CheckVerification(ctx context.Context, id string) (*Verificati
 	result := &VerificationResult{}
 	result.Records = m.checkDNSRecords(ctx, d, *d.VerificationToken)
 
-	// Gate: challenge TXT + MX must both be present.
-	var challengeOK, mxOK bool
+	// All required records must be present before the domain is considered verified.
+	allOK := len(result.Records) > 0
 	for _, r := range result.Records {
-		if r.Key == "CHALLENGE" && r.Status == "ok" {
-			challengeOK = true
-		}
-		if r.Key == "MX" && r.Status == "ok" {
-			mxOK = true
+		if r.Status != "ok" {
+			allOK = false
+			break
 		}
 	}
-	result.Verified = challengeOK && mxOK
+	result.Verified = allOK
 
 	now := time.Now().UTC()
 	if result.Verified && d.VerifiedAt == nil {

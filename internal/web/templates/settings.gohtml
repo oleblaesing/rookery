@@ -24,7 +24,6 @@
         {{end}}
         <button class="button button-danger button-small"
                 onclick="deleteDomain('{{.ID}}', '{{.Name}}')">remove</button>
-        {{if not .VerifiedAt}}
         <div id="verify-status-{{.ID}}" class="verify-status-container">
           <p class="field-hint">Publish the records below, then click <em>check now</em>.</p>
           <div class="form-actions">
@@ -51,7 +50,6 @@
             </tbody>
           </table>
         </div>
-        {{end}}
       </li>
       {{end}}
     </ul>
