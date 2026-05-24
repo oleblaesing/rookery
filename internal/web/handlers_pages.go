@@ -343,6 +343,8 @@ func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 		}
 
 		// Look up the sender's public key for client-side signature verification.
+		// First try local users; fall back to the per-user known_keys cache for
+		// external correspondents (e.g. keys fetched via WKD when sending to them).
 		var senderKeyB64 string
 		if m.FromAddress != "" {
 			var armoredKey string
@@ -354,6 +356,14 @@ func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 				WHERE  a.address = $1
 				LIMIT  1
 			`, m.FromAddress).Scan(&armoredKey)
+			if err != nil || armoredKey == "" {
+				err = db.QueryRow(r.Context(), `
+					SELECT armored_public_key
+					FROM   known_keys
+					WHERE  user_id = $1 AND address = $2
+					LIMIT  1
+				`, userID, m.FromAddress).Scan(&armoredKey)
+			}
 			if err == nil && armoredKey != "" {
 				senderKeyB64 = base64.StdEncoding.EncodeToString([]byte(armoredKey))
 			}
