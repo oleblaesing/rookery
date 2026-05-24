@@ -18,3 +18,4 @@ rookery-server
 # Node (esbuild is installed locally for editor tooling only;
 # the real build happens inside the Containerfile)
 web/crypto/node_modules/
+web/static/crypto.js
