@@ -82,6 +82,11 @@
       '\tboundary="' + boundary + '"',
     ]);
 
+    // Normalize the PGP block to CRLF so the MIME body is consistently CRLF
+    // throughout.  OpenPGP.js emits LF-only armor; mixing LF inside a CRLF
+    // MIME body produces non-standard line endings that strict parsers reject.
+    const pgpBlockCRLF = pgpBlock.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+
     const body = [
       '--' + boundary,
       'Content-Type: application/pgp-encrypted',
@@ -92,7 +97,7 @@
       'Content-Type: application/octet-stream; name="encrypted.asc"',
       'Content-Disposition: inline; filename="encrypted.asc"',
       '',
-      pgpBlock,
+      pgpBlockCRLF,
       '--' + boundary + '--',
     ].join('\r\n');
 

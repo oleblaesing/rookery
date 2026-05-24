@@ -111,20 +111,26 @@ func lookupLocal(ctx context.Context, db *pgxpool.Pool, address string) (*Result
 }
 
 func lookupKnownKeys(ctx context.Context, db *pgxpool.Pool, userID, address string) (*Result, error) {
-	var fp, armored string
-	var firstSeen time.Time
+	var fp, armored, source string
+	var firstSeen, lastSeen time.Time
 	err := db.QueryRow(ctx, `
-		SELECT fingerprint, armored_public_key, first_seen_at
+		SELECT fingerprint, armored_public_key, source, first_seen_at, last_seen_at
 		FROM   known_keys
 		WHERE  user_id = $1 AND address = $2
 		ORDER  BY last_seen_at DESC
 		LIMIT  1
-	`, userID, address).Scan(&fp, &armored, &firstSeen)
+	`, userID, address).Scan(&fp, &armored, &source, &firstSeen, &lastSeen)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("discovery: known_keys lookup: %w", err)
+	}
+	// WKD-sourced and auto-attached keys are re-validated after 7 days so that
+	// key rotations (e.g. ProtonMail key refresh) are picked up automatically.
+	// Manually-added keys are kept indefinitely.
+	if source != "manual" && time.Since(lastSeen) > 7*24*time.Hour {
+		return nil, nil
 	}
 	t := firstSeen
 	return &Result{ArmoredPublicKey: armored, Fingerprint: fp, Source: "known_keys", FirstSeenAt: &t}, nil

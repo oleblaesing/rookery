@@ -392,9 +392,19 @@ export async function encryptMessage(bodyText, recipientArmoredKeys, senderPubli
     recipientArmoredKeys.map(k => openpgp.readKey({ armoredKey: k }))
   );
 
-  // Also encrypt to the sender so they can decrypt their own sent mail.
-  // Key distribution uses WKD; no need to embed the key in the payload.
-  if (signingKey) {
+  // Always encrypt to the sender for self-decryption.  Using the public key
+  // directly (senderPublicKeyArmored) means this works even when no session
+  // key is cached — previously the sender key was silently omitted in that
+  // case.  It also keeps a rookery key (which lacks the seipdv2 feature bit)
+  // in the encryption set, preventing OpenPGP.js from upgrading to SEIPDv2
+  // solely because the recipient's key (e.g. ProtonMail) advertises it.
+  if (senderPublicKeyArmored) {
+    const senderKey = await openpgp.readKey({ armoredKey: senderPublicKeyArmored });
+    const senderFp = senderKey.getFingerprint();
+    if (!encryptionKeys.some(k => k.getFingerprint() === senderFp)) {
+      encryptionKeys.push(senderKey);
+    }
+  } else if (signingKey) {
     encryptionKeys.push(signingKey.toPublic());
   }
 

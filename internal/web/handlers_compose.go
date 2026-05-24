@@ -28,10 +28,11 @@ import (
 // -------------------------------------------------------------------------
 
 type composePageData struct {
-	InstanceName    string
-	User            *userProfile
-	CSRFToken       string
-	FromAddress string
+	InstanceName       string
+	User               *userProfile
+	CSRFToken          string
+	FromAddress        string
+	SenderPublicKeyB64 string // base64-encoded armored public key; empty if unavailable
 	// Reply pre-fill fields.
 	ReplyToHeader string // original Message-ID header value
 	ReplyToID     string // message UUID
@@ -49,22 +50,26 @@ func handleComposePage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		var fromAddress string
+		var fromAddress, armoredPublicKey string
 		if err := db.QueryRow(r.Context(), `
-			SELECT a.address
+			SELECT a.address, COALESCE(k.armored_public_key, '')
 			FROM   users u
 			JOIN   addresses a ON a.id = u.primary_address_id
+			LEFT JOIN user_keys k ON k.user_id = u.id AND k.is_active = TRUE
 			WHERE  u.id = $1
-		`, userID).Scan(&fromAddress); err != nil {
+			ORDER  BY k.created_at DESC
+			LIMIT  1
+		`, userID).Scan(&fromAddress, &armoredPublicKey); err != nil {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
 		}
 
 		data := composePageData{
-			InstanceName: cfg.InstanceName,
-			User:         user,
-			CSRFToken:    auth.CSRFTokenFromContext(r.Context()),
-			FromAddress:  fromAddress,
+			InstanceName:       cfg.InstanceName,
+			User:               user,
+			CSRFToken:          auth.CSRFTokenFromContext(r.Context()),
+			FromAddress:        fromAddress,
+			SenderPublicKeyB64: base64.StdEncoding.EncodeToString([]byte(armoredPublicKey)),
 		}
 
 		// Handle reply pre-fill.
