@@ -310,23 +310,19 @@ func (m *Manager) CheckVerification(ctx context.Context, id string) (*Verificati
 }
 
 // EnsureReservedAddresses creates postmaster/abuse/hostmaster/webmaster alias
-// rows for the domain, pointing to the owner's primary address. Idempotent.
+// rows for the domain, pointing to the owner's primary address, and ensures
+// the owner's own local-part has a direct address on the domain. Idempotent.
 func (m *Manager) EnsureReservedAddresses(ctx context.Context, domainID, ownerUserID string) error {
-	// Fetch owner's primary_address_id.
-	var primaryAddrID string
+	// Fetch owner's primary_address_id and local_part.
+	var primaryAddrID, primaryLocalPart string
 	err := m.db.QueryRow(ctx, `
-		SELECT primary_address_id FROM users WHERE id = $1
-	`, ownerUserID).Scan(&primaryAddrID)
+		SELECT a.id, a.local_part
+		FROM   users u
+		JOIN   addresses a ON a.id = u.primary_address_id
+		WHERE  u.id = $1
+	`, ownerUserID).Scan(&primaryAddrID, &primaryLocalPart)
 	if err != nil {
 		return fmt.Errorf("domains: reserved: fetch owner primary address: %w", err)
-	}
-
-	var primaryAddr string
-	err = m.db.QueryRow(ctx, `
-		SELECT address FROM addresses WHERE id = $1
-	`, primaryAddrID).Scan(&primaryAddr)
-	if err != nil {
-		return fmt.Errorf("domains: reserved: fetch primary address text: %w", err)
 	}
 
 	// Fetch the domain name.
@@ -335,6 +331,18 @@ func (m *Manager) EnsureReservedAddresses(ctx context.Context, domainID, ownerUs
 		`SELECT domain FROM domains WHERE id = $1`, domainID,
 	).Scan(&domainName); err != nil {
 		return err
+	}
+
+	// Ensure the owner's own address exists on this domain as a direct address.
+	ownerAddr := primaryLocalPart + "@" + domainName
+	if _, err := m.db.Exec(ctx, `
+		INSERT INTO addresses
+			(user_id, domain_id, local_part, address,
+			 is_alias, is_reserved, delivery_method)
+		VALUES ($1, $2, $3, $4, FALSE, FALSE, 'direct')
+		ON CONFLICT (local_part, domain_id) DO NOTHING
+	`, ownerUserID, domainID, primaryLocalPart, ownerAddr); err != nil {
+		return fmt.Errorf("domains: insert owner address %s: %w", ownerAddr, err)
 	}
 
 	for _, lp := range reservedLocalParts {
@@ -348,6 +356,38 @@ func (m *Manager) EnsureReservedAddresses(ctx context.Context, domainID, ownerUs
 		`, ownerUserID, domainID, lp, addr, primaryAddrID)
 		if err != nil {
 			return fmt.Errorf("domains: insert reserved address %s: %w", addr, err)
+		}
+	}
+	return nil
+}
+
+// BackfillOwnerAddresses ensures every verified custom domain has a direct
+// address row for its owner's local-part. Safe to call at startup; idempotent.
+func (m *Manager) BackfillOwnerAddresses(ctx context.Context) error {
+	rows, err := m.db.Query(ctx, `
+		SELECT id, owner_user_id FROM domains
+		WHERE  is_primary = FALSE AND verified_at IS NOT NULL AND owner_user_id IS NOT NULL
+	`)
+	if err != nil {
+		return fmt.Errorf("domains: backfill query: %w", err)
+	}
+	defer rows.Close()
+	type pair struct{ domainID, ownerID string }
+	var pairs []pair
+	for rows.Next() {
+		var p pair
+		if err := rows.Scan(&p.domainID, &p.ownerID); err != nil {
+			return err
+		}
+		pairs = append(pairs, p)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, p := range pairs {
+		if err := m.EnsureReservedAddresses(ctx, p.domainID, p.ownerID); err != nil {
+			slog.Error("domains: backfill owner address failed",
+				"domain_id", p.domainID, "err", err)
 		}
 	}
 	return nil

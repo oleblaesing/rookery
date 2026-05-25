@@ -105,6 +105,9 @@ func runServer() int {
 
 	// ---- Domain manager (custom domains, MTA-STS, DNS checks) ----
 	domMgr := domains.NewManager(st.DB, cfg.Domain, cfg.DNS.Resolver)
+	if err := domMgr.BackfillOwnerAddresses(ctx); err != nil {
+		slog.Error("bootstrap: backfill owner addresses failed", "err", err)
+	}
 
 	// ---- Outbound delivery worker ----
 	qWorker := queue.NewWorker(st.DB, st, dk, cfg, smtp.Deliver)
