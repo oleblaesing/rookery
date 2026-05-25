@@ -69,7 +69,7 @@ env_gen() {
 # init
 # ---------------------------------------------------------------------------
 cmd_init() {
-    local opt_domain="" opt_email="" opt_name="" opt_user="" opt_no_prompt=0
+    local opt_domain="" opt_email="" opt_name="" opt_user="" opt_no_prompt=0 opt_clamav=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -78,6 +78,7 @@ cmd_init() {
             --name)      shift; opt_name="${1:-}";      shift ;;
             --user)      shift; opt_user="${1:-}";      shift ;;
             --no-prompt) opt_no_prompt=1;               shift ;;
+            --clamav)    opt_clamav=1;                  shift ;;
             --) shift; break ;;
             -*) die "unknown flag: $1" ;;
             *)  break ;;
@@ -201,6 +202,15 @@ session_expiry_days = 7
 # undermining the pseudonymity property the system is designed to provide.
 # See §5.4, §11.2 of PLAN.md.
 log_connecting_ips = false
+
+# --------------------------------------------------------------------------- #
+# Spam filtering
+# --------------------------------------------------------------------------- #
+[spam]
+# rspamd HTTP check API endpoint. Default: http://rspamd:11333 (the bundled
+# rspamd container, always running alongside rookery and postgres).
+# Set to "" to disable spam filtering entirely (not recommended).
+rspamd_url = "http://rspamd:11333"
 TOML
         info "created rookery.toml"
 
@@ -277,8 +287,12 @@ TOML
     fi
 
     # ---- ./rookery.service --------------------------------------------------
-    if [ ! -f "$SCRIPT_DIR/rookery.service" ]; then
+    local _svc_exists=0
+    [ -f "$SCRIPT_DIR/rookery.service" ] && _svc_exists=1
+    if [ "$_svc_exists" -eq 0 ] || [ "$opt_clamav" -eq 1 ]; then
         local svc_user="${opt_user:-$(whoami)}"
+        local execstart="/opt/rookery/rookery start --prod -d"
+        [ "$opt_clamav" -eq 1 ] && execstart="/opt/rookery/rookery start --prod --profile clamav -d"
         cat > "$SCRIPT_DIR/rookery.service" << EOF
 [Unit]
 Description=rookery mail server
@@ -289,16 +303,20 @@ Requires=docker.service
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/rookery
-ExecStart=/opt/rookery/rookery start --prod -d
+ExecStart=${execstart}
 ExecStop=/opt/rookery/rookery stop
 User=${svc_user}
 
 [Install]
 WantedBy=multi-user.target
 EOF
-        info "staged rookery.service with User=${svc_user}"
+        if [ "$_svc_exists" -eq 1 ]; then
+            info "rookery.service regenerated with ClamAV profile — re-run: sudo ./rookery install && sudo systemctl restart rookery"
+        else
+            info "staged rookery.service with User=${svc_user}${opt_clamav:+ (ClamAV profile enabled)}"
+        fi
     else
-        info "rookery.service already exists — skipping"
+        info "rookery.service already exists — skipping (pass --clamav to regenerate with ClamAV profile)"
     fi
 
     printf '\n' >&2
@@ -869,6 +887,184 @@ cmd_check_dns() {
 }
 
 # ---------------------------------------------------------------------------
+# user <verb> <address>
+# ---------------------------------------------------------------------------
+
+# Internal helper: run a psql one-liner and return the output.
+# Usage: _psql_c "<SQL>"
+_psql_c() {
+    local db_pass
+    db_pass=$(env_get POSTGRES_PASSWORD)
+    dc exec -T -e PGPASSWORD="$db_pass" postgres \
+        psql -h localhost -U rookery -d rookery -tAc "$1" 2>/dev/null
+}
+
+# Validate that $1 looks like an email address (contains @, non-empty parts).
+# Die with a usage message if not. Shell-level only; psql still enforces schema.
+_require_address() {
+    local addr="$1" msg="${2:-usage: rookery user <suspend|unsuspend|delete> <address>}"
+    case "$addr" in
+        *@?*.*) ;;  # something@something.something
+        *) die "$msg" ;;
+    esac
+}
+
+cmd_user() {
+    local verb="${1:-}"
+    [ -n "$verb" ] || die "usage: rookery user <suspend|unsuspend|delete> <address>"
+    shift
+    case "$verb" in
+        suspend)   cmd_user_suspend   "$@" ;;
+        unsuspend) cmd_user_unsuspend "$@" ;;
+        delete)    cmd_user_delete    "$@" ;;
+        *) die "unknown: rookery user $verb — try suspend, unsuspend, or delete" ;;
+    esac
+}
+
+cmd_user_suspend() {
+    need_init
+    local addr="${1:-}"
+    _require_address "$addr" "usage: rookery user suspend <address>"
+
+    local rows
+    rows=$(_psql_c "
+        UPDATE users SET suspended_at = now()
+        FROM   addresses
+        WHERE  users.id = addresses.user_id
+          AND  lower(addresses.address) = lower('${addr}')
+          AND  users.suspended_at IS NULL
+        RETURNING users.id
+    " | wc -l | tr -d ' ')
+
+    [ "${rows:-0}" -ge 1 ] || die "no active (unsuspended) user found for '${addr}'"
+    info "suspended $addr"
+}
+
+cmd_user_unsuspend() {
+    need_init
+    local addr="${1:-}"
+    _require_address "$addr" "usage: rookery user unsuspend <address>"
+
+    local rows
+    rows=$(_psql_c "
+        UPDATE users SET suspended_at = NULL
+        FROM   addresses
+        WHERE  users.id = addresses.user_id
+          AND  lower(addresses.address) = lower('${addr}')
+          AND  users.suspended_at IS NOT NULL
+        RETURNING users.id
+    " | wc -l | tr -d ' ')
+
+    [ "${rows:-0}" -ge 1 ] || die "no suspended user found for '${addr}'"
+    info "unsuspended $addr"
+}
+
+cmd_user_delete() {
+    need_init
+    local addr="${1:-}" reason="${2:-}"
+    _require_address "$addr" "usage: rookery user delete <address> [reason]"
+
+    printf 'rookery: WARNING: Permanently deletes the user and ALL their mail.\n' >&2
+    printf 'rookery: Type the address to confirm: ' >&2
+    local confirm
+    read -r confirm
+    [ "$confirm" = "$addr" ] || die "aborted — address did not match"
+
+    local rows
+    rows=$(_psql_c "
+        DELETE FROM users
+        WHERE id = (
+            SELECT user_id FROM addresses
+            WHERE lower(address) = lower('${addr}')
+            LIMIT 1
+        )
+        RETURNING id
+    " | wc -l | tr -d ' ')
+
+    [ "${rows:-0}" -ge 1 ] || die "no user found for address '${addr}'"
+    info "deleted user $addr${reason:+ (reason: $reason)}"
+    info "note: message blobs on disk are now orphaned — a future blob-gc will clean them"
+}
+
+# ---------------------------------------------------------------------------
+# stats <verb>
+# ---------------------------------------------------------------------------
+
+cmd_stats() {
+    local verb="${1:-}"
+    [ -n "$verb" ] || die "usage: rookery stats print"
+    shift
+    case "$verb" in
+        print) cmd_stats_print "$@" ;;
+        *) die "unknown: rookery stats $verb — try print" ;;
+    esac
+}
+
+cmd_stats_print() {
+    need_init
+
+    printf '\nInstance stats\n'
+    printf '==========================================\n'
+    printf '  %-28s %s\n' "Active users:"           "$(_psql_c "SELECT count(*) FROM users WHERE suspended_at IS NULL")"
+    printf '  %-28s %s\n' "Suspended users:"        "$(_psql_c "SELECT count(*) FROM users WHERE suspended_at IS NOT NULL")"
+    printf '  %-28s %s\n' "Messages received (24h):" "$(_psql_c "SELECT count(*) FROM messages WHERE folder = 'inbox' AND received_at > now() - interval '24 hours'")"
+    printf '  %-28s %s\n' "Outbound pending:"       "$(_psql_c "SELECT count(*) FROM outbound_queue WHERE status = 'pending'")"
+    printf '  %-28s %s\n' "Outbound failed:"        "$(_psql_c "SELECT count(*) FROM outbound_queue WHERE status = 'failed'")"
+    printf '  %-28s %s\n' "Delivered (24h):"        "$(_psql_c "SELECT count(*) FROM outbound_queue WHERE status = 'delivered' AND delivered_at > now() - interval '24 hours'")"
+    printf '  %-28s %s\n' "Bounced (24h):"          "$(_psql_c "SELECT count(*) FROM outbound_queue WHERE status = 'bounced' AND created_at > now() - interval '24 hours'")"
+    printf '\n'
+}
+
+# ---------------------------------------------------------------------------
+# master-key rotate
+# ---------------------------------------------------------------------------
+
+cmd_master_key() {
+    local verb="${1:-}"
+    [ -n "$verb" ] || die "usage: rookery master-key rotate"
+    shift
+    case "$verb" in
+        rotate) cmd_master_key_rotate "$@" ;;
+        *) die "unknown: rookery master-key $verb — try rotate" ;;
+    esac
+}
+
+cmd_master_key_rotate() {
+    need_init
+
+    printf '\n' >&2
+    info "master-key rotation re-encrypts all DKIM private keys in the database."
+    info "The stack must be running. Take a database backup before proceeding."
+    info "(Phase 6 will add a one-command backup. For now: rookery psql, then pg_dump.)"
+    printf '\n' >&2
+    printf 'rookery: Continue? [y/N] ' >&2
+    local ans
+    read -r ans
+    case "$ans" in [Yy]*) ;; *) die "aborted" ;; esac
+
+    local old_key new_key
+    old_key=$(env_get ROOKERY_MASTER_KEY)
+    [ -n "$old_key" ] || die "ROOKERY_MASTER_KEY not found in .env"
+
+    new_key=$(openssl rand -hex 32)
+    info "new master key generated"
+
+    # Re-encrypt all DKIM keys inside the rookery container (has DB access + code).
+    dc exec -T rookery /usr/local/bin/rookery-server rotate-master-key \
+        --old-key="$old_key" --new-key="$new_key" \
+        || die "rotate-master-key failed — DKIM keys are unchanged; .env is NOT updated"
+
+    # Atomically replace the master key in .env.
+    grep -v '^ROOKERY_MASTER_KEY=' "$SCRIPT_DIR/.env" > "$SCRIPT_DIR/.env.tmp"
+    printf 'ROOKERY_MASTER_KEY=%s\n' "$new_key" >> "$SCRIPT_DIR/.env.tmp"
+    mv "$SCRIPT_DIR/.env.tmp" "$SCRIPT_DIR/.env"
+
+    info "ROOKERY_MASTER_KEY updated in .env"
+    info "IMPORTANT: back up .env immediately — losing this key bricks the instance"
+    info "Restart to apply: sudo systemctl restart rookery"
+}
+
+# ---------------------------------------------------------------------------
 # psql
 # ---------------------------------------------------------------------------
 cmd_psql() {
@@ -914,10 +1110,11 @@ cmd_compose() {
 cmd_help() {
     case "${1:-}" in
         init) cat >&2 <<'EOF'
-rookery init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt]
+rookery init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt] [--clamav]
 
   Bootstrap a checkout. User-local; never needs sudo. Idempotent — safe
-  to re-run after a git pull. Never overwrites existing files.
+  to re-run after a git pull. Never overwrites existing files, except that
+  --clamav regenerates rookery.service with the ClamAV compose profile.
 
   Creates (if absent):
     rookery.toml    from example; flags or prompts fill domain/email/name
@@ -932,6 +1129,10 @@ rookery init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt]
     --name N        Instance display name
     --user U        Unix user for the systemd unit (default: whoami)
     --no-prompt     Skip interactive prompts; use flag values or defaults
+    --clamav        Enable ClamAV virus scanning (adds ~1 GB RAM); adds
+                    --profile clamav to ExecStart in rookery.service.
+                    Always regenerates rookery.service, even if it exists.
+                    After running: sudo ./rookery install && sudo systemctl restart rookery
 
   IMPORTANT: back up .env after init. Losing ROOKERY_MASTER_KEY bricks
   the instance's DKIM keys, sessions, and ACME credentials.
@@ -1033,6 +1234,32 @@ rookery check-dns [--resolver <addr>]
                         Useful to bypass local cache: --resolver 9.9.9.9
 EOF
             ;;
+        user) cat >&2 <<'EOF'
+rookery user suspend <address>    Mark a user suspended (blocks inbound + outbound)
+rookery user unsuspend <address>  Reverse a suspension
+rookery user delete <address>     Hard-delete a user and all their mail (irreversible)
+
+  Suspending blocks the account without destroying data. Deletion is permanent
+  and cascades to all messages, addresses, sessions, and DKIM keys. Message
+  blobs on disk are orphaned after deletion (a future blob-gc will clean them).
+EOF
+            ;;
+        stats)
+            printf 'rookery stats print\n\n  Print a quick summary of users, message volume, and queue state.\n' >&2 ;;
+        master-key) cat >&2 <<'EOF'
+rookery master-key rotate
+
+  Re-encrypt all DKIM private keys in the database under a freshly generated
+  master key, then update ROOKERY_MASTER_KEY in .env. The stack must be running.
+  Take a database snapshot before rotating.
+
+  After rotation, restart the stack to pick up the new key:
+    sudo systemctl restart rookery
+
+  IMPORTANT: back up .env immediately after rotation. Losing ROOKERY_MASTER_KEY
+  bricks DKIM signing, session validation, and any ACME account keys.
+EOF
+            ;;
         psql)
             printf 'rookery psql\n\n  Drop into an interactive psql shell inside the postgres container.\n' >&2 ;;
         test)
@@ -1050,7 +1277,7 @@ Usage: ./rookery <subcommand> [flags] [args]
        ./rookery help <subcommand>
 
 Bootstrap (run once per checkout / host):
-  init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt]
+  init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt] [--clamav]
   sudo install
 
 Stack management:
@@ -1064,7 +1291,12 @@ Stack management:
 Operations:
   invite create [days]                  Generate an invite URL (stdout)
   send-mail [flags] <to> [from] [...]   Inject a message into inbound SMTP
-  check-dns [--resolver <addr>]        Check and display all required DNS records
+  check-dns [--resolver <addr>]         Check and display all required DNS records
+  user suspend <address>                Suspend a user account
+  user unsuspend <address>              Reverse a suspension
+  user delete <address>                 Hard-delete a user and all their mail
+  stats print                           Quick summary of users and queue state
+  master-key rotate                     Rotate the server master key
   psql                                  psql shell in the postgres container
   test                                  Run the Go test suite
   vet                                   Run go vet
@@ -1091,15 +1323,18 @@ case "${1:-}" in
     update)    shift; cmd_update       ;;
     logs)      shift; cmd_logs      "$@" ;;
     ps)        shift; cmd_ps        "$@" ;;
-    invite)     shift; cmd_invite     "$@" ;;
-    send-mail)  shift; cmd_send_mail  "$@" ;;
-    check-dns)  shift; cmd_check_dns  "$@" ;;
-    psql)       shift; cmd_psql          ;;
-    test)      shift; cmd_test         ;;
-    vet)       shift; cmd_vet          ;;
-    exec)      shift; cmd_exec      "$@" ;;
-    compose)   shift; cmd_compose   "$@" ;;
-    help)      shift; cmd_help      "$@" ;;
-    "")               cmd_help;  exit 1 ;;
-    *)         die "unknown subcommand '${1}' — run './rookery help' for the list" ;;
+    invite)      shift; cmd_invite      "$@" ;;
+    send-mail)   shift; cmd_send_mail   "$@" ;;
+    check-dns)   shift; cmd_check_dns   "$@" ;;
+    user)        shift; cmd_user        "$@" ;;
+    stats)       shift; cmd_stats       "$@" ;;
+    master-key)  shift; cmd_master_key  "$@" ;;
+    psql)        shift; cmd_psql            ;;
+    test)        shift; cmd_test            ;;
+    vet)         shift; cmd_vet             ;;
+    exec)        shift; cmd_exec        "$@" ;;
+    compose)     shift; cmd_compose     "$@" ;;
+    help)        shift; cmd_help        "$@" ;;
+    "")                 cmd_help;  exit 1 ;;
+    *)           die "unknown subcommand '${1}' — run './rookery help' for the list" ;;
 esac

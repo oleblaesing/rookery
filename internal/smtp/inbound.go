@@ -20,13 +20,16 @@
 package smtp
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
@@ -171,6 +174,28 @@ func (s *inboundSession) Data(r io.Reader) error {
 	}
 
 	ctx := context.Background()
+
+	// Spam check via rspamd (soft-fail: deliver on error).
+	if url := s.backend.cfg.Spam.RspamdURL; url != "" {
+		action, score, checkErr := rspamdCheck(ctx, url, s.from, s.recipients, rawMsg)
+		if checkErr != nil {
+			slog.Warn("smtp: rspamd check failed, delivering anyway", "err", checkErr)
+		} else {
+			switch action {
+			case "reject":
+				slog.Info("smtp: rspamd rejected message", "score", score, "from", s.from)
+				return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+					Message: "Message rejected as spam"}
+			case "greylist", "soft reject":
+				slog.Info("smtp: rspamd soft-rejected message", "action", action, "score", score)
+				return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 7, 0},
+					Message: "Please try again later"}
+			default:
+				// "no action", "add header", "rewrite subject": deliver normally.
+				// rspamd has already added X-Spam-* headers to the message body.
+			}
+		}
+	}
 
 	// Write the blob once; all recipients share the same blob ref.
 	blobDigest, err := s.backend.st.WriteBlob(rawMsg)
@@ -518,4 +543,43 @@ func harvestKey(ctx context.Context, db *pgxpool.Pool, userID, fromAddress, armo
 		      last_seen_at = now()
 	`, userID, fromAddress, fp, armoredKey)
 	return err
+}
+
+// rspamdCheck calls rspamd's HTTP check API and returns the action and score.
+// rspamdURL is the base URL (e.g. "http://rspamd:11333").
+// This is a soft-fail helper: the caller logs errors and delivers on failure.
+func rspamdCheck(ctx context.Context, rspamdURL, from string, rcpts []string, msg []byte) (action string, score float64, err error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost,
+		rspamdURL+"/checkv2", bytes.NewReader(msg))
+	if err != nil {
+		return "no action", 0, err
+	}
+	req.Header.Set("Content-Type", "message/rfc822")
+	if from != "" {
+		req.Header.Set("From", from)
+	}
+	for _, r := range rcpts {
+		req.Header.Add("Rcpt", r)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "no action", 0, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Action string  `json:"action"`
+		Score  float64 `json:"score"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "no action", 0, fmt.Errorf("rspamd: decode response: %w", err)
+	}
+	if result.Action == "" {
+		result.Action = "no action"
+	}
+	return result.Action, result.Score, nil
 }

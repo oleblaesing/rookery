@@ -16,13 +16,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"rookery/internal/config"
 	"rookery/internal/dkim"
@@ -34,8 +37,13 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		os.Exit(runHealthcheck())
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "healthcheck":
+			os.Exit(runHealthcheck())
+		case "rotate-master-key":
+			os.Exit(runRotateMasterKey(os.Args[2:]))
+		}
 	}
 
 	if code := runServer(); code != 0 {
@@ -256,6 +264,63 @@ func generateMTASTSID() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// runRotateMasterKey is invoked as `rookery-server rotate-master-key
+// --old-key=... --new-key=...`. It re-encrypts all DKIM private keys in the
+// database from the old master key to the new one. Called by the
+// `rookery master-key rotate` dispatcher command.
+//
+// This must run while the stack is up (it connects to the postgres container).
+// It does NOT restart the server; the dispatcher handles that after updating .env.
+func runRotateMasterKey(args []string) int {
+	var oldKey, newKey string
+	for _, a := range args {
+		switch {
+		case strings.HasPrefix(a, "--old-key="):
+			oldKey = strings.TrimPrefix(a, "--old-key=")
+		case strings.HasPrefix(a, "--new-key="):
+			newKey = strings.TrimPrefix(a, "--new-key=")
+		}
+	}
+	if oldKey == "" || newKey == "" {
+		fmt.Fprintln(os.Stderr, "usage: rookery-server rotate-master-key --old-key=<hex> --new-key=<hex>")
+		return 1
+	}
+
+	ctx := context.Background()
+
+	dbPass := os.Getenv("ROOKERY_DB_PASSWORD")
+	if dbPass == "" {
+		fmt.Fprintln(os.Stderr, "rotate-master-key: ROOKERY_DB_PASSWORD not set")
+		return 1
+	}
+	dbURL := (&url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword("rookery", dbPass),
+		Host:     "postgres:5432",
+		Path:     "/rookery",
+		RawQuery: "sslmode=disable",
+	}).String()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rotate-master-key: connect: %v\n", err)
+		return 1
+	}
+	defer pool.Close()
+
+	oldMgr := dkim.NewManager(pool, oldKey)
+	newMgr := dkim.NewManager(pool, newKey)
+
+	n, err := oldMgr.ReEncryptKeys(ctx, newMgr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rotate-master-key: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("rotate-master-key: re-encrypted %d DKIM key(s) successfully\n", n)
+	return 0
 }
 
 // runHealthcheck is invoked as `rookery-server healthcheck` from the container

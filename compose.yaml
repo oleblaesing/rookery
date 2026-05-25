@@ -102,6 +102,59 @@ services:
       retries: 5
 
   # -------------------------------------------------------------------------- #
+  # redis — backing store for rspamd (rate limits, fuzzy hashes, bayes data)  #
+  # -------------------------------------------------------------------------- #
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------- #
+  # rspamd — inbound spam filter (ADR-0032)                                   #
+  # HTTP check API on port 11333 (rookery calls it; not exposed to the host). #
+  # rspamd config overrides live in ./rspamd/local.d/ (operator-editable).   #
+  # -------------------------------------------------------------------------- #
+  rspamd:
+    image: docker.io/rspamd/rspamd:latest
+    restart: unless-stopped
+    volumes:
+      - ./rspamd/local.d:/etc/rspamd/local.d:ro
+      - rspamd-data:/var/lib/rspamd
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "rspamc", "stat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # -------------------------------------------------------------------------- #
+  # clamav — virus scanner (opt-in; adds ~1 GB RAM — see §10 of PLAN.md)     #
+  # Enable with: ./rookery start --profile clamav  (or add to systemd unit).  #
+  # rspamd talks to clamd on port 3310; no Go-side changes needed.            #
+  # -------------------------------------------------------------------------- #
+  clamav:
+    image: docker.io/clamav/clamav:stable
+    restart: unless-stopped
+    volumes:
+      - clamav-data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdtop -n 1 2>/dev/null || clamdscan --version"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 120s   # signature DB load takes time
+    profiles: [clamav]
+
+  # -------------------------------------------------------------------------- #
   # mailpit — SMTP test sink (dev profile only)                                #
   # UI at http://localhost:8025                                                #
   # -------------------------------------------------------------------------- #
@@ -182,6 +235,9 @@ services:
 volumes:
   postgres-data:
   rookery-messages:
+  redis-data:
+  rspamd-data:
+  clamav-data:
   go-cache:
   go-mod-cache:
   caddy-data:

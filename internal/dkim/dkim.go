@@ -253,6 +253,53 @@ func (m *Manager) loadSigner(algorithm string, encBytes []byte) (crypto.Signer, 
 	}
 }
 
+// ReEncryptKeys re-encrypts all dkim_keys rows from the current manager's
+// master key to newMgr's master key. Used during master-key rotation.
+// Returns the number of rows successfully re-encrypted.
+func (m *Manager) ReEncryptKeys(ctx context.Context, newMgr *Manager) (int, error) {
+	rows, err := m.db.Query(ctx, `SELECT id, private_key_enc FROM dkim_keys`)
+	if err != nil {
+		return 0, fmt.Errorf("dkim: re-encrypt: query: %w", err)
+	}
+	defer rows.Close()
+
+	type pending struct {
+		id     string
+		newEnc []byte
+	}
+	var work []pending
+
+	for rows.Next() {
+		var id string
+		var enc []byte
+		if err := rows.Scan(&id, &enc); err != nil {
+			return 0, fmt.Errorf("dkim: re-encrypt: scan: %w", err)
+		}
+		plain, err := m.decryptKey(enc)
+		if err != nil {
+			return 0, fmt.Errorf("dkim: re-encrypt: decrypt key %s: %w", id, err)
+		}
+		newEnc, err := newMgr.encryptKey(plain)
+		if err != nil {
+			return 0, fmt.Errorf("dkim: re-encrypt: re-encrypt key %s: %w", id, err)
+		}
+		work = append(work, pending{id: id, newEnc: newEnc})
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("dkim: re-encrypt: iterate: %w", err)
+	}
+
+	for _, w := range work {
+		if _, err := m.db.Exec(ctx,
+			`UPDATE dkim_keys SET private_key_enc = $1 WHERE id = $2`,
+			w.newEnc, w.id,
+		); err != nil {
+			return 0, fmt.Errorf("dkim: re-encrypt: update key %s: %w", w.id, err)
+		}
+	}
+	return len(work), nil
+}
+
 // DNSRecords returns the DNS TXT record values for each active DKIM key on
 // the given domain. The operator publishes these in their DNS provider.
 // Returns slice of (selector, txtValue) pairs.

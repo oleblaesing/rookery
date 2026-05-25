@@ -15,7 +15,7 @@ called a *relay rookery* (see [PLAN.md](PLAN.md) §11.10).
 
 - A mail server (inbound + outbound SMTP) that speaks standard email to the rest of the world.
 - A server-rendered web UI where PGP encryption and decryption happen in the browser.
-- One binary, one config file, one rebuild command. The traditional self-hosted mail stack — Postfix, Dovecot, Roundcube, rspamd, certbot, a PGP plugin, the WKD/MTA-STS/DKIM glue — collapses into a single Go process. You do not need to learn `main.cf`, Dovecot's config syntax, or `opendkim.conf`, because they are not in the box. Upgrading is `rookery update && sudo systemctl restart rookery` — the Containerfile is the build, so the source tree you pull *is* the upgrade. First-run on a fresh VPS takes under 30 minutes of active configuration time, but that is a side effect of the architecture, not the point of it.
+- One binary, one config file, one rebuild command. The traditional self-hosted mail stack — Postfix, Dovecot, Roundcube, rspamd, certbot, a PGP plugin, the WKD/MTA-STS/DKIM glue — collapses into one Go process and one compose stack. You do not need to learn `main.cf`, Dovecot's config syntax, or `opendkim.conf`. rspamd and Redis start alongside rookery automatically and require no configuration; ClamAV virus scanning is opt-in. Upgrading is `rookery update && sudo systemctl restart rookery` — the Containerfile is the build, so the source tree you pull *is* the upgrade. First-run on a fresh VPS takes under 30 minutes of active configuration time, but that is a side effect of the architecture, not the point of it.
 - Invite-only by default; pseudonymous by design; no name, no phone, no recovery email required.
 
 **The server never holds your PGP private key.** It is generated in the browser
@@ -112,9 +112,13 @@ sudo ./rookery install
 
 # 5. Enable and start the service. Standard systemd from here.
 sudo systemctl enable --now rookery
+#    Spam filtering (rspamd + Redis) starts as part of the stack automatically
+#    and requires no configuration.
+#    ClamAV virus scanning is opt-in: ./rookery init --clamav (see docs/ops/deployment.md).
 
-# 6. Print the DNS records you need to publish.
-#    (The server logs them at startup.)
+# 6. Check your DNS records.
+./rookery check-dns
+#    Or read the values the server logged at startup:
 ./rookery logs | grep DNS
 
 # 7. Publish the DNS records at your registrar and wait for propagation.
@@ -143,7 +147,7 @@ rookery`. The dispatcher generates the unit from a template, fills `User=`
 from `--user` (default: `whoami`), and the `install` subcommand handles the
 single sudo step (copy to `/etc/systemd/system/`, run `daemon-reload`).
 
-If you skipped the quickstart and want to wire systemd up manually:
+If you skipped the quickstart:
 
 ```sh
 ./rookery init           # generates ./rookery.service from your config
@@ -153,6 +157,11 @@ sudo systemctl enable --now rookery
 
 The unit's `ExecStart` is `rookery start --prod`, so it brings up Caddy on
 80/443, rookery on 8080 behind it, and SMTP on 25.
+
+To enable ClamAV: `./rookery init --clamav && sudo ./rookery install && sudo systemctl restart rookery`.
+`--clamav` regenerates `./rookery.service` with the ClamAV compose profile; `install`
+pushes it to systemd. Never edit `/etc/systemd/system/rookery.service` directly —
+`rookery install` overwrites it.
 
 Logs: `sudo journalctl -u rookery -f` (systemd) or `./rookery logs` (container
 stdout).
@@ -195,6 +204,17 @@ toolchain required beyond Docker (with the Compose v2 plugin).
 ./rookery update
 ./rookery restart
 
+# Operator: user management.
+./rookery user suspend alice@localhost
+./rookery user unsuspend alice@localhost
+./rookery user delete alice@localhost
+
+# Operator: quick stats (active users, messages last 24h, queue depth).
+./rookery stats print
+
+# Operator: rotate the master key (re-encrypts DKIM keys; restart after).
+./rookery master-key rotate
+
 # Escape hatches if you need raw docker compose:
 ./rookery exec rspamd rspamc stat
 ./rookery compose ps
@@ -229,8 +249,15 @@ web/
 docs/
   adr/                  Architecture decision records
   api/                  HTTP API documentation
-  ops/                  Deployment, DNS, TLS, operator runbook
-    rookery.service     systemd unit template
+  ops/                  Operator docs
+    deployment.md       Full setup walkthrough (VPS → first invite)
+    dns.md              Every required DNS record explained
+    troubleshooting.md  Common failure modes and how to fix them
+    spam-runbook.md     Spam filtering: what rookery does, what it can't, tuning
+    custom-domains.md   Custom domain setup (user self-serve flow)
+    runbook.md          Dispatcher subcommand reference + common psql queries
+rspamd/
+  local.d/              rspamd drop-in config (redis.conf, antivirus.conf)
 rookery                 Operator + developer dispatcher (single POSIX shell script)
 compose.yaml            Service definitions consumed by the dispatcher
 Containerfile           The build (multi-stage; also a valid Dockerfile)

@@ -38,6 +38,7 @@ type Config struct {
 	SMTP    SMTPConfig    `toml:"smtp"`
 	Policy  PolicyConfig  `toml:"policy"`
 	DNS     DNSConfig     `toml:"dns"`
+	Spam    SpamConfig    `toml:"spam"`
 
 	// Secrets loaded from environment variables; never present in the config file.
 	Secrets Secrets `toml:"-"`
@@ -106,6 +107,14 @@ type SMTPConfig struct {
 
 	// RelayPort is the SMTP port on RelayHost. Defaults to 25.
 	RelayPort int `toml:"relay_port"`
+}
+
+// SpamConfig controls spam filtering via rspamd.
+type SpamConfig struct {
+	// RspamdURL is the base URL of the rspamd HTTP check API.
+	// Default: "http://rspamd:11333" (the bundled rspamd container).
+	// Set to "" to disable spam checking entirely.
+	RspamdURL string `toml:"rspamd_url"`
 }
 
 // DNSConfig controls DNS resolver settings used for domain verification and
@@ -202,6 +211,9 @@ func defaults(c *Config, md toml.MetaData) {
 	}
 	if !md.IsDefined("dns", "resolver") {
 		c.DNS.Resolver = "9.9.9.9:53"
+	}
+	if !md.IsDefined("spam", "rspamd_url") {
+		c.Spam.RspamdURL = "http://rspamd:11333"
 	}
 }
 
