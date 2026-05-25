@@ -136,6 +136,8 @@ func lookupKnownKeys(ctx context.Context, db *pgxpool.Pool, userID, address stri
 	return &Result{ArmoredPublicKey: armored, Fingerprint: fp, Source: "known_keys", FirstSeenAt: &t}, nil
 }
 
+// lookupWKD tries the WKD advanced method first, then falls back to the direct
+// method (RFC 9145 §3.1) when the advanced endpoint is unreachable or returns 404.
 func lookupWKD(ctx context.Context, address string) (*Result, error) {
 	parts := strings.SplitN(address, "@", 2)
 	if len(parts) != 2 {
@@ -144,59 +146,77 @@ func lookupWKD(ctx context.Context, address string) (*Result, error) {
 	localPart, domain := parts[0], parts[1]
 	hash := wkdHash(localPart)
 
-	// WKD Advanced Method: https://openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<hash>
-	url := fmt.Sprintf("https://openpgpkey.%s/.well-known/openpgpkey/%s/hu/%s", domain, domain, hash)
+	// Advanced method: https://openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<hash>
+	advURL := fmt.Sprintf("https://openpgpkey.%s/.well-known/openpgpkey/%s/hu/%s", domain, domain, hash)
+	r, fallback, err := fetchWKDKey(ctx, advURL)
+	if err != nil {
+		return nil, err
+	}
+	if r != nil {
+		return r, nil
+	}
+	if !fallback {
+		return nil, nil
+	}
 
+	// Direct method fallback: https://<domain>/.well-known/openpgpkey/hu/<hash>
+	dirURL := fmt.Sprintf("https://%s/.well-known/openpgpkey/hu/%s", domain, hash)
+	r, _, err = fetchWKDKey(ctx, dirURL)
+	return r, err
+}
+
+// fetchWKDKey fetches a binary WKD key from url and returns it re-armored.
+// fallback=true signals the caller that the next method should be tried
+// (network/DNS error or 404). A non-404 HTTP error is returned as err.
+func fetchWKDKey(ctx context.Context, url string) (r *Result, fallback bool, err error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		// Network/DNS failure: signal to try the fallback method.
+		return nil, true, nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil
+		return nil, true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("discovery: WKD returned HTTP %d", resp.StatusCode)
+		return nil, false, fmt.Errorf("discovery: WKD returned HTTP %d for %s", resp.StatusCode, url)
 	}
 
-	// Response is a binary (non-armored) OpenPGP public key.
 	keyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 128*1024))
 	if err != nil {
-		return nil, fmt.Errorf("discovery: WKD read response: %w", err)
+		return nil, false, fmt.Errorf("discovery: WKD read response: %w", err)
 	}
 
-	// Parse binary key.
 	entities, err := pgpcrypto.ReadKeyRing(bytes.NewReader(keyBytes))
 	if err != nil || len(entities) == 0 {
-		return nil, fmt.Errorf("discovery: WKD key parse failed: %w", err)
+		return nil, false, fmt.Errorf("discovery: WKD key parse failed: %w", err)
 	}
 	entity := entities[0]
 	if entity.PrimaryKey == nil {
-		return nil, fmt.Errorf("discovery: WKD key has no primary key")
+		return nil, false, fmt.Errorf("discovery: WKD key has no primary key")
 	}
 	fp := fmt.Sprintf("%X", entity.PrimaryKey.Fingerprint)
 
-	// Re-armor the key.
 	var buf bytes.Buffer
 	w, err := armor.Encode(&buf, "PGP PUBLIC KEY BLOCK", nil)
 	if err != nil {
-		return nil, fmt.Errorf("discovery: armor encode: %w", err)
+		return nil, false, fmt.Errorf("discovery: armor encode: %w", err)
 	}
 	if err := entity.Serialize(w); err != nil {
-		return nil, fmt.Errorf("discovery: serialize key: %w", err)
+		return nil, false, fmt.Errorf("discovery: serialize key: %w", err)
 	}
 	w.Close()
 
-	return &Result{ArmoredPublicKey: buf.String(), Fingerprint: fp, Source: "wkd"}, nil
+	return &Result{ArmoredPublicKey: buf.String(), Fingerprint: fp, Source: "wkd"}, false, nil
 }
 
 func cacheKey(ctx context.Context, db *pgxpool.Pool, userID, address, armoredKey, fp, source string) error {

@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,6 +36,8 @@ import (
 
 	netmail "net/mail"
 
+	pgpcrypto "github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	gomessage "github.com/emersion/go-message"
 	"github.com/emersion/go-smtp"
 	"github.com/jackc/pgx/v5"
@@ -490,15 +493,70 @@ func storeMessage(ctx context.Context, db *pgxpool.Pool,
 // Key harvest — extract and cache auto-attached PGP public keys
 // -------------------------------------------------------------------------
 
-// extractAttachedPublicKey walks the MIME structure looking for an
-// application/pgp-keys part and returns its content (ASCII armored) if found.
-// Returns "" when no key part is present.
+// extractAttachedPublicKey returns an ASCII-armored PGP public key found in
+// the message, or "" if none is present. It checks, in order:
+//  1. application/pgp-keys MIME parts (standard inline attachment).
+//  2. The Autocrypt header (RFC 8617 — used by ProtonMail and others).
 func extractAttachedPublicKey(raw []byte) string {
 	entity, err := gomessage.Read(strings.NewReader(string(raw)))
 	if err != nil {
 		return ""
 	}
-	return walkForKey(entity)
+	if key := walkForKey(entity); key != "" {
+		return key
+	}
+	return extractAutocryptKey(entity)
+}
+
+// extractAutocryptKey parses the Autocrypt header and returns the armored key,
+// or "" when the header is absent or malformed.
+func extractAutocryptKey(entity *gomessage.Entity) string {
+	hdr := entity.Header.Get("Autocrypt")
+	if hdr == "" {
+		return ""
+	}
+	var keydata string
+	for _, field := range strings.Split(hdr, ";") {
+		field = strings.TrimSpace(field)
+		if strings.HasPrefix(strings.ToLower(field), "keydata=") {
+			keydata = field[len("keydata="):]
+			break
+		}
+	}
+	if keydata == "" {
+		return ""
+	}
+	// Strip whitespace that may have been introduced by header folding.
+	keydata = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
+			return -1
+		}
+		return r
+	}, keydata)
+	binKey, err := base64.StdEncoding.DecodeString(keydata)
+	if err != nil {
+		return ""
+	}
+	return armorBinaryKey(binKey)
+}
+
+// armorBinaryKey converts a binary OpenPGP public key to ASCII armor.
+// Returns "" if the bytes cannot be parsed as a valid key.
+func armorBinaryKey(binKey []byte) string {
+	entities, err := pgpcrypto.ReadKeyRing(bytes.NewReader(binKey))
+	if err != nil || len(entities) == 0 {
+		return ""
+	}
+	var buf bytes.Buffer
+	w, err := armor.Encode(&buf, "PGP PUBLIC KEY BLOCK", nil)
+	if err != nil {
+		return ""
+	}
+	if err := entities[0].Serialize(w); err != nil {
+		return ""
+	}
+	w.Close()
+	return buf.String()
 }
 
 func walkForKey(entity *gomessage.Entity) string {
