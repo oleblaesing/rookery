@@ -141,20 +141,33 @@
 
   // ---- Tab switching ----
   var tabs = document.querySelectorAll('.tab-strip [role="tab"]');
+
+  function activateTab(btn) {
+    tabs.forEach(function (b) {
+      b.classList.remove('tab-active');
+      b.setAttribute('aria-selected', 'false');
+      document.getElementById(b.getAttribute('aria-controls'))
+              .classList.remove('tab-panel-active');
+    });
+    btn.classList.add('tab-active');
+    btn.setAttribute('aria-selected', 'true');
+    document.getElementById(btn.getAttribute('aria-controls'))
+            .classList.add('tab-panel-active');
+  }
+
   tabs.forEach(function (btn) {
     btn.addEventListener('click', function () {
-      tabs.forEach(function (b) {
-        b.classList.remove('tab-active');
-        b.setAttribute('aria-selected', 'false');
-        document.getElementById(b.getAttribute('aria-controls'))
-                .classList.remove('tab-panel-active');
-      });
-      btn.classList.add('tab-active');
-      btn.setAttribute('aria-selected', 'true');
-      document.getElementById(btn.getAttribute('aria-controls'))
-              .classList.add('tab-panel-active');
+      activateTab(btn);
+      location.hash = btn.getAttribute('aria-controls');
     });
   });
+
+  // Restore active tab from URL hash on load/reload.
+  var hash = location.hash.slice(1);
+  if (hash) {
+    var hashTarget = document.querySelector('[aria-controls="' + hash + '"]');
+    if (hashTarget) activateTab(hashTarget);
+  }
 
   // ---- Domain management ----
   var newDomainID = null;
@@ -240,7 +253,15 @@
     if (!el) return;
     await partials.swap(el, '/partials/domains/' + id + '/verify-status');
     if (el.querySelector('[data-poll-stop="true"]')) {
-      window.location.reload();
+      // Update the status badge in place — no page reload needed.
+      var item = el.closest('.domain-item');
+      if (item) {
+        var badge = item.querySelector('.domain-status');
+        if (badge) {
+          badge.textContent = 'verified';
+          badge.className = 'domain-status status-ok';
+        }
+      }
     }
   }
 
