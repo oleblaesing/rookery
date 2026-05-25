@@ -486,7 +486,7 @@ _send_mail_cleanup() {
 }
 
 cmd_send_mail() {
-    local encrypted=0 pubkey_file="" fetch_key=0
+    local encrypted=0 pubkey_file="" fetch_key=0 spam=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -497,6 +497,7 @@ cmd_send_mail() {
                 [ -n "$pubkey_file" ] || die "--pubkey requires a file path argument"
                 shift ;;
             --fetch-key) fetch_key=1; shift ;;
+            --spam) spam=1; shift ;;
             --) shift; break ;;
             -*) die "unknown flag: $1" ;;
             *)  break ;;
@@ -509,7 +510,7 @@ cmd_send_mail() {
     local body="${4:-This is a test message injected by rookery send-mail at $(date).}"
 
     [ -n "$to" ] || {
-        printf 'usage: rookery send-mail [--encrypted --pubkey <file>|--fetch-key] <to> [from] [subject] [body]\n' >&2
+        printf 'usage: rookery send-mail [--encrypted --pubkey <file>|--fetch-key] [--spam] <to> [from] [subject] [body]\n' >&2
         exit 1
     }
 
@@ -522,9 +523,17 @@ cmd_send_mail() {
     if { [ -n "$pubkey_file" ] || [ "$fetch_key" -eq 1 ]; } && [ "$encrypted" -eq 0 ]; then
         die "--pubkey / --fetch-key require --encrypted"
     fi
+    if [ "$spam" -eq 1 ] && [ "$encrypted" -eq 1 ]; then
+        die "--spam and --encrypted are mutually exclusive"
+    fi
 
     # ---- Plaintext path -----------------------------------------------------
     if [ "$encrypted" -eq 0 ]; then
+        if [ "$spam" -eq 1 ]; then
+            subject="[SPAM TEST] ${subject}"
+            # GTUBE: standard rspamd/SpamAssassin test string that always triggers a reject.
+            body="XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X"
+        fi
         printf '%s' "From: ${from}
 To: ${to}
 Subject: ${subject}
@@ -1198,12 +1207,15 @@ rookery send-mail [flags] <to> [from] [subject] [body]
 
   Inject a message into the dev stack's inbound SMTP (port 25).
 
-  Flags:  --encrypted  --pubkey <file>  --fetch-key
+  Flags:  --encrypted  --pubkey <file>  --fetch-key  --spam
 
   Examples:
     ./rookery send-mail alice@localhost
     ./rookery send-mail --encrypted --fetch-key alice@localhost
     ./rookery send-mail --encrypted --pubkey /tmp/alice.asc alice@localhost
+    ./rookery send-mail --spam alice@localhost
+
+  --spam sends a GTUBE payload that rspamd always rejects (plaintext only).
 
   Env: ROOKERY_SMTP (default smtp://localhost:25)  ROOKERY_HTTP (default http://localhost:8080)
   Requires: curl. Encrypted mode additionally requires: gpg, python3.
