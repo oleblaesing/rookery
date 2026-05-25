@@ -274,6 +274,16 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			return
 		}
 
+		// Insert attachment metadata so the sent message's read page can render
+		// download links. For encrypted messages meta.Attachments is nil, so this
+		// is a no-op — the browser handles encrypted attachment listing.
+		for _, a := range meta.Attachments {
+			_, _ = db.Exec(r.Context(), `
+				INSERT INTO message_attachments (message_id, part_index, filename, content_type, size_bytes)
+				VALUES ($1, $2, $3, $4, $5)
+			`, messageID, a.PartIndex, a.Filename, a.ContentType, a.SizeBytes)
+		}
+
 		// Queue one delivery row per recipient.
 		for _, rcpt := range allRecipients {
 			rcpt = strings.ToLower(strings.TrimSpace(rcpt))

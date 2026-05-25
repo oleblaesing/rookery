@@ -3,15 +3,19 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"rookery/internal/auth"
+	"rookery/internal/smtp"
 	"rookery/internal/store"
 )
 
@@ -229,6 +233,119 @@ func handleAPIPatchMessage(db *pgxpool.Pool) http.HandlerFunc {
 		}
 		respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
+}
+
+// -------------------------------------------------------------------------
+// GET /api/v1/messages/{id}/attachments/{index}
+// -------------------------------------------------------------------------
+// Serves a single attachment from a plaintext message by re-parsing the raw
+// RFC 5322 blob. Encrypted messages are not handled here — the browser
+// decrypts the blob via /raw and builds Blob URLs for attachment download.
+
+func handleAPIGetAttachment(db *pgxpool.Pool, st *store.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := auth.UserIDFromContext(r.Context())
+		msgID := r.PathValue("id")
+		indexStr := r.PathValue("index")
+
+		index, err := strconv.Atoi(indexStr)
+		if err != nil || index < 0 {
+			respondError(w, http.StatusBadRequest, "BAD_REQUEST", "Attachment index must be a non-negative integer.")
+			return
+		}
+
+		var blobSHA256, securityState string
+		err = db.QueryRow(r.Context(),
+			`SELECT blob_sha256, security_state FROM messages WHERE id = $1 AND user_id = $2`,
+			msgID, userID,
+		).Scan(&blobSHA256, &securityState)
+		if errors.Is(err, pgx.ErrNoRows) {
+			respondError(w, http.StatusNotFound, "NOT_FOUND", "Message not found.")
+			return
+		}
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "INTERNAL", "Could not fetch message.")
+			return
+		}
+
+		// Encrypted messages: the browser decrypts and renders attachment Blob URLs.
+		if securityState == "pgp_encrypted" {
+			respondError(w, http.StatusNotFound, "NOT_FOUND", "Use the /raw endpoint to decrypt encrypted message attachments in the browser.")
+			return
+		}
+
+		// Confirm the attachment exists in the DB before reading the blob.
+		var filename, contentType string
+		err = db.QueryRow(r.Context(), `
+			SELECT filename, content_type FROM message_attachments
+			WHERE  message_id = $1 AND part_index = $2
+		`, msgID, index).Scan(&filename, &contentType)
+		if errors.Is(err, pgx.ErrNoRows) {
+			respondError(w, http.StatusNotFound, "NOT_FOUND", "Attachment not found.")
+			return
+		}
+		if err != nil {
+			slog.Error("attachment: fetch metadata", "msg_id", msgID, "index", index, "err", err)
+			respondError(w, http.StatusInternalServerError, "INTERNAL", "Could not fetch attachment metadata.")
+			return
+		}
+
+		raw, err := st.ReadBlob(blobSHA256)
+		if err != nil {
+			slog.Error("attachment: read blob", "digest", blobSHA256, "err", err)
+			respondError(w, http.StatusInternalServerError, "INTERNAL", "Could not read message.")
+			return
+		}
+
+		part, err := smtp.ReadAttachmentAt(raw, index)
+		if err != nil {
+			slog.Error("attachment: extract part", "index", index, "err", err)
+			respondError(w, http.StatusNotFound, "NOT_FOUND", "Could not extract attachment from message.")
+			return
+		}
+
+		safeFilename := sanitizeAttachmentFilename(part.Filename)
+		if safeFilename == "" {
+			safeFilename = fmt.Sprintf("attachment-%d", index)
+		}
+
+		// RFC 6266: filename= is the ASCII fallback; filename*= is the authoritative
+		// RFC 5987-encoded value for non-ASCII names.
+		asciiName := filenameASCIIFallback(safeFilename)
+		encodedName := strings.ReplaceAll(url.QueryEscape(safeFilename), "+", "%20")
+		disposition := fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, asciiName, encodedName)
+
+		w.Header().Set("Content-Type", part.ContentType)
+		w.Header().Set("Content-Disposition", disposition)
+		w.Header().Set("Content-Length", strconv.Itoa(len(part.Body)))
+		_, _ = w.Write(part.Body)
+	}
+}
+
+// sanitizeAttachmentFilename removes path separators and control characters.
+func sanitizeAttachmentFilename(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r == '/' || r == '\\' || r < ' ' {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// filenameASCIIFallback replaces non-ASCII and special characters with '_'
+// for the Content-Disposition filename= (plain ASCII) fallback.
+func filenameASCIIFallback(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r > 0x7E || r < 0x20 || r == '"' || r == '/' || r == '\\' {
+			b.WriteRune('_')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func buildPatchSet(req patchMessageRequest, userID, msgID string) (string, []any) {

@@ -38,6 +38,10 @@
       <span class="badge badge-signed" id="security-badge">
         ✓ PGP signed plaintext — verifying signature…
       </span>
+      {{- else if eq .Message.Folder "sent"}}
+      <span class="badge badge-plaintext" id="security-badge">
+        ⚠ sent in plaintext (no encryption)
+      </span>
       {{- else}}
       <span class="badge badge-plaintext" id="security-badge">
         ⚠ this message was received in plaintext
@@ -64,6 +68,29 @@
     </p>
     {{- end}}
   </div>
+
+  {{- if eq .Message.SecurityState "pgp_encrypted"}}
+  {{/* Attachment list hidden until JS decrypts and finds attachments. */}}
+  <div id="attachment-list" class="attachment-list" hidden>
+    <h3 class="attachment-heading">attachments</h3>
+    <ul class="attachments" id="attachment-items"></ul>
+  </div>
+  {{- else if .Message.HasAttachments}}
+  {{/* Plaintext: server-rendered download links pointing at the attachment endpoint. */}}
+  <div id="attachment-list" class="attachment-list">
+    <h3 class="attachment-heading">attachments</h3>
+    <ul class="attachments">
+      {{- range .Attachments}}
+      <li class="attachment-item">
+        <a href="/api/v1/messages/{{$.Message.ID}}/attachments/{{.PartIndex}}"
+           class="attachment-link"
+           download="{{.Filename}}">{{if .Filename}}{{.Filename}}{{else}}attachment-{{.PartIndex}}{{end}}</a>
+        <span class="attachment-size">({{formatBytes .SizeBytes}})</span>
+      </li>
+      {{- end}}
+    </ul>
+  </div>
+  {{- end}}
 
   <div class="message-actions">
     {{- if eq .Message.Folder "trash"}}

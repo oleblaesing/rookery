@@ -516,6 +516,62 @@ button:disabled {
   font-size: 0.875rem;
 }
 
+.attachment-list {
+  margin: 1.25rem 0;
+  padding: 1rem 0 0;
+  border-top: 1px solid #21262d;
+}
+
+.attachment-heading {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #484f58;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 0.5rem;
+}
+
+.attachments {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.attachment-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.2rem 0;
+  font-size: 0.875rem;
+}
+
+.attachment-link {
+  color: #7dd3c8;
+  text-decoration: none;
+}
+.attachment-link:hover { text-decoration: underline; }
+
+.attachment-size {
+  color: #484f58;
+  font-size: 0.8125rem;
+}
+
+/* Compose: selected-files list under the file input */
+.selected-files {
+  list-style: none;
+  padding: 0;
+  margin: 0.35rem 0 0;
+}
+.selected-file {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 0.8125rem;
+  color: #8b949e;
+  padding: 0.1rem 0;
+}
+.selected-file-size { color: #484f58; }
+
 .message-actions {
   display: flex;
   gap: 1rem;

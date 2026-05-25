@@ -74,6 +74,63 @@
     return btoa(binary);
   }
 
+  // Convert Uint8Array to base64 string using chunked string concatenation to
+  // avoid call-stack limits on large files. The buffered approach (entire file
+  // in memory as base64) is intentional: the 20 MB cap makes the ~1.33×
+  // base64 expansion plus the PGP/MIME wrapper acceptable; true streaming
+  // through OpenPGP.js would complicate the API for marginal gain at this cap.
+  function uint8ToBase64(bytes) {
+    const CHUNK = 0x8000; // 32 KB per chunk
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
+  }
+
+  // Fold a base64 string to 76-char lines per MIME spec.
+  function foldBase64(b64) {
+    const lines = [];
+    for (let i = 0; i < b64.length; i += 76) lines.push(b64.slice(i, i + 76));
+    return lines.join('\r\n');
+  }
+
+  // RFC 5987 / RFC 2231 encoded-parameter value for non-ASCII filenames.
+  function encodeRFC2231(name) {
+    return "utf-8''" + encodeURIComponent(name);
+  }
+
+  function formatBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  // Read all File objects from a file input and return attachment descriptors.
+  async function readAttachments(fileInput) {
+    const files = Array.from(fileInput ? fileInput.files || [] : []);
+    return Promise.all(files.map(async function (f) {
+      const buf  = await f.arrayBuffer();
+      const b64  = uint8ToBase64(new Uint8Array(buf));
+      return { name: f.name, type: f.type || 'application/octet-stream', size: f.size, b64: b64 };
+    }));
+  }
+
+  // Build a single MIME attachment part (headers + folded base64 body).
+  function buildAttachmentPart(att) {
+    const isAscii = /^[\x20-\x7E]*$/.test(att.name);
+    const dispFilename = isAscii
+      ? 'filename="' + att.name + '"'
+      : 'filename*=' + encodeRFC2231(att.name);
+    return (
+      'Content-Type: ' + att.type + '\r\n' +
+      'Content-Disposition: attachment; ' + dispFilename + '\r\n' +
+      'Content-Transfer-Encoding: base64\r\n' +
+      '\r\n' +
+      foldBase64(att.b64)
+    );
+  }
+
   // Build a PGP/MIME multipart/encrypted message from the given PGP block.
   function buildPGPMIME(headers, pgpBlock) {
     const boundary = generateBoundary();
@@ -104,12 +161,29 @@
     return mimeHeaders.join('\r\n') + '\r\n\r\n' + body;
   }
 
-  // Build a plaintext RFC 5322 message.
-  function buildPlaintextMessage(headers, body) {
+  // Build a plaintext RFC 5322 message, switching to multipart/mixed when
+  // attachments are present.
+  function buildPlaintextMessage(headers, body, attachments) {
+    const normalized = body.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+    if (!attachments || attachments.length === 0) {
+      const fullHeaders = headers.concat(['Content-Type: text/plain; charset=utf-8']);
+      return fullHeaders.join('\r\n') + '\r\n\r\n' + normalized;
+    }
+    const boundary = generateBoundary();
     const fullHeaders = headers.concat([
-      'Content-Type: text/plain; charset=utf-8',
+      'Content-Type: multipart/mixed; boundary="' + boundary + '"',
     ]);
-    return fullHeaders.join('\r\n') + '\r\n\r\n' + body;
+    let msg = fullHeaders.join('\r\n') + '\r\n\r\n';
+    msg += '--' + boundary + '\r\n' +
+           'Content-Type: text/plain; charset=utf-8\r\n' +
+           'Content-Transfer-Encoding: 8bit\r\n' +
+           '\r\n' +
+           normalized + '\r\n';
+    attachments.forEach(function (att) {
+      msg += '--' + boundary + '\r\n' + buildAttachmentPart(att) + '\r\n';
+    });
+    msg += '--' + boundary + '--\r\n';
+    return msg;
   }
 
   // RFC 3156 §4: the encrypted payload inside the application/octet-stream
@@ -122,7 +196,10 @@
   // application/pgp-keys part so the recipient's mail client can auto-harvest
   // it for future encrypted replies (ProtonMail, Thunderbird/Enigmail, etc.
   // all recognise this convention).
-  function buildInnerMIME(body, senderKey) {
+  //
+  // When attachments is non-empty the inner payload is always multipart/mixed
+  // regardless of senderKey.
+  function buildInnerMIME(body, senderKey, attachments) {
     const normalized = body.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
     const textPart =
       'Content-Type: text/plain; charset=utf-8\r\n' +
@@ -130,21 +207,33 @@
       '\r\n' +
       normalized;
 
-    if (!senderKey) return textPart;
+    const hasKey  = !!senderKey;
+    const hasAtts = attachments && attachments.length > 0;
 
-    const boundary = 'rk-inner-' + randomHex(12);
-    const keyNormalized = senderKey.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
-    return 'Content-Type: multipart/mixed; boundary="' + boundary + '"\r\n' +
-           '\r\n' +
-           '--' + boundary + '\r\n' +
-           textPart + '\r\n' +
-           '--' + boundary + '\r\n' +
-           'Content-Type: application/pgp-keys\r\n' +
-           'Content-Disposition: attachment; filename="publickey.asc"\r\n' +
-           'Content-Transfer-Encoding: 7bit\r\n' +
-           '\r\n' +
-           keyNormalized + '\r\n' +
-           '--' + boundary + '--\r\n';
+    if (!hasKey && !hasAtts) return textPart;
+
+    const boundary   = 'rk-inner-' + randomHex(12);
+    let result = 'Content-Type: multipart/mixed; boundary="' + boundary + '"\r\n' +
+                 '\r\n' +
+                 '--' + boundary + '\r\n' +
+                 textPart + '\r\n';
+
+    if (hasKey) {
+      const keyNorm = senderKey.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+      result += '--' + boundary + '\r\n' +
+                'Content-Type: application/pgp-keys\r\n' +
+                'Content-Disposition: attachment; filename="publickey.asc"\r\n' +
+                'Content-Transfer-Encoding: 7bit\r\n' +
+                '\r\n' +
+                keyNorm + '\r\n';
+    }
+
+    (attachments || []).forEach(function (att) {
+      result += '--' + boundary + '\r\n' + buildAttachmentPart(att) + '\r\n';
+    });
+
+    result += '--' + boundary + '--\r\n';
+    return result;
   }
 
   ready(async function () {
@@ -164,10 +253,30 @@
     const references  = form.dataset.references || '';
     const domain      = fromAddress.includes('@') ? fromAddress.split('@')[1] : 'localhost';
 
-    const toInput  = document.getElementById('compose-to');
-    const keyHint  = document.getElementById('key-status-hint');
-    const statusEl = document.getElementById('compose-status');
-    const sendBtn  = document.getElementById('send-btn');
+    const toInput        = document.getElementById('compose-to');
+    const keyHint        = document.getElementById('key-status-hint');
+    const statusEl       = document.getElementById('compose-status');
+    const sendBtn        = document.getElementById('send-btn');
+    const attachmentInput = document.getElementById('compose-attachments');
+    const selectedFilesEl = document.getElementById('selected-files');
+
+    // Update the selected-files list whenever the file input changes.
+    if (attachmentInput && selectedFilesEl) {
+      attachmentInput.addEventListener('change', function () {
+        selectedFilesEl.innerHTML = '';
+        Array.from(this.files || []).forEach(function (f) {
+          const li   = document.createElement('li');
+          li.className = 'selected-file';
+          const name = document.createTextNode(f.name + ' ');
+          const size = document.createElement('span');
+          size.className   = 'selected-file-size';
+          size.textContent = '(' + formatBytes(f.size) + ')';
+          li.appendChild(name);
+          li.appendChild(size);
+          selectedFilesEl.appendChild(li);
+        });
+      });
+    }
 
     // ---- Debounced key-status hint ----
 
@@ -206,6 +315,17 @@
         return;
       }
 
+      // Read and validate attachments before doing any crypto work.
+      const attachments = await readAttachments(attachmentInput);
+      const totalAttachBytes = attachments.reduce(function (s, a) { return s + a.size; }, 0);
+      const ATTACH_LIMIT = 20 * 1024 * 1024; // 20 MB pre-encoding limit
+      if (totalAttachBytes > ATTACH_LIMIT) {
+        statusEl.textContent =
+          'Total attachment size (' + formatBytes(totalAttachBytes) + ') exceeds the 20 MB limit. Please remove some files.';
+        sendBtn.disabled = false;
+        return;
+      }
+
       try {
         const baseHeaders = [
           'From: ' + fromAddress,
@@ -225,14 +345,17 @@
         let rawMessage;
 
         if (recipientKeyB64) {
-          statusEl.textContent = 'encrypting…';
+          const attCount = attachments.length;
+          statusEl.textContent = attCount > 0
+            ? 'encrypting (' + attCount + ' attachment' + (attCount > 1 ? 's' : '') + ')…'
+            : 'encrypting…';
           const recipientKeyArmored = atob(recipientKeyB64);
 
           const { loadSessionKey, encryptMessage } = window.RookeryCrypto;
           const privateKey = await loadSessionKey();
 
           const pgpBlock = await encryptMessage(
-            buildInnerMIME(body, senderKey),
+            buildInnerMIME(body, senderKey, attachments),
             [recipientKeyArmored],
             senderKey || null,
             privateKey || null,
@@ -241,7 +364,7 @@
           rawMessage = buildPGPMIME(baseHeaders, pgpBlock);
         } else {
           statusEl.textContent = 'sending (no key — plaintext)…';
-          rawMessage = buildPlaintextMessage(baseHeaders, body);
+          rawMessage = buildPlaintextMessage(baseHeaders, body, attachments);
         }
 
         const resp = await fetch('/api/v1/messages', {

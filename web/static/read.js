@@ -55,6 +55,39 @@
       bodyDiv.replaceChildren(pre);
     }
 
+    // Track Blob URLs so they can be revoked when the page unloads.
+    const _blobURLs = [];
+    window.addEventListener('beforeunload', function () {
+      _blobURLs.forEach(function (u) { URL.revokeObjectURL(u); });
+    });
+
+    // Render attachment list for encrypted messages after client-side decryption.
+    // For plaintext messages the server pre-renders download links, so this is a
+    // no-op (the template section is already populated).
+    function renderAttachments(attachments) {
+      const section = document.getElementById('attachment-list');
+      if (!section) return;
+      if (!attachments || attachments.length === 0) return; // keep hidden
+      const ul = section.querySelector('#attachment-items') || section.querySelector('ul');
+      if (!ul) return;
+      ul.innerHTML = '';
+      attachments.forEach(function (att) {
+        const blob = new Blob([att.bytes], { type: att.contentType || 'application/octet-stream' });
+        const url  = URL.createObjectURL(blob);
+        _blobURLs.push(url);
+        const a  = document.createElement('a');
+        a.href   = url;
+        a.download = att.filename || 'attachment';
+        a.textContent = att.filename || 'attachment';
+        a.className = 'attachment-link';
+        const li = document.createElement('li');
+        li.className = 'attachment-item';
+        li.appendChild(a);
+        ul.appendChild(li);
+      });
+      section.hidden = false;
+    }
+
     function updateBadge(status, securityState) {
       if (!badgeEl) return;
       if (securityState === 'pgp_encrypted') {
@@ -88,6 +121,7 @@
     const { loadSessionKey, loadSessionFingerprint, decryptMessage } = window.RookeryCrypto;
 
     // --- Plaintext: fetch and render directly, no key needed ---
+    // Attachments for plaintext messages are pre-rendered by the server.
     if (secState === 'plaintext') {
       try {
         const raw = await fetchRaw();
@@ -117,9 +151,10 @@
     try {
       if (noticeEl) noticeEl.textContent = 'decrypting…';
       const raw = await fetchRaw();
-      const { body, signatureStatus } = await decryptMessage(raw, privateKey, senderKey);
+      const { body, signatureStatus, attachments } = await decryptMessage(raw, privateKey, senderKey);
       renderBody(body);
       updateBadge(signatureStatus, secState);
+      renderAttachments(attachments);
     } catch (err) {
       showError('Decryption failed: ' + err.message);
     }

@@ -2,6 +2,7 @@ package web
 
 import (
 	"embed"
+	"fmt"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,17 @@ var tmplFuncs = template.FuncMap{
 			return path
 		}
 		return path + "?v=" + AssetVersion
+	},
+	"formatBytes": func(n int64) string {
+		const kb, mb = 1024, 1024 * 1024
+		switch {
+		case n < kb:
+			return fmt.Sprintf("%d B", n)
+		case n < mb:
+			return fmt.Sprintf("%.1f KB", float64(n)/kb)
+		default:
+			return fmt.Sprintf("%.1f MB", float64(n)/mb)
+		}
 	},
 }
 

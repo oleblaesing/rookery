@@ -121,6 +121,7 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Get("/messages", handleAPIListMessages(db))
 		r.Get("/messages/{id}", handleAPIGetMessage(db))
 		r.Get("/messages/{id}/raw", handleAPIGetMessageRaw(db, st))
+		r.Get("/messages/{id}/attachments/{index}", handleAPIGetAttachment(db, st))
 		r.Patch("/messages/{id}", handleAPIPatchMessage(db))
 		r.Delete("/messages/{id}", handleAPIDeleteMessage(db, st))
 

@@ -260,15 +260,15 @@ func (w *Worker) markBounced(ctx context.Context, queueID, messageID, from, to, 
 		   message_date, size_bytes, blob_sha256, security_state, signature_status)
 		SELECT u.id, 'bounced',
 		       'postmaster@' || d.domain,
-		       ARRAY[$3::text],
-		       'Delivery failure: ' || $4,
-		       now(), $5, $6, 'plaintext', 'none'
+		       ARRAY[$2::text],
+		       'Delivery failure: ' || $3,
+		       now(), $4, $5, 'plaintext', 'none'
 		FROM   messages m
 		JOIN   users u ON u.id = m.user_id
 		JOIN   addresses a ON a.id = u.primary_address_id
 		JOIN   domains d ON d.domain = split_part(a.address, '@', 2)
-		WHERE  m.id = $2
-	`, nil, messageID, to, to, int64(len(bounceDSN)), digest)
+		WHERE  m.id = $1
+	`, messageID, to, to, int64(len(bounceDSN)), digest)
 	if err != nil {
 		slog.Error("queue: could not insert bounce DSN message", "err", err)
 	}

@@ -286,12 +286,21 @@ func handleInboxPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 // GET /messages/{id} — read a single message
 // -------------------------------------------------------------------------
 
+// attachmentItem is a single attachment entry for the read page template.
+type attachmentItem struct {
+	PartIndex   int
+	Filename    string
+	ContentType string
+	SizeBytes   int64
+}
+
 type readPageData struct {
 	InstanceName       string
 	User               *userProfile
 	Message            messageListItem
 	CSRFToken          string
-	SenderPublicKeyB64 string // base64-encoded armored public key for signature verification
+	SenderPublicKeyB64 string          // base64-encoded armored public key for signature verification
+	Attachments        []attachmentItem // populated for plaintext messages only
 }
 
 func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
@@ -367,12 +376,35 @@ func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
+		// Fetch attachment metadata for plaintext messages so the template can
+		// render server-side download links. Encrypted messages have no rows —
+		// the browser reconstructs the list after PGP decryption.
+		var attachments []attachmentItem
+		if m.HasAttachments && m.SecurityState != "pgp_encrypted" {
+			aRows, aErr := db.Query(r.Context(), `
+				SELECT part_index, filename, content_type, size_bytes
+				FROM   message_attachments
+				WHERE  message_id = $1
+				ORDER  BY part_index
+			`, msgID)
+			if aErr == nil {
+				for aRows.Next() {
+					var a attachmentItem
+					if err := aRows.Scan(&a.PartIndex, &a.Filename, &a.ContentType, &a.SizeBytes); err == nil {
+						attachments = append(attachments, a)
+					}
+				}
+				aRows.Close()
+			}
+		}
+
 		renderTemplate(w, "read.gohtml", readPageData{
 			InstanceName:       cfg.InstanceName,
 			User:               user,
 			Message:            m,
 			CSRFToken:          auth.CSRFTokenFromContext(r.Context()),
 			SenderPublicKeyB64: senderKeyB64,
+			Attachments:        attachments,
 		})
 	}
 }

@@ -221,7 +221,7 @@ func (s *inboundSession) Data(r io.Reader) error {
 			slog.Warn("smtp: recipient resolve failed at delivery time", "err", err)
 			continue
 		}
-		if err := storeMessage(ctx, s.backend.db, userID, s.from, meta, blobDigest, int64(len(rawMsg))); err != nil {
+		if _, err := storeMessage(ctx, s.backend.db, userID, s.from, meta, blobDigest, int64(len(rawMsg))); err != nil {
 			slog.Error("smtp: store message", "user_id", userID, "err", err)
 			// Continue to next recipient.
 			continue
@@ -329,15 +329,145 @@ func resolveRecipient(ctx context.Context, db *pgxpool.Pool, _ *config.Config, t
 // Message metadata parsing
 // -------------------------------------------------------------------------
 
+// AttachmentMeta holds metadata for a single attachment part extracted from a
+// plaintext message at inbound time. Encrypted messages have no rows in the
+// message_attachments table — attachments are reconstructed browser-side.
+type AttachmentMeta struct {
+	PartIndex   int    // 0-based among attachment-eligible leaf parts, depth-first
+	Filename    string
+	ContentType string
+	SizeBytes   int64
+}
+
+// AttachmentPart holds the decoded bytes and metadata for a single attachment.
+// Returned by ReadAttachmentAt for the download endpoint.
+type AttachmentPart struct {
+	Filename    string
+	ContentType string
+	Body        []byte
+}
+
 // MsgMeta holds the parsed metadata fields extracted from an RFC 5322 message.
 type MsgMeta struct {
 	Subject         string
 	MessageDate     time.Time
 	To              []string
 	Cc              []string
-	SecurityState   string // pgp_encrypted | pgp_signed_plaintext | plaintext
-	SignatureStatus string // verified | unknown_key | invalid | none
+	SecurityState   string          // pgp_encrypted | pgp_signed_plaintext | plaintext
+	SignatureStatus string          // verified | unknown_key | invalid | none
 	HasAttachments  bool
+	Attachments     []AttachmentMeta // nil for encrypted messages; populated for plaintext
+}
+
+// isAttachmentPart reports whether a MIME leaf part with the given content-type
+// and disposition is a user-visible attachment. PGP wrapper types and text/plain
+// (the message body) are excluded.
+func isAttachmentPart(ct, disp string) bool {
+	ctLower := strings.ToLower(strings.TrimSpace(ct))
+	switch ctLower {
+	case "application/pgp-encrypted", "application/pgp-keys", "application/pgp-signature":
+		return false
+	}
+	if strings.EqualFold(disp, "attachment") {
+		return true
+	}
+	return !strings.HasPrefix(ctLower, "text/") &&
+		!strings.HasPrefix(ctLower, "multipart/") &&
+		ctLower != ""
+}
+
+// collectAttachmentMeta walks entity depth-first and appends metadata for
+// attachment-eligible leaf parts to result. idx tracks the running part index.
+// Only body sizes are computed; body bytes are discarded to save memory.
+func collectAttachmentMeta(entity *gomessage.Entity, result *[]AttachmentMeta, idx *int) {
+	ct, ctParams, _ := entity.Header.ContentType()
+	disp, dispParams, _ := entity.Header.ContentDisposition()
+
+	if mr := entity.MultipartReader(); mr != nil {
+		for {
+			part, err := mr.NextPart()
+			if err != nil {
+				break
+			}
+			collectAttachmentMeta(part, result, idx)
+		}
+		return
+	}
+
+	if !isAttachmentPart(ct, disp) {
+		return
+	}
+
+	filename := dispParams["filename"]
+	if filename == "" {
+		filename = ctParams["name"]
+	}
+	if filename == "" {
+		filename = fmt.Sprintf("attachment-%d", *idx)
+	}
+
+	// Read body only to compute size; discard bytes to keep memory use low.
+	n, _ := io.Copy(io.Discard, entity.Body)
+	*result = append(*result, AttachmentMeta{
+		PartIndex:   *idx,
+		Filename:    filename,
+		ContentType: ct,
+		SizeBytes:   n,
+	})
+	(*idx)++
+}
+
+// collectAllParts walks entity depth-first and appends decoded body bytes for
+// each attachment-eligible leaf part to parts.
+func collectAllParts(entity *gomessage.Entity, parts *[]*AttachmentPart) {
+	ct, ctParams, _ := entity.Header.ContentType()
+	disp, dispParams, _ := entity.Header.ContentDisposition()
+
+	if mr := entity.MultipartReader(); mr != nil {
+		for {
+			part, err := mr.NextPart()
+			if err != nil {
+				break
+			}
+			collectAllParts(part, parts)
+		}
+		return
+	}
+
+	if !isAttachmentPart(ct, disp) {
+		return
+	}
+
+	filename := dispParams["filename"]
+	if filename == "" {
+		filename = ctParams["name"]
+	}
+	if filename == "" {
+		filename = fmt.Sprintf("attachment-%d", len(*parts))
+	}
+
+	body, _ := io.ReadAll(entity.Body)
+	*parts = append(*parts, &AttachmentPart{
+		Filename:    filename,
+		ContentType: ct,
+		Body:        body,
+	})
+}
+
+// ReadAttachmentAt re-parses raw and returns the decoded body and metadata of
+// the attachment at the given 0-based index. Returns an error if the index is
+// out of range or the message cannot be parsed.
+func ReadAttachmentAt(raw []byte, index int) (*AttachmentPart, error) {
+	entity, err := gomessage.Read(strings.NewReader(string(raw)))
+	if err != nil {
+		return nil, fmt.Errorf("parse MIME: %w", err)
+	}
+	var parts []*AttachmentPart
+	collectAllParts(entity, &parts)
+	if index < 0 || index >= len(parts) {
+		return nil, fmt.Errorf("attachment index %d out of range (message has %d attachment(s))", index, len(parts))
+	}
+	return parts[index], nil
 }
 
 // ParseMeta parses MIME headers and structure from a raw RFC 5322 message and
@@ -378,18 +508,18 @@ func ParseMeta(raw []byte) MsgMeta {
 		m.SignatureStatus = "unknown_key" // JS module verifies on read
 	}
 
-	// Detect attachments: walk MIME parts.
-	if mr := entity.MultipartReader(); mr != nil {
-		for {
-			part, err := mr.NextPart()
-			if err != nil {
-				break
-			}
-			disp, _, _ := part.Header.ContentDisposition()
-			if strings.EqualFold(disp, "attachment") {
-				m.HasAttachments = true
-				break
-			}
+	// For non-encrypted messages, walk the MIME tree to collect attachment
+	// metadata. A fresh reader is used so the content-type detection above
+	// does not interfere with the body walk.
+	// For PGP-encrypted messages, has_attachments stays false on the outer
+	// MIME (the outer is multipart/encrypted and reveals nothing about the
+	// inner content); the browser reconstructs the list after decryption.
+	if m.SecurityState != "pgp_encrypted" {
+		entity2, err2 := gomessage.Read(strings.NewReader(string(raw)))
+		if err2 == nil {
+			var idx int
+			collectAttachmentMeta(entity2, &m.Attachments, &idx)
+			m.HasAttachments = len(m.Attachments) > 0
 		}
 	}
 	return m
@@ -411,7 +541,8 @@ func DeliverLocal(ctx context.Context, db *pgxpool.Pool, st *store.Store, cfg *c
 		return fmt.Errorf("local delivery: write blob: %w", err)
 	}
 	meta := ParseMeta(rawMsg)
-	return storeMessage(ctx, db, userID, from, meta, blobDigest, int64(len(rawMsg)))
+	_, err = storeMessage(ctx, db, userID, from, meta, blobDigest, int64(len(rawMsg)))
+	return err
 }
 
 // addressList parses an RFC 5322 address-list header value (To, Cc) into
@@ -463,22 +594,24 @@ func fallbackAddressList(header string) []string {
 // -------------------------------------------------------------------------
 
 func storeMessage(ctx context.Context, db *pgxpool.Pool,
-	userID, from string, meta MsgMeta, blobDigest string, sizeBytes int64) error {
+	userID, from string, meta MsgMeta, blobDigest string, sizeBytes int64) (string, error) {
 
-	_, err := db.Exec(ctx, `
+	var messageID string
+	err := db.QueryRow(ctx, `
 		INSERT INTO messages
 		  (user_id, folder, from_address, to_addresses, cc_addresses,
 		   subject, message_date, size_bytes, blob_sha256,
 		   security_state, signature_status, has_attachments)
 		VALUES ($1, 'inbox', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		RETURNING id
 	`,
 		userID, from,
 		meta.To, meta.Cc,
 		meta.Subject, meta.MessageDate, sizeBytes, blobDigest,
 		meta.SecurityState, meta.SignatureStatus, meta.HasAttachments,
-	)
+	).Scan(&messageID)
 	if err != nil {
-		return fmt.Errorf("storeMessage: %w", err)
+		return "", fmt.Errorf("storeMessage: %w", err)
 	}
 
 	// Update the user's used_bytes counter.
@@ -486,7 +619,17 @@ func storeMessage(ctx context.Context, db *pgxpool.Pool,
 		`UPDATE users SET used_bytes = used_bytes + $1 WHERE id = $2`,
 		sizeBytes, userID)
 
-	return nil
+	// Insert attachment metadata for plaintext messages. Errors are non-fatal
+	// — the message is already stored and the download endpoint will return 404
+	// rather than corrupt data.
+	for _, a := range meta.Attachments {
+		_, _ = db.Exec(ctx, `
+			INSERT INTO message_attachments (message_id, part_index, filename, content_type, size_bytes)
+			VALUES ($1, $2, $3, $4, $5)
+		`, messageID, a.PartIndex, a.Filename, a.ContentType, a.SizeBytes)
+	}
+
+	return messageID, nil
 }
 
 // -------------------------------------------------------------------------

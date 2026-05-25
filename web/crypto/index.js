@@ -126,7 +126,7 @@ export function buildRecoveryBlob(encryptedPrivateKeyArmored) {
 
 /**
  * decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmored?)
- *   → { body: string, signatureStatus: string }
+ *   → { body: string, signatureStatus: string, attachments: Array }
  *
  * rawRFC5322: the raw RFC 5322 message bytes (fetched from
  *             /api/v1/messages/{id}/raw).
@@ -137,13 +137,16 @@ export function buildRecoveryBlob(encryptedPrivateKeyArmored) {
  *   body            — decrypted plaintext body (or extracted body for
  *                     non-PGP messages)
  *   signatureStatus — "verified" | "unknown_key" | "invalid" | "none"
+ *   attachments     — array of { filename, contentType, bytes: Uint8Array }
+ *                     from parseMIMEAttachments; empty for plaintext messages
+ *                     (server renders those via the attachment download endpoint)
  */
 export async function decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmored = null) {
   const pgpBlock = extractPGPBlock(rawRFC5322);
 
   if (!pgpBlock || !privateKey) {
     const body = extractTextBody(rawRFC5322);
-    return { body, signatureStatus: 'none' };
+    return { body, signatureStatus: 'none', attachments: [] };
   }
 
   try {
@@ -155,14 +158,15 @@ export async function decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmo
       expectSigned: false,
     });
 
-    const body = extractDecryptedBody(data);
+    const body        = extractDecryptedBody(data);
+    const attachments = parseMIMEAttachments(data);
 
     if (!signatures || signatures.length === 0) {
-      return { body, signatureStatus: 'none' };
+      return { body, signatureStatus: 'none', attachments };
     }
 
     if (!senderPublicKeyArmored) {
-      return { body, signatureStatus: 'unknown_key' };
+      return { body, signatureStatus: 'unknown_key', attachments };
     }
 
     try {
@@ -175,9 +179,9 @@ export async function decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmo
         expectSigned: false,
       });
       await sigs2[0].verified;
-      return { body, signatureStatus: 'verified' };
+      return { body, signatureStatus: 'verified', attachments };
     } catch {
-      return { body, signatureStatus: 'invalid' };
+      return { body, signatureStatus: 'invalid', attachments };
     }
   } catch (err) {
     throw new Error('Decryption failed: ' + err.message);
@@ -568,6 +572,150 @@ function mimeExtractText(headers, body) {
   }
 
   return null;
+}
+
+// --------------------------------------------------------------------------
+// Attachment extraction from decrypted MIME payloads
+// --------------------------------------------------------------------------
+
+/**
+ * parseMIMEAttachments(mimeText)
+ *   → [{ filename: string, contentType: string, bytes: Uint8Array }]
+ *
+ * Walks the MIME structure of mimeText (typically the decrypted inner payload
+ * of a PGP/MIME message) and returns decoded attachment parts.
+ *
+ * Excluded: application/pgp-keys (auto-attached sender key),
+ *           application/pgp-signature, application/pgp-encrypted, text/plain
+ *           (the message body).
+ *
+ * Memory note: the entire decrypted payload is already buffered in memory by
+ * decryptMessage. parseMIMEAttachments does not add additional copies beyond
+ * what decryptMessage already holds — the 20 MB cap makes this acceptable.
+ * A streaming path through OpenPGP.js would remove this constraint but would
+ * complicate the API significantly (tracked as a known follow-up).
+ */
+export function parseMIMEAttachments(mimeText) {
+  if (!mimeText) return [];
+  const { headers, body } = mimeSplit(mimeText);
+  if (!headers) return [];
+  const result = [];
+  _collectMIMEAttachments(headers, body, result);
+  return result;
+}
+
+function _collectMIMEAttachments(headers, body, result) {
+  const ct        = mimeHeader(headers, 'Content-Type') || 'text/plain';
+  const mediaType = ct.split(';')[0].trim().toLowerCase();
+  const disp      = mimeHeader(headers, 'Content-Disposition').trim();
+  const dispType  = disp.split(';')[0].trim().toLowerCase();
+
+  // Skip PGP wrappers unconditionally.
+  if (mediaType === 'application/pgp-signature' ||
+      mediaType === 'application/pgp-keys'      ||
+      mediaType === 'application/pgp-encrypted') {
+    return;
+  }
+
+  // Skip text/plain unless it is explicitly marked as an attachment
+  // (Content-Disposition: attachment). Without the explicit disposition a
+  // text/plain part is the message body, not a user attachment.
+  if (mediaType === 'text/plain' && dispType !== 'attachment') {
+    return;
+  }
+
+  if (mediaType.startsWith('multipart/')) {
+    const boundary = mimeBoundary(ct);
+    if (!boundary) return;
+    for (const part of mimeMultipartParts(body, boundary)) {
+      const { headers: ph, body: pb } = mimeSplit(part);
+      _collectMIMEAttachments(ph, pb, result);
+    }
+    return;
+  }
+
+  // Leaf part: this is an attachment.
+  const dispHeader = mimeHeader(headers, 'Content-Disposition');
+  const enc        = mimeHeader(headers, 'Content-Transfer-Encoding').toLowerCase().trim();
+
+  const filename = _mimeDecodeWord(
+    _mimeParamValue(dispHeader, 'filename') || _mimeParamValue(ct, 'name') || ''
+  );
+
+  const bytes = _mimeDecodeBodyBytes(body.replace(/\r?\n$/, ''), enc);
+  result.push({ filename, contentType: mediaType, bytes });
+}
+
+// Extract a named parameter value from a MIME header field value.
+// Handles RFC 2231 (filename*=utf-8''...) and plain quoted/unquoted forms.
+function _mimeParamValue(header, param) {
+  if (!header) return '';
+  const lower = param.toLowerCase();
+
+  // RFC 2231 / RFC 5987: param*=charset''pct-encoded
+  const rfc2231 = new RegExp(lower + '\\*=([^;\\s]+)', 'i');
+  const m2231   = header.match(rfc2231);
+  if (m2231) {
+    try {
+      const v     = m2231[1];
+      const apos  = v.indexOf("''");
+      if (apos !== -1) return decodeURIComponent(v.slice(apos + 2));
+    } catch { /* ignore */ }
+  }
+
+  // Plain quoted: param="value"
+  const mQuoted = header.match(new RegExp(lower + '="([^"]*)"', 'i'));
+  if (mQuoted) return mQuoted[1];
+
+  // Unquoted: param=value
+  const mUnquoted = header.match(new RegExp(lower + '=([^;\\s]+)', 'i'));
+  if (mUnquoted) return mUnquoted[1];
+
+  return '';
+}
+
+// Decode RFC 2047 encoded words (=?charset?B|Q?text?=) in header values.
+function _mimeDecodeWord(str) {
+  return str.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, function (_, charset, enc, text) {
+    try {
+      let bytes;
+      if (enc.toUpperCase() === 'B') {
+        const b = atob(text);
+        bytes = new Uint8Array(b.length);
+        for (let i = 0; i < b.length; i++) bytes[i] = b.charCodeAt(i);
+      } else {
+        // Quoted-printable variant for headers (RFC 2047 Q encoding).
+        const decoded = text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g,
+          function (_, h) { return String.fromCharCode(parseInt(h, 16)); });
+        bytes = new Uint8Array(decoded.length);
+        for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+      }
+      return new TextDecoder(charset).decode(bytes);
+    } catch {
+      return str;
+    }
+  });
+}
+
+// Decode an attachment body part into raw bytes.
+function _mimeDecodeBodyBytes(body, encoding) {
+  if (encoding === 'base64') {
+    try {
+      const b   = atob(body.replace(/\s+/g, ''));
+      const arr = new Uint8Array(b.length);
+      for (let i = 0; i < b.length; i++) arr[i] = b.charCodeAt(i);
+      return arr;
+    } catch {
+      return new Uint8Array(0);
+    }
+  }
+  if (encoding === 'quoted-printable') {
+    // Decode QP to text then re-encode to bytes.
+    const text = mimeDecodeBody(body, 'quoted-printable');
+    return new TextEncoder().encode(text);
+  }
+  // 7bit / 8bit / binary: raw bytes via UTF-8.
+  return new TextEncoder().encode(body);
 }
 
 function mimeDecodeBody(body, encoding) {
