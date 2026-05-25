@@ -438,7 +438,6 @@ button:disabled {
 .message-list a:hover { color: #e6d9c2; }
 
 .unread-dot  { color: #7dd3c8; font-size: 0.55rem; }
-.attach-icon { font-size: 0.75rem; color: #484f58; }
 
 .security-badge { font-size: 0.75rem; }
 .security-badge.plaintext  { color: #d29922; }
