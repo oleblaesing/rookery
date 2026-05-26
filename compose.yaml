@@ -71,13 +71,13 @@ services:
       # container's writable layer and disappear on container replacement.
       - rookery-messages:/var/lib/rookery/messages
     env_file: ./.env
-    # Healthcheck is implemented as a `rookery-server healthcheck` subcommand
-    # (see cmd/rookery-server/main.go) because the distroless runtime image
+    # Healthcheck is implemented as a `rookery healthcheck` subcommand
+    # (see cmd/rookery/main.go) because the distroless runtime image
     # has no shell or wget/curl. It lives here rather than as a HEALTHCHECK
     # directive in the Containerfile so the compose file is the single source
     # of truth for runtime behaviour.
     healthcheck:
-      test: ["CMD", "/usr/local/bin/rookery-server", "healthcheck"]
+      test: ["CMD", "/usr/local/bin/rookery", "healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 3

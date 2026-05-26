@@ -52,13 +52,13 @@ sudo systemctl enable --now rookery
 ./rookery logs [service]
 ```
 
-**Iterating on Go code** without rebuilding the container: `go run ./cmd/rookery-server` works for the HTTP server if `ROOKERY_CONFIG`, `ROOKERY_DB_URL`, etc. are in the environment. The JS crypto module requires the container build (esbuild runs only inside the Containerfile).
+**Iterating on Go code** without rebuilding the container: `go run ./cmd/rookery serve` works for the HTTP server if `ROOKERY_CONFIG`, `ROOKERY_DB_URL`, etc. are in the environment. The JS crypto module requires the container build (esbuild runs only inside the Containerfile).
 
 ## Architecture
 
 ### Process structure
 
-One binary (`cmd/rookery-server/main.go`) starts:
+One binary (`cmd/rookery/main.go`) starts:
 - HTTP server on port 8080 (chi router, `net/http`). In production, Caddy proxies HTTPS→HTTP to this port; in dev, hit it directly.
 - SMTP inbound listener on port 25 (`emersion/go-smtp`)
 

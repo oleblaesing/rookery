@@ -1012,11 +1012,15 @@ _psql_c() {
 
 # Validate that $1 looks like an email address (contains @, non-empty parts).
 # Die with a usage message if not. Shell-level only; psql still enforces schema.
-_require_address() {
+# Resolve a user address argument: accepts either "alice" or "alice@example.com".
+# A bare local part is expanded to "<localpart>@<primary domain>" from rookery.toml.
+# Prints the full address on success; dies with $msg on invalid input.
+_resolve_address() {
     local addr="$1" msg="${2:-usage: rookery user <suspend|unsuspend|delete> <address>}"
     case "$addr" in
-        *@?*.*) ;;  # something@something.something
-        *) die "$msg" ;;
+        *@?*) printf '%s' "$addr" ;;
+        ?*)   printf '%s@%s' "$addr" "$(toml_get domain)" ;;
+        *)    die "$msg" ;;
     esac
 }
 
@@ -1034,8 +1038,8 @@ cmd_user() {
 
 cmd_user_suspend() {
     need_init
-    local addr="${1:-}"
-    _require_address "$addr" "usage: rookery user suspend <address>"
+    local addr
+    addr=$(_resolve_address "${1:-}" "usage: rookery user suspend <address>") || exit 1
 
     local rows
     rows=$(_psql_c "
@@ -1053,8 +1057,8 @@ cmd_user_suspend() {
 
 cmd_user_unsuspend() {
     need_init
-    local addr="${1:-}"
-    _require_address "$addr" "usage: rookery user unsuspend <address>"
+    local addr
+    addr=$(_resolve_address "${1:-}" "usage: rookery user unsuspend <address>") || exit 1
 
     local rows
     rows=$(_psql_c "
@@ -1072,29 +1076,18 @@ cmd_user_unsuspend() {
 
 cmd_user_delete() {
     need_init
-    local addr="${1:-}" reason="${2:-}"
-    _require_address "$addr" "usage: rookery user delete <address> [reason]"
+    local addr reason="${2:-}"
+    addr=$(_resolve_address "${1:-}" "usage: rookery user delete <address> [reason]") || exit 1
 
     printf 'rookery: WARNING: Permanently deletes the user and ALL their mail.\n' >&2
-    printf 'rookery: Type the address to confirm: ' >&2
+    printf 'rookery: Type "%s" to confirm: ' "$addr" >&2
     local confirm
     read -r confirm
     [ "$confirm" = "$addr" ] || die "aborted — address did not match"
 
-    local rows
-    rows=$(_psql_c "
-        DELETE FROM users
-        WHERE id = (
-            SELECT user_id FROM addresses
-            WHERE lower(address) = lower('${addr}')
-            LIMIT 1
-        )
-        RETURNING id
-    " | wc -l | tr -d ' ')
-
-    [ "${rows:-0}" -ge 1 ] || die "no user found for address '${addr}'"
+    dc exec -T rookery /usr/local/bin/rookery delete-user "$addr" \
+        || die "deletion failed — check rookery logs"
     info "deleted user $addr${reason:+ (reason: $reason)}"
-    info "note: message blobs on disk are now orphaned — a future blob-gc will clean them"
 }
 
 # ---------------------------------------------------------------------------
@@ -1161,7 +1154,7 @@ cmd_master_key_rotate() {
     info "new master key generated"
 
     # Re-encrypt all DKIM keys inside the rookery container (has DB access + code).
-    dc exec -T rookery /usr/local/bin/rookery-server rotate-master-key \
+    dc exec -T rookery /usr/local/bin/rookery rotate-master-key \
         --old-key="$old_key" --new-key="$new_key" \
         || die "rotate-master-key failed — DKIM keys are unchanged; .env is NOT updated"
 

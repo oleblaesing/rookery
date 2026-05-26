@@ -7,6 +7,7 @@
   <div class="tab-strip" role="tablist">
     <button role="tab" aria-controls="tab-privatekey" aria-selected="true"  id="tab-btn-privatekey" class="tab-active">private key</button>
     <button role="tab" aria-controls="tab-domains"    aria-selected="false" id="tab-btn-domains">custom domains</button>
+    <button role="tab" aria-controls="tab-delete"     aria-selected="false" id="tab-btn-delete">delete account</button>
   </div>
 
   {{/* ---- custom domains tab ---- */}}
@@ -128,6 +129,56 @@
     </form>
 
   </div>{{/* end tab-privatekey */}}
+
+  {{/* ---- delete account tab ---- */}}
+  <div id="tab-delete" role="tabpanel" aria-labelledby="tab-btn-delete" class="tab-panel">
+
+    <div class="info-block narrow-form">
+      <p>Deleting your account is <strong>immediate and irreversible</strong>.
+      There is no grace period and no undo. The following is removed
+      permanently from the server:</p>
+      <ul>
+        <li>All received and sent messages, including encrypted blobs.</li>
+        <li>Your public key, all addresses, and all active sessions.</li>
+        <li>Custom domains you exclusively own (and their DKIM keys).</li>
+        <li>Drafts and your known-keys cache.</li>
+      </ul>
+      <p>Mail that has already been delivered to other people's inboxes, and
+      public-key copies auto-attached to past outbound mail, are not
+      affected — the server cannot reach into recipients' mailboxes.</p>
+      <p>Your recovery file is yours to deal with separately; deleting your
+      account does not touch files on your own devices.</p>
+    </div>
+
+    {{if gt .UnreadLast24h 0}}
+    <p class="field-hint warning">Unread messages received in the last 24 h: <strong>{{.UnreadLast24h}}</strong>. They will be permanently deleted.</p>
+    {{else}}
+    <p class="field-hint">Unread messages received in the last 24 h: <strong>0</strong></p>
+    {{end}}
+
+    <form id="delete-account-form" class="narrow-form">
+      <div class="field">
+        <label for="delete-confirm-address">type your address to confirm</label>
+        <input type="text" id="delete-confirm-address" name="confirm_address"
+               autocomplete="off" placeholder="{{.User.PrimaryAddress}}">
+        <p class="field-hint">Must match exactly: <code>{{.User.PrimaryAddress}}</code></p>
+      </div>
+      <div class="field">
+        <label for="delete-passphrase">private key passphrase</label>
+        <input type="password" id="delete-passphrase" name="passphrase"
+               autocomplete="current-password" placeholder="passphrase">
+      </div>
+      <div class="field">
+        <label for="delete-recovery-file">recovery file (.asc)</label>
+        <input type="file" id="delete-recovery-file" name="recovery_file" accept=".asc,.txt">
+      </div>
+      <div class="form-actions">
+        <button type="submit" id="delete-account-btn" class="button button-danger">delete account</button>
+      </div>
+      <p id="delete-account-error" class="field-hint error" style="display:none"></p>
+    </form>
+
+  </div>{{/* end tab-delete */}}
 
 </section>
 {{end}}

@@ -10,6 +10,7 @@
   <h1>log in</h1>
   <p class="instance-name">{{.InstanceName}}</p>
 
+  {{if .Deleted}}<p class="field-hint">Your account has been permanently deleted.</p>{{end}}
   <p class="error" role="alert"{{if not .Error}} hidden{{end}}>{{if .Error}}{{.Error}}{{end}}</p>
 
   <form id="login-form">

@@ -6,7 +6,7 @@
 # PLAN.md and the header of compose.yaml for the rationale.
 #
 # Stages:
-#   1. go-build    — compiles the rookery-server binary
+#   1. go-build    — compiles the rookery binary
 #   2. js-build    — bundles the browser crypto module via esbuild
 #                    (partials.js ships hand-written; no bundler needed for it)
 #   3. final       — distroless image with the binary + static assets
@@ -37,8 +37,8 @@ COPY . .
 # CGO_ENABLED=0 produces a fully static binary compatible with distroless.
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} \
     go build -trimpath -ldflags="-s -w -X rookery/internal/web.AssetVersion=${GIT_REVISION}" \
-    -o /out/rookery-server \
-    ./cmd/rookery-server/
+    -o /out/rookery \
+    ./cmd/rookery/
 
 # --------------------------------------------------------------------------- #
 # Stage 2: JS build
@@ -79,7 +79,7 @@ RUN mkdir -p /var/lib/rookery/messages && \
 FROM gcr.io/distroless/static-debian12:nonroot AS final
 
 # Binary
-COPY --from=go-build /out/rookery-server /usr/local/bin/rookery-server
+COPY --from=go-build /out/rookery /usr/local/bin/rookery
 
 # Pre-created data directory owned by nonroot so the volume mount is writable.
 COPY --from=dirs /var/lib/rookery /var/lib/rookery
@@ -96,8 +96,9 @@ EXPOSE 8080 443 25 465 587
 
 # Healthcheck is defined in compose.yaml rather than here, so the compose file
 # remains the single source of truth for runtime behaviour. The
-# `rookery-server healthcheck` subcommand (see cmd/rookery-server/main.go) is
-# what compose invokes; the distroless runtime image has no shell or
-# wget/curl, so this subcommand is the only viable probe.
+# `rookery healthcheck` subcommand (see cmd/rookery/main.go) is what compose
+# invokes; the distroless runtime image has no shell or wget/curl, so this
+# subcommand is the only viable probe.
 
-ENTRYPOINT ["/usr/local/bin/rookery-server"]
+ENTRYPOINT ["/usr/local/bin/rookery"]
+CMD ["serve"]

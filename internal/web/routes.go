@@ -112,6 +112,10 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Get("/users/me/sessions", handleAPIListSessions(ss))
 		r.Delete("/users/me/sessions/{id}", handleAPIDeleteSession(db, ss))
 
+		// Account deletion (challenge/response, then irreversible delete).
+		r.Post("/users/me/deletion/challenge", handleAPIDeletionChallenge(db))
+		r.Post("/users/me/deletion", handleAPIDeletion(db, ss, st))
+
 		// Keys.
 		r.Get("/keys/me", handleAPIGetMyKey(db))
 		r.Put("/keys/me", handleAPIPutMyKey(db))

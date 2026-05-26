@@ -27,6 +27,7 @@ type loginPageData struct {
 	Error        string
 	Address      string
 	User         *userProfile
+	Deleted      bool
 }
 
 func handleLoginPage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc {
@@ -42,6 +43,7 @@ func handleLoginPage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc
 		data := loginPageData{
 			InstanceName: cfg.InstanceName,
 			Domain:       cfg.Domain,
+			Deleted:      r.URL.Query().Get("deleted") == "1",
 		}
 		// Unauthenticated CSRF token: reuse the existing cookie if present so
 		// that opening login in multiple tabs does not invalidate any of them.
@@ -173,6 +175,7 @@ type settingsPageData struct {
 	CSRFToken     string
 	Domains       []settingsDomain
 	PrimaryDomain string
+	UnreadLast24h int
 }
 
 func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Manager) http.HandlerFunc {
@@ -199,12 +202,22 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Ma
 			sd.PendingGroups = groupRecords(requiredRecords(&domList[i], primary))
 			settingsDomains = append(settingsDomains, sd)
 		}
+		var unread int
+		_ = db.QueryRow(r.Context(), `
+			SELECT count(*)
+			FROM   messages
+			WHERE  user_id     = $1
+			  AND  is_read     = FALSE
+			  AND  received_at > now() - interval '24 hours'
+		`, userID).Scan(&unread)
+
 		renderTemplate(w, "settings.gohtml", settingsPageData{
 			InstanceName:  cfg.InstanceName,
 			User:          user,
 			CSRFToken:     auth.CSRFTokenFromContext(r.Context()),
 			Domains:       settingsDomains,
 			PrimaryDomain: primary,
+			UnreadLast24h: unread,
 		})
 	}
 }
