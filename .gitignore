@@ -11,6 +11,9 @@ rookery.service
 # Bind-mounted message blob store (created by `rookery init`)
 data/
 
+# Backup archives
+*.tar.gz.enc
+
 # Go build output
 rookery-server
 

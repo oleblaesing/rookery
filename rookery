@@ -65,6 +65,20 @@ env_gen() {
     fi
 }
 
+# Read a passphrase from /dev/tty with echo disabled. Prints value to stdout.
+# Prompts and newline go to /dev/tty (never to stdout or stderr).
+_read_passphrase() {
+    local prompt="$1" pass old_stty
+    [ -e /dev/tty ] || die "no /dev/tty available — use --passphrase-file for non-interactive use"
+    old_stty=$(stty -g </dev/tty 2>/dev/null || true)
+    printf '%s' "$prompt" >/dev/tty
+    stty -echo </dev/tty 2>/dev/null || true
+    IFS= read -r pass </dev/tty
+    stty "$old_stty" </dev/tty 2>/dev/null || true
+    printf '\n' >/dev/tty
+    printf '%s' "$pass"
+}
+
 # ---------------------------------------------------------------------------
 # init
 # ---------------------------------------------------------------------------
@@ -1143,8 +1157,8 @@ cmd_master_key_rotate() {
 
     printf '\n' >&2
     info "master-key rotation re-encrypts all DKIM private keys in the database."
-    info "The stack must be running. Take a database backup before proceeding."
-    info "(Phase 6 will add a one-command backup. For now: rookery psql, then pg_dump.)"
+    info "The stack must be running. Take a database backup before proceeding:"
+    info "  ./rookery backup ~/backups/"
     printf '\n' >&2
     printf 'rookery: Continue? [y/N] ' >&2
     local ans
@@ -1171,6 +1185,267 @@ cmd_master_key_rotate() {
     info "ROOKERY_MASTER_KEY updated in .env"
     info "IMPORTANT: back up .env immediately — losing this key bricks the instance"
     info "Restart to apply: sudo systemctl restart rookery"
+}
+
+# ---------------------------------------------------------------------------
+# backup [path]
+#
+# Creates an encrypted backup of the instance: postgres database, Caddy TLS
+# certificates, config files (rookery.toml, .env, Caddyfile), and the raw
+# message blob tree. The archive is AES-256-CBC encrypted with a passphrase.
+#
+# Ordering rule: pg_dump runs BEFORE the tar of data/messages/ so that a
+# message arriving mid-backup becomes at worst an orphan blob on restore
+# (no matching DB row — harmless garbage) rather than a dangling DB row
+# (row with no blob — a broken UI entry).
+#
+# The encrypted output streams through the pipeline and never spools the
+# full archive to disk; only the two intermediate files (db.dump and
+# caddy-data.tar) are buffered in a temp directory on the server.
+# ---------------------------------------------------------------------------
+cmd_backup() {
+    need_init
+    local output="" passphrase_file="" ROOKERY_BACKUP_PASS="" out_file="" ts
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --passphrase-file)
+                [ "${2:+set}" = set ] || die "backup: --passphrase-file requires a path"
+                passphrase_file="$2"; shift 2 ;;
+            --passphrase-file=*)
+                passphrase_file="${1#*=}"; shift ;;
+            -*)
+                die "backup: unknown flag: $1 — try: ./rookery help backup" ;;
+            *)
+                [ -z "$output" ] || die "backup: unexpected argument: $1"
+                output="$1"; shift ;;
+        esac
+    done
+
+    # Verify postgres is running and healthy before we start.
+    dc exec -T postgres pg_isready -U rookery -d rookery >/dev/null 2>&1 \
+        || die "postgres is not healthy — is the stack running? Try: ./rookery start"
+
+    # Verify the files that will be included in the archive exist.
+    for _f in rookery.toml .env Caddyfile; do
+        [ -f "$SCRIPT_DIR/$_f" ] || die "backup: $_f not found — run './rookery init' first"
+    done
+    [ -d "$SCRIPT_DIR/data/messages" ] \
+        || die "backup: data/messages not found — run './rookery init' first"
+
+    # Determine where the archive goes.
+    if [ -z "$output" ]; then
+        out_file=""          # stream to stdout; operator redirects as needed
+    elif [ -d "$output" ]; then
+        ts=$(date +%Y%m%d-%H%M%S)
+        out_file="${output%/}/rookery-backup-${ts}.tar.gz.enc"
+    else
+        out_file="$output"
+    fi
+
+    # Read the passphrase. Never accept it as a flag argument (shell history).
+    if [ -n "$passphrase_file" ]; then
+        [ -f "$passphrase_file" ] || die "backup: passphrase file not found: $passphrase_file"
+        ROOKERY_BACKUP_PASS=$(head -1 "$passphrase_file" | sed 's/[[:space:]]*$//')
+        [ -n "$ROOKERY_BACKUP_PASS" ] || die "backup: passphrase file is empty"
+    else
+        ROOKERY_BACKUP_PASS=$(_read_passphrase "Backup passphrase: ")
+        local pass2
+        pass2=$(_read_passphrase "Confirm passphrase: ")
+        [ "$ROOKERY_BACKUP_PASS" = "$pass2" ] \
+            || die "backup: passphrases do not match"
+    fi
+
+    # Derive the compose project name for named-volume references.
+    local project
+    project=$(dc config 2>/dev/null | grep '^name:' | head -1 | awk '{print $2}')
+    [ -n "$project" ] || die "backup: could not determine compose project name"
+
+    # Staging dir for intermediate files. The final encrypted output streams
+    # and never spools the whole archive to disk.
+    local stagedir tmp_out
+    stagedir=$(mktemp -d) || die "backup: failed to create staging dir"
+    tmp_out=""
+    trap 'rm -rf "$stagedir"; [ -z "${tmp_out:-}" ] || rm -f "${tmp_out:-}"' EXIT INT TERM
+
+    # Step 1: dump the database into the staging dir.
+    # Must run BEFORE the tar of data/messages/ — see ordering rule above.
+    info "backup: dumping database..."
+    local db_pass
+    db_pass=$(env_get POSTGRES_PASSWORD)
+    dc exec -T -e PGPASSWORD="$db_pass" postgres \
+        pg_dump -U rookery -d rookery --format=custom \
+        > "$stagedir/db.dump" \
+        || die "backup: pg_dump failed"
+
+    # Step 2: archive the caddy-data named volume (TLS certificates and state).
+    info "backup: archiving Caddy data..."
+    docker run --rm \
+        -v "${project}_caddy-data:/v:ro" \
+        docker.io/library/alpine:latest \
+        tar -C /v -c . \
+        > "$stagedir/caddy-data.tar" \
+        || die "backup: caddy-data archive failed"
+
+    info "backup: encrypting archive..."
+
+    # Step 3: stream the full archive — tar | gzip | openssl.
+    # ROOKERY_BACKUP_PASS is passed only into the openssl subprocess (inline
+    # env assignment); it is never written to disk or exported to the shell.
+    if [ -z "$out_file" ]; then
+        tar -c \
+            -C "$stagedir"   db.dump caddy-data.tar \
+            -C "$SCRIPT_DIR" rookery.toml .env Caddyfile data/messages \
+          | gzip \
+          | ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
+              openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ROOKERY_BACKUP_PASS \
+          || die "backup: pipeline failed"
+    else
+        tmp_out="${out_file}.tmp.$$"
+        tar -c \
+            -C "$stagedir"   db.dump caddy-data.tar \
+            -C "$SCRIPT_DIR" rookery.toml .env Caddyfile data/messages \
+          | gzip \
+          | ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
+              openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ROOKERY_BACKUP_PASS \
+              > "$tmp_out" \
+          && mv "$tmp_out" "$out_file" \
+          || die "backup: pipeline failed"
+        info "backup: written to $out_file"
+    fi
+
+    unset ROOKERY_BACKUP_PASS
+    trap - EXIT INT TERM
+}
+
+# ---------------------------------------------------------------------------
+# restore <archive>
+#
+# Restores from an encrypted backup archive produced by `rookery backup`.
+# Refuses to run unless the working directory is a fresh checkout with no
+# existing .env, rookery.toml, or non-empty data/messages/. Restoring over
+# a live instance is out of scope; start from a clean git clone.
+# ---------------------------------------------------------------------------
+cmd_restore() {
+    local file="" passphrase_file="" ROOKERY_BACKUP_PASS="" project
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --passphrase-file)
+                [ "${2:+set}" = set ] || die "restore: --passphrase-file requires a path"
+                passphrase_file="$2"; shift 2 ;;
+            --passphrase-file=*)
+                passphrase_file="${1#*=}"; shift ;;
+            -*)
+                die "restore: unknown flag: $1 — try: ./rookery help restore" ;;
+            *)
+                [ -z "$file" ] || die "restore: unexpected argument: $1"
+                file="$1"; shift ;;
+        esac
+    done
+
+    [ -n "$file" ] || die "usage: rookery restore <archive>"
+    [ -f "$file" ] || die "restore: archive not found: $file"
+
+    # Safety: refuse to restore into a non-fresh instance.
+    if [ -f "$SCRIPT_DIR/.env" ] || [ -f "$SCRIPT_DIR/rookery.toml" ]; then
+        printf 'rookery: error: .env or rookery.toml already exists.\n' >&2
+        printf '  Restoring over an existing instance is not supported.\n' >&2
+        printf '  To restore into a fresh checkout:\n' >&2
+        printf '    git clone <url> <dir> && cd <dir> && ./rookery restore %s\n' "$file" >&2
+        exit 1
+    fi
+    if [ -d "$SCRIPT_DIR/data/messages" ] && \
+       [ -n "$(ls -A "$SCRIPT_DIR/data/messages" 2>/dev/null)" ]; then
+        printf 'rookery: error: data/messages/ is not empty.\n' >&2
+        printf '  Restoring over an existing instance is not supported.\n' >&2
+        printf '  To restore into a fresh checkout:\n' >&2
+        printf '    git clone <url> <dir> && cd <dir> && ./rookery restore %s\n' "$file" >&2
+        exit 1
+    fi
+
+    # Read the passphrase.
+    if [ -n "$passphrase_file" ]; then
+        [ -f "$passphrase_file" ] || die "restore: passphrase file not found: $passphrase_file"
+        ROOKERY_BACKUP_PASS=$(head -1 "$passphrase_file" | sed 's/[[:space:]]*$//')
+        [ -n "$ROOKERY_BACKUP_PASS" ] || die "restore: passphrase file is empty"
+    else
+        ROOKERY_BACKUP_PASS=$(_read_passphrase "Backup passphrase: ")
+    fi
+
+    info "restore: decrypting and extracting archive..."
+    ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
+        openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ROOKERY_BACKUP_PASS \
+        < "$file" \
+      | gunzip \
+      | tar -x -C "$SCRIPT_DIR" \
+      || die "restore: decryption or extraction failed — wrong passphrase or corrupt archive"
+    unset ROOKERY_BACKUP_PASS
+
+    [ -f "$SCRIPT_DIR/db.dump" ] \
+        || die "restore: archive did not contain db.dump — is this a rookery backup archive?"
+    [ -f "$SCRIPT_DIR/caddy-data.tar" ] \
+        || die "restore: archive did not contain caddy-data.tar"
+
+    # Derive the compose project name for named-volume references.
+    project=$(dc config 2>/dev/null | grep '^name:' | head -1 | awk '{print $2}')
+    [ -n "$project" ] || die "restore: could not determine compose project name"
+
+    # Start postgres (the restored .env is now in place, so secrets are available).
+    info "restore: starting postgres..."
+    dc up -d postgres || die "restore: failed to start postgres"
+
+    # Wait for postgres to accept connections (up to 60 s).
+    info "restore: waiting for postgres to be ready..."
+    local i=0
+    while ! dc exec -T postgres pg_isready -U rookery -d rookery >/dev/null 2>&1; do
+        i=$((i + 1))
+        [ $i -le 30 ] || die "restore: postgres did not become healthy within 60 s"
+        sleep 2
+    done
+
+    local db_pass
+    db_pass=$(env_get POSTGRES_PASSWORD)
+
+    # Restore the database from the custom-format pg_dump.
+    info "restore: restoring database..."
+    dc exec -T -e PGPASSWORD="$db_pass" postgres \
+        pg_restore -U rookery -d rookery --clean --if-exists \
+        < "$SCRIPT_DIR/db.dump" \
+        || die "restore: pg_restore failed"
+
+    # Restore the caddy-data volume (TLS certificates and state).
+    info "restore: restoring Caddy data..."
+    docker run --rm \
+        -v "${project}_caddy-data:/v" \
+        -i docker.io/library/alpine:latest \
+        sh -c 'cd /v && tar x' \
+        < "$SCRIPT_DIR/caddy-data.tar" \
+        || die "restore: caddy-data restore failed"
+
+    # Clean up the two intermediate files that were extracted at the repo root.
+    rm -f "$SCRIPT_DIR/db.dump" "$SCRIPT_DIR/caddy-data.tar"
+
+    # Print a brief summary.
+    local users msgs blobs
+    users=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
+        psql -U rookery -d rookery -tA -c "SELECT count(*) FROM users" 2>/dev/null \
+        || printf '?')
+    msgs=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
+        psql -U rookery -d rookery -tA -c "SELECT count(*) FROM messages" 2>/dev/null \
+        || printf '?')
+    blobs=$(find "$SCRIPT_DIR/data/messages" -name "*.eml" 2>/dev/null | wc -l | tr -d ' ')
+
+    printf '\n' >&2
+    info "Restore complete."
+    info "  users:    $users"
+    info "  messages: $msgs  (blobs on disk: $blobs)"
+    printf '\n' >&2
+    info "NOTE: User PGP private keys are NOT in this backup — the server"
+    info "      has never held them. Users need their own recovery files"
+    info "      to decrypt past mail. See PLAN.md §11.1."
+    printf '\n' >&2
+    info "Run './rookery start' (or 'sudo systemctl start rookery') to bring the instance up."
 }
 
 # ---------------------------------------------------------------------------
@@ -1379,6 +1654,67 @@ rookery master-key rotate
   bricks DKIM signing, session validation, and any ACME account keys.
 EOF
             ;;
+        backup) cat >&2 <<'EOF'
+rookery backup [path] [--passphrase-file <file>]
+
+  Create an encrypted backup of the instance. The archive contains:
+    db.dump          pg_dump (custom format) of the rookery database
+    caddy-data.tar   Caddy TLS certificates and ACME state
+    rookery.toml     instance configuration
+    .env             secrets (DB password, master key, session key)
+    Caddyfile        reverse-proxy configuration
+    data/messages/   raw message blob tree
+
+  The archive is AES-256-CBC encrypted with a passphrase (prompted on the
+  terminal, or read from --passphrase-file). The passphrase is the single
+  secret required to decrypt the backup.
+
+  NOTE: User PGP private keys are NOT in the backup — the server never held
+  them. Users need their own recovery files to decrypt past mail.
+
+  Output:
+    No path arg     stream the encrypted archive to stdout (pipe or redirect)
+    Directory arg   write to <dir>/rookery-backup-YYYYMMDD-HHMMSS.tar.gz.enc
+    File path arg   write atomically (tmp + rename) to the given path
+
+  Flags:
+    --passphrase-file <file>   Read passphrase from the first line of <file>.
+                               Useful for cron. The file reduces the protection
+                               of encryption against a server-compromise attacker
+                               (the passphrase is on-server); it still protects
+                               off-site backup copies. Never pass the passphrase
+                               as a flag argument (shell history leak).
+
+  Examples:
+    ./rookery backup ~/backups/
+    ./rookery backup | ssh backup-host "cat > /backups/rookery-$(date +%F).enc"
+    ./rookery backup --passphrase-file /etc/rookery/backup.key ~/backups/
+EOF
+            ;;
+        restore) cat >&2 <<'EOF'
+rookery restore <archive> [--passphrase-file <file>]
+
+  Restore from an encrypted backup archive created by `rookery backup`.
+  Only works on a fresh checkout — refuses to run if .env, rookery.toml,
+  or a non-empty data/messages/ already exists.
+
+  To restore into a fresh checkout:
+    git clone <url> <dir> && cd <dir> && ./rookery restore <archive>
+
+  Steps performed:
+    1. Decrypt and extract the archive (config files, blobs, intermediate files)
+    2. Start postgres only (using the restored .env for credentials)
+    3. pg_restore the database dump
+    4. Restore the caddy-data volume (TLS certificates)
+    5. Print a brief summary (users, messages, blobs)
+
+  After restore, start the full stack:
+    ./rookery start  (or: sudo systemctl start rookery)
+
+  NOTE: User PGP private keys are NOT restored — they were never on the server.
+  Users need their recovery files to decrypt past mail. See PLAN.md §11.1.
+EOF
+            ;;
         psql)
             printf 'rookery psql\n\n  Drop into an interactive psql shell inside the postgres container.\n' >&2 ;;
         test)
@@ -1416,6 +1752,8 @@ Operations:
   user delete <address>                 Hard-delete a user and all their mail
   stats print                           Quick summary of users and queue state
   master-key rotate                     Rotate the server master key
+  backup [path]                         Create an encrypted backup archive
+  restore <archive>                     Restore from a backup archive
   psql                                  psql shell in the postgres container
   test                                  Run the Go test suite
   vet                                   Run go vet
@@ -1448,6 +1786,8 @@ case "${1:-}" in
     user)        shift; cmd_user        "$@" ;;
     stats)       shift; cmd_stats       "$@" ;;
     master-key)  shift; cmd_master_key  "$@" ;;
+    backup)      shift; cmd_backup      "$@" ;;
+    restore)     shift; cmd_restore     "$@" ;;
     psql)        shift; cmd_psql            ;;
     test)        shift; cmd_test            ;;
     vet)         shift; cmd_vet             ;;

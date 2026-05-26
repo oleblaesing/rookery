@@ -168,6 +168,58 @@ stdout).
 
 ---
 
+## Backups
+
+The backup model is simple: remember one passphrase, store one file somewhere
+you trust. Backups contain everything the instance needs to run on a fresh
+machine — Postgres data, Caddy TLS certificates, config files, and the raw
+message blob tree. The single secret required to decrypt a backup is the
+passphrase you choose when creating it; keep it somewhere safe and separate
+from the backup file itself.
+
+```sh
+# Write a timestamped archive to ~/backups/.
+./rookery backup ~/backups/
+
+# Stream the archive over SSH to a remote host.
+./rookery backup | ssh backup-host "cat > /backups/rookery-$(date +%F).enc"
+
+# Automate with cron using a passphrase file.
+# NOTE: the passphrase file reduces protection against a server-compromise
+# attacker who can read the filesystem (they can decrypt the backup too).
+# It still protects offsite backup copies from a storage-provider attacker.
+./rookery backup --passphrase-file /etc/rookery/backup.key ~/backups/
+```
+
+Example crontab for nightly backups:
+
+```cron
+0 3 * * * cd /opt/rookery && ./rookery backup --passphrase-file /etc/rookery/backup.key /srv/backups/
+```
+
+**To restore on a fresh machine:**
+
+```sh
+git clone <repo-url> /opt/rookery
+cd /opt/rookery
+./rookery restore /path/to/rookery-backup-20260526-030000.tar.gz.enc
+# Answer the passphrase prompt, wait for postgres to restore, then:
+sudo ./rookery install
+sudo systemctl enable --now rookery
+```
+
+**What is NOT in the backup:**
+
+- **User PGP private keys.** The server has never held them — by design (see
+  [PLAN.md §11.1](PLAN.md)). A complete per-user backup is *the server backup
+  plus that user's own recovery file*. Users should export and safeguard their
+  recovery file from the Settings page.
+- **rspamd spam-filter training data.** After a restore the spam filter
+  relearns from traffic over a few weeks. This is a deliberate trade-off for
+  archive simplicity — rspamd's training data is a cache, not user data.
+
+---
+
 ## Local development
 
 Everything runs through the `rookery` dispatcher. No Makefile, no host-side
