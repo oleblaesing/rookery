@@ -145,19 +145,6 @@ port = 8080
 level = "info"
 
 # --------------------------------------------------------------------------- #
-# Storage
-# --------------------------------------------------------------------------- #
-[storage]
-# Filesystem path where raw .eml message files are stored, content-addressed
-# as messages/sha256/ab/cd/<hash>.eml. Must be on the rookery-messages volume.
-# Default: /var/lib/rookery/messages.
-#
-# This must match the bind mount in compose.yaml. If you change it here you
-# must also change the volume mount, or messages will be written to the
-# container's writable layer and lost on container replacement.
-message_dir = "/var/lib/rookery/messages"
-
-# --------------------------------------------------------------------------- #
 # SMTP
 # --------------------------------------------------------------------------- #
 [smtp]
@@ -256,6 +243,18 @@ TOML
     env_gen POSTGRES_PASSWORD   "$db_pass"
     env_gen ROOKERY_MASTER_KEY
     env_gen ROOKERY_SESSION_KEY
+    # Used by compose.yaml user: field so the container can write to the
+    # bind-mounted data/messages directory without a chown.
+    env_gen ROOKERY_UID "$(id -u)"
+    env_gen ROOKERY_GID "$(id -g)"
+
+    # ---- data/messages (bind-mounted blob store) ----------------------------
+    if [ ! -d "$SCRIPT_DIR/data/messages" ]; then
+        mkdir -p "$SCRIPT_DIR/data/messages"
+        info "created data/messages"
+    else
+        info "data/messages already exists — skipping"
+    fi
 
     # ---- Caddyfile ----------------------------------------------------------
     if [ ! -f "$SCRIPT_DIR/Caddyfile" ]; then
@@ -357,6 +356,12 @@ cmd_start() {
         esac
     done
     need_init
+    if [ ! -d "$SCRIPT_DIR/data/messages" ]; then
+        die "data/messages missing — run './rookery init' first"
+    fi
+    if [ ! -w "$SCRIPT_DIR/data/messages" ]; then
+        die "data/messages is not writable by uid $(id -u) — fix with: sudo chown $(id -u):$(id -g) \"$SCRIPT_DIR/data/messages\""
+    fi
     if [ "$prod" -eq 1 ]; then
         dc --profile prod up --build "$@"
     else

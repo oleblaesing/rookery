@@ -56,6 +56,9 @@ services:
         GIT_REVISION: ${GIT_REVISION:-dev}
     image: rookery:latest
     restart: unless-stopped
+    # Run as the host operator's UID:GID (written to .env by `rookery init`)
+    # so the bind-mounted data/messages directory is writable without chown.
+    user: "${ROOKERY_UID:-65532}:${ROOKERY_GID:-65532}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -66,10 +69,9 @@ services:
       # rookery.toml must exist on the host before the stack starts.
       # Edit it on the host; changes require a server restart.
       - ./rookery.toml:/etc/rookery/rookery.toml:ro
-      # The message_dir setting in rookery.toml must match this mount path
-      # (default /var/lib/rookery/messages); otherwise messages land in the
-      # container's writable layer and disappear on container replacement.
-      - rookery-messages:/var/lib/rookery/messages
+      # Bind mount for message blobs. Created by `rookery init`, owned by the
+      # operator. Accessible on the host at ./data/messages/.
+      - ./data/messages:/var/lib/rookery/messages
     env_file: ./.env
     # Healthcheck is implemented as a `rookery healthcheck` subcommand
     # (see cmd/rookery/main.go) because the distroless runtime image
@@ -234,7 +236,6 @@ services:
 
 volumes:
   postgres-data:
-  rookery-messages:
   redis-data:
   rspamd-data:
   clamav-data:

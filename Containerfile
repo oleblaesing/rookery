@@ -70,19 +70,10 @@ RUN node_modules/.bin/esbuild \
 # --------------------------------------------------------------------------- #
 # Stage 3: Final distroless image
 # --------------------------------------------------------------------------- #
-# Small intermediate stage to create writable directories owned by nonroot
-# (uid 65532). distroless has no shell, so we can't mkdir at runtime.
-FROM docker.io/library/busybox:stable AS dirs
-RUN mkdir -p /var/lib/rookery/messages && \
-    chown -R 65532:65532 /var/lib/rookery
-
 FROM gcr.io/distroless/static-debian12:nonroot AS final
 
 # Binary
 COPY --from=go-build /out/rookery /usr/local/bin/rookery
-
-# Pre-created data directory owned by nonroot so the volume mount is writable.
-COPY --from=dirs /var/lib/rookery /var/lib/rookery
 
 # Hand-written static assets (no build step needed — copy the whole directory)
 COPY web/static/ /opt/rookery/web/static/
