@@ -183,6 +183,10 @@ func keyForEntry(e dnsEntry) string {
 		return "MTA_STS_CNAME"
 	case e.Type == "TXT" && strings.HasPrefix(e.Name, "_mta-sts."):
 		return "MTA_STS_TXT"
+	case e.Type == "TXT" && strings.HasPrefix(e.Name, "_dmarc."):
+		return "DMARC"
+	case e.Type == "TXT" && strings.HasPrefix(e.Name, "_smtp._tls."):
+		return "TLS_RPT"
 	}
 	return ""
 }
@@ -247,6 +251,18 @@ func buildRequiredDNS(d *domains.Domain, primary string) []dnsEntry {
 			Name:  "_mta-sts." + d.Domain,
 			Type:  "TXT",
 			Value: "v=STSv1; id=" + mtsID,
+		},
+		dnsEntry{
+			Group: "DMARC (TXT)",
+			Name:  "_dmarc." + d.Domain,
+			Type:  "TXT",
+			Value: "v=DMARC1; p=quarantine; rua=mailto:postmaster@" + d.Domain,
+		},
+		dnsEntry{
+			Group: "TLS-RPT (TXT)",
+			Name:  "_smtp._tls." + d.Domain,
+			Type:  "TXT",
+			Value: "v=TLSRPTv1; rua=mailto:postmaster@" + d.Domain,
 		},
 	)
 	return entries
@@ -459,6 +475,8 @@ var recordKeyGroup = map[string]string{
 	"WKD_CNAME":          "web key directory (CNAME)",
 	"MTA_STS_CNAME":      "MTA-STS policy (CNAME)",
 	"MTA_STS_TXT":        "MTA-STS version (TXT)",
+	"DMARC":              "DMARC (TXT)",
+	"TLS_RPT":            "TLS-RPT (TXT)",
 }
 
 var recordGroupOrder = []string{
@@ -466,9 +484,11 @@ var recordGroupOrder = []string{
 	"mail routing (MX)",
 	"SPF (TXT)",
 	"DKIM (CNAME)",
+	"DMARC (TXT)",
 	"web key directory (CNAME)",
 	"MTA-STS policy (CNAME)",
 	"MTA-STS version (TXT)",
+	"TLS-RPT (TXT)",
 	"other",
 }
 

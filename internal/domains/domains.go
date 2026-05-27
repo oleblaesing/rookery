@@ -574,6 +574,18 @@ func (m *Manager) checkDNSRecords(ctx context.Context, d *Domain, token string) 
 			"v=STSv1; id="+*d.MTASTSID, "MTA_STS_TXT"))
 	}
 
+	// DMARC TXT — prefix match so operators can use p=reject or add pct=/fo= tags.
+	results = append(results, m.checkTXTPrefix(lookupCtx, "_dmarc."+domain,
+		"v=DMARC1",
+		"v=DMARC1; p=quarantine; rua=mailto:postmaster@"+domain,
+		"DMARC"))
+
+	// TLS-RPT TXT — prefix match for the same reason.
+	results = append(results, m.checkTXTPrefix(lookupCtx, "_smtp._tls."+domain,
+		"v=TLSRPTv1",
+		"v=TLSRPTv1; rua=mailto:postmaster@"+domain,
+		"TLS_RPT"))
+
 	return results
 }
 
