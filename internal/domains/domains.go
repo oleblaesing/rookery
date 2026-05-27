@@ -89,11 +89,16 @@ type VerificationResult struct {
 	Records  []RecordStatus
 }
 
+// LocalDeliveryFn delivers a raw RFC 5322 message to a local address without
+// going through external SMTP. Wired from main.go to avoid an import cycle.
+type LocalDeliveryFn func(ctx context.Context, from, to string, rawMsg []byte) error
+
 // Manager handles domain lifecycle for an instance.
 type Manager struct {
 	db            *pgxpool.Pool
 	primaryDomain string
 	resolver      *net.Resolver
+	deliverFn     LocalDeliveryFn
 }
 
 // NewManager creates a Manager. resolverAddr is the DNS resolver to use for
@@ -110,6 +115,10 @@ func NewManager(db *pgxpool.Pool, primaryDomain, resolverAddr string) *Manager {
 	}
 	return m
 }
+
+// SetLocalDelivery wires the delivery function used to send notification emails
+// (e.g. the MTA-STS enforce notice). Call once after NewManager, before serving.
+func (m *Manager) SetLocalDelivery(fn LocalDeliveryFn) { m.deliverFn = fn }
 
 // PrimaryDomain returns the primary domain name for this instance.
 func (m *Manager) PrimaryDomain() string { return m.primaryDomain }
@@ -470,7 +479,7 @@ func (m *Manager) EffectiveMTASTSMode(d *Domain) string {
 // ≥48h and flips them to enforce. Called by the background worker.
 func (m *Manager) UpgradeMTASTSModes(ctx context.Context) error {
 	rows, err := m.db.Query(ctx, `
-		SELECT id, mta_sts_id FROM domains
+		SELECT id, domain, mta_sts_id FROM domains
 		WHERE  mta_sts_mode IS NULL
 		  AND  mta_sts_mode_changed_at < now() - interval '48 hours'
 		  AND  verified_at IS NOT NULL
@@ -480,12 +489,12 @@ func (m *Manager) UpgradeMTASTSModes(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	type row struct{ id, oldID string }
+	type row struct{ id, domainName, oldID string }
 	var toUpgrade []row
 	for rows.Next() {
 		var r row
 		var oldID *string
-		if err := rows.Scan(&r.id, &oldID); err != nil {
+		if err := rows.Scan(&r.id, &r.domainName, &oldID); err != nil {
 			return err
 		}
 		if oldID != nil {
@@ -516,9 +525,47 @@ func (m *Manager) UpgradeMTASTSModes(ctx context.Context) error {
 		slog.Info("domains: MTA-STS upgraded to enforce",
 			"event_key", "mta_sts_mode_enforced",
 			"domain_id", r.id,
+			"domain", r.domainName,
 			"new_mta_sts_id", newID)
+		m.sendMTASTSEnforceNotice(ctx, r.domainName, newID)
 	}
 	return nil
+}
+
+// sendMTASTSEnforceNotice delivers a plain-text notification to
+// postmaster@<domain> explaining that MTA-STS has been upgraded to enforce
+// and providing the new _mta-sts DNS record to publish.
+func (m *Manager) sendMTASTSEnforceNotice(ctx context.Context, domainName, newMTASTSID string) {
+	if m.deliverFn == nil {
+		return
+	}
+	from := "postmaster@" + m.primaryDomain
+	to := "postmaster@" + domainName
+	subject := "MTA-STS upgraded to enforce for " + domainName
+	body := "Your domain " + domainName + " has been running MTA-STS in testing\r\n" +
+		"mode for 48 hours.\r\n\r\n" +
+		"MTA-STS has been automatically upgraded to enforce mode. External\r\n" +
+		"mail servers are now required to use TLS when delivering mail to\r\n" +
+		"@" + domainName + ".\r\n\r\n" +
+		"ACTION REQUIRED — update the following DNS record so that senders\r\n" +
+		"detect the policy change and refresh their cached copy:\r\n\r\n" +
+		"  Name:  _mta-sts." + domainName + "\r\n" +
+		"  Type:  TXT\r\n" +
+		"  Value: v=STSv1; id=" + newMTASTSID + "\r\n\r\n" +
+		"Leaving the old id= value in place is harmless — senders still\r\n" +
+		"enforce TLS — but updating it allows them to detect and re-fetch\r\n" +
+		"the updated policy sooner.\r\n"
+	rawMsg := []byte("From: " + from + "\r\n" +
+		"To: " + to + "\r\n" +
+		"Date: " + time.Now().UTC().Format("Mon, 02 Jan 2006 15:04:05 +0000") + "\r\n" +
+		"Subject: " + subject + "\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"\r\n" +
+		body)
+	if err := m.deliverFn(ctx, from, to, rawMsg); err != nil {
+		slog.Warn("domains: mta-sts enforce notice delivery failed",
+			"domain", domainName, "err", err)
+	}
 }
 
 // checkDNSRecords performs DNS lookups for all Phase 4 records and returns

@@ -514,10 +514,12 @@ func groupRecords(records []domains.RecordStatus) []recordGroup {
 }
 
 type verifyStatusData struct {
-	Domain        *domains.Domain
-	Result        *domains.VerificationResult
-	PrimaryDomain string
-	Groups        []recordGroup
+	Domain          *domains.Domain
+	Result          *domains.VerificationResult
+	PrimaryDomain   string
+	Groups          []recordGroup
+	MTASTSMode      string     // effective mode, set when Result.Verified
+	MTASTSEnforceAt *time.Time // non-nil while auto-testing with time remaining
 }
 
 func handleDomainVerifyStatusFragment(domMgr *domains.Manager) http.HandlerFunc {
@@ -544,11 +546,21 @@ func handleDomainVerifyStatusFragment(domMgr *domains.Manager) http.HandlerFunc 
 		// Re-fetch to get updated verified_at after CheckVerification.
 		d, _ = domMgr.Get(r.Context(), id)
 
-		renderFragment(w, "domain_verify_status.gohtml", verifyStatusData{
+		data := verifyStatusData{
 			Domain:        d,
 			Result:        result,
 			PrimaryDomain: domMgr.PrimaryDomain(),
 			Groups:        groupRecords(result.Records),
-		})
+		}
+		if result.Verified {
+			data.MTASTSMode = domMgr.EffectiveMTASTSMode(d)
+			if d.MTASTSMode == nil && d.MTASTSModeChangedAt != nil {
+				enforceAt := d.MTASTSModeChangedAt.Add(48 * time.Hour)
+				if enforceAt.After(time.Now()) {
+					data.MTASTSEnforceAt = &enforceAt
+				}
+			}
+		}
+		renderFragment(w, "domain_verify_status.gohtml", data)
 	}
 }

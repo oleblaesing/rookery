@@ -140,6 +140,9 @@ func runServer() int {
 	}
 
 	domMgr := domains.NewManager(st.DB, cfg.Domain, cfg.DNS.Resolver)
+	domMgr.SetLocalDelivery(func(ctx context.Context, from, to string, rawMsg []byte) error {
+		return smtp.DeliverLocal(ctx, st.DB, st, cfg, from, to, rawMsg)
+	})
 	if err := domMgr.BackfillOwnerAddresses(ctx); err != nil {
 		slog.Error("bootstrap: backfill owner addresses failed", "err", err)
 	}

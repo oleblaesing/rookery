@@ -6,6 +6,23 @@
 <div class="verify-status"{{if not .Result.Verified}} data-poll-stop="false"{{else}} data-poll-stop="true"{{end}}>
   {{if .Result.Verified}}
   <p class="status-ok">Domain verified.</p>
+  {{if eq .MTASTSMode "testing"}}
+  <p class="field-hint">
+    MTA-STS is active in <strong>testing</strong> mode — external senders may
+    still fall back to unencrypted delivery if TLS is unavailable.
+    {{if .MTASTSEnforceAt}}
+    It will automatically upgrade to <strong>enforce</strong> mode around
+    {{formatDatetime .MTASTSEnforceAt}}.
+    {{else}}
+    It will upgrade to <strong>enforce</strong> mode shortly.
+    {{end}}
+    You will receive a notification at
+    <strong>postmaster@{{.Domain.Domain}}</strong> with a DNS record to
+    update when that happens.
+  </p>
+  {{else if eq .MTASTSMode "enforce"}}
+  <p class="field-hint">MTA-STS is in <strong>enforce</strong> mode — external senders are required to use TLS.</p>
+  {{end}}
   {{else}}
   <p class="status-pending">Waiting for DNS propagation. The following records must be present:</p>
   {{end}}

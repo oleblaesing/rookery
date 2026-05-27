@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"time"
 )
 
 //go:embed templates/*.gohtml
@@ -22,6 +23,12 @@ var tmplFuncs = template.FuncMap{
 			return path
 		}
 		return path + "?v=" + AssetVersion
+	},
+	"formatDatetime": func(t *time.Time) string {
+		if t == nil {
+			return ""
+		}
+		return t.UTC().Format("2 Jan 2006, 15:04 UTC")
 	},
 	"formatBytes": func(n int64) string {
 		const kb, mb = 1024, 1024 * 1024

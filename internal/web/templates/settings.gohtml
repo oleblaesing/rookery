@@ -20,6 +20,11 @@
         <span class="domain-name">{{.Name}}</span>
         {{if .VerifiedAt}}
         <span class="domain-status status-ok">verified</span>
+        {{if eq .MTASTSMode "enforce"}}
+        <span class="domain-status status-ok">MTA-STS: enforce</span>
+        {{else if eq .MTASTSMode "testing"}}
+        <span class="domain-status status-warn">MTA-STS: testing</span>
+        {{end}}
         {{else}}
         <span class="domain-status status-pending">pending</span>
         {{end}}
@@ -29,6 +34,20 @@
           <button class="button button-small"
                   onclick="checkDomain('{{.ID}}')">check now</button>
         </div>
+        {{if and .VerifiedAt (eq .MTASTSMode "testing")}}
+        <p class="field-hint">
+          MTA-STS is in <strong>testing</strong> mode — external senders may still fall back
+          to unencrypted delivery.
+          {{if .MTASTSEnforceAt}}
+          It will automatically upgrade to <strong>enforce</strong> mode around
+          {{formatDatetime .MTASTSEnforceAt}}.
+          {{else}}
+          It will upgrade to <strong>enforce</strong> mode shortly.
+          {{end}}
+          You will receive a notification at <strong>postmaster@{{.Name}}</strong>
+          with a DNS record to update when that happens.
+        </p>
+        {{end}}
         <div id="verify-status-{{.ID}}" class="verify-status-container">
           <p class="field-hint">Publish the records below, then click <em>check now</em>.</p>
           <table class="dns-records">
@@ -73,6 +92,13 @@
 
     <div id="add-domain-dns" style="display:none">
       <h4>publish these DNS records</h4>
+      <p class="field-hint">
+        Once your domain is verified, MTA-STS starts in <strong>testing</strong> mode
+        for 48 hours, then automatically upgrades to <strong>enforce</strong> mode.
+        When it upgrades you will receive a notification at
+        <strong>postmaster@&lt;your-domain&gt;</strong> with an updated
+        <code>_mta-sts</code> DNS record to publish.
+      </p>
       <table class="dns-records" id="dns-records-table"></table>
       <div id="verify-status-new" class="field-hint"></div>
       <div class="form-actions">

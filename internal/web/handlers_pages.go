@@ -163,10 +163,12 @@ func handleInvitePage(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Confi
 // because embedding promotes a .Domain field that collides with the string
 // field of the same name and breaks template resolution.
 type settingsDomain struct {
-	ID            string
-	Name          string
-	VerifiedAt    *time.Time
-	PendingGroups []recordGroup
+	ID              string
+	Name            string
+	VerifiedAt      *time.Time
+	PendingGroups   []recordGroup
+	MTASTSMode      string     // effective: "testing", "enforce", "disabled", "" when unverified
+	MTASTSEnforceAt *time.Time // non-nil only while auto-testing with time remaining
 }
 
 type settingsPageData struct {
@@ -198,6 +200,16 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Ma
 				ID:         domList[i].ID,
 				Name:       domList[i].Domain,
 				VerifiedAt: domList[i].VerifiedAt,
+			}
+			if domList[i].VerifiedAt != nil {
+				sd.MTASTSMode = domMgr.EffectiveMTASTSMode(&domList[i])
+				// Show the auto-enforce time only while the domain is still in the 48h window.
+				if domList[i].MTASTSMode == nil && domList[i].MTASTSModeChangedAt != nil {
+					enforceAt := domList[i].MTASTSModeChangedAt.Add(48 * time.Hour)
+					if enforceAt.After(time.Now()) {
+						sd.MTASTSEnforceAt = &enforceAt
+					}
+				}
 			}
 			sd.PendingGroups = groupRecords(requiredRecords(&domList[i], primary))
 			settingsDomains = append(settingsDomains, sd)
