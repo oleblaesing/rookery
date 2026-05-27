@@ -46,16 +46,11 @@ cd /opt/rookery
 ./rookery init --domain rookery.example --email you@example.com --name "My Rookery"
 ```
 
-**Back up `.env` after this step.** Losing `ROOKERY_MASTER_KEY` bricks the
-instance's DKIM keys and session infrastructure. Store it somewhere safe and
-offline — a password manager, an encrypted USB key, or a printed copy in a
-physical safe.
-
 Review `rookery.toml` and change anything that doesn't fit your setup. The
 defaults are sane; the two values you might want to change are `domain` (already
 set by `--domain`) and `contact_email` (used by Let's Encrypt for expiry notices).
 
-## Step 3: Install as a systemd service
+## Step 3: Install and start as a systemd service
 
 ```sh
 sudo ./rookery install
@@ -70,7 +65,18 @@ The unit runs `rookery start --prod`, which brings up rookery + postgres +
 Caddy (TLS on 80/443) + redis + rspamd. Caddy provisions a Let's Encrypt
 certificate automatically once DNS is in place.
 
-## Step 4: Publish DNS records
+## Step 4: Make an initial backup
+
+```sh
+./rookery backup ~/backups/
+```
+
+The archive captures the database, message blobs, config, and `.env` in one
+encrypted file. Losing `ROOKERY_MASTER_KEY` bricks the instance's DKIM keys;
+the backup preserves it. See the [Backups section in README.md](../../README.md#backups)
+for cron automation and the full backup model.
+
+## Step 5: Publish DNS records
 
 On first run, rookery generates DKIM keypairs and logs the DNS records it needs.
 Read them with:
@@ -99,7 +105,7 @@ bypass local caching during the wait:
 ./rookery check-dns --resolver 9.9.9.9
 ```
 
-## Step 5: Create the first user
+## Step 6: Create the first user
 
 ```sh
 ./rookery invite create
@@ -150,6 +156,3 @@ SMTP time.
 - **IPv6.** Ensure both IPv4 and IPv6 have correct PTR records if your provider
   gives you a v6 address. Some mail providers prefer v6; a bad v6 PTR will cause
   rejections.
-- **Backup.** Phase 6 will add a one-command encrypted backup. For now: use
-  your VPS provider's snapshot feature, or `./rookery psql` followed by
-  `pg_dump` to export the database manually.

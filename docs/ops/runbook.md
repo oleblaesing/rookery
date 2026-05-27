@@ -91,7 +91,7 @@ outbound queue depth, delivered/bounced counts.
 ```
 Re-encrypts all DKIM private keys in the database under a new master key, then
 updates `ROOKERY_MASTER_KEY` in `.env`. The stack must be running. Prompts for
-confirmation. After completion: restart the stack and back up `.env` immediately.
+confirmation. After completion: restart the stack and run `./rookery backup` immediately.
 
 See [Rotating the master key](#rotating-the-master-key) below.
 
@@ -272,7 +272,7 @@ After rotation:
 ```sh
 sudo systemctl restart rookery
 # then immediately:
-cp .env .env.backup-$(date +%Y%m%d)
+./rookery backup ~/backups/
 ```
 
 **If rotation fails mid-way:** the command is atomic — it either re-encrypts all

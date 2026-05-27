@@ -101,20 +101,22 @@ cd /opt/rookery
     --name "My Rookery"
 #    Or with no flags to be prompted interactively.
 
-# 3. Back up .env — especially ROOKERY_MASTER_KEY.
-#    Losing it bricks the instance's DKIM keys, sessions, and ACME credentials.
-#    rookery init prints a one-time reminder.
-
-# 4. Install the systemd unit. Copies ./rookery.service to
+# 3. Install the systemd unit. Copies ./rookery.service to
 #    /etc/systemd/system/ and runs `systemctl daemon-reload`. Run once per
 #    host. Does NOT enable or start.
 sudo ./rookery install
 
-# 5. Enable and start the service. Standard systemd from here.
+# 4. Enable and start the service. Standard systemd from here.
 sudo systemctl enable --now rookery
 #    Spam filtering (rspamd + Redis) starts as part of the stack automatically
 #    and requires no configuration.
 #    ClamAV virus scanning is opt-in: ./rookery init --clamav (see docs/ops/deployment.md).
+
+# 5. Make an initial encrypted backup.
+./rookery backup ~/backups/
+#    The archive contains .env, the database, and all message blobs.
+#    Losing ROOKERY_MASTER_KEY bricks DKIM keys — back up before you need it.
+#    See "Backups" below for cron automation and the full backup model.
 
 # 6. Check your DNS records.
 ./rookery check-dns

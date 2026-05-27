@@ -335,12 +335,10 @@ EOF
     printf '\n' >&2
     info "init complete."
     info ""
-    info "  IMPORTANT: back up .env — especially ROOKERY_MASTER_KEY."
-    info "  Losing it bricks DKIM keys, sessions, and ACME credentials."
-    info ""
     info "Next steps:"
     info "  sudo ./rookery install          # copy systemd unit, daemon-reload"
     info "  sudo systemctl enable --now rookery"
+    info "  ./rookery backup ~/backups/     # make an initial encrypted backup"
     info "  ./rookery invite create         # generate the first invite URL"
 }
 
@@ -1157,7 +1155,7 @@ cmd_master_key_rotate() {
 
     printf '\n' >&2
     info "master-key rotation re-encrypts all DKIM private keys in the database."
-    info "The stack must be running. Take a database backup before proceeding:"
+    info "The stack must be running. Make a database backup before proceeding:"
     info "  ./rookery backup ~/backups/"
     printf '\n' >&2
     printf 'rookery: Continue? [y/N] ' >&2
@@ -1183,8 +1181,8 @@ cmd_master_key_rotate() {
     mv "$SCRIPT_DIR/.env.tmp" "$SCRIPT_DIR/.env"
 
     info "ROOKERY_MASTER_KEY updated in .env"
-    info "IMPORTANT: back up .env immediately — losing this key bricks the instance"
     info "Restart to apply: sudo systemctl restart rookery"
+    info "Then make a backup:  ./rookery backup ~/backups/"
 }
 
 # ---------------------------------------------------------------------------
@@ -1518,8 +1516,8 @@ rookery init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt] [--cla
                     Always regenerates rookery.service, even if it exists.
                     After running: sudo ./rookery install && sudo systemctl restart rookery
 
-  IMPORTANT: back up .env after init. Losing ROOKERY_MASTER_KEY bricks
-  the instance's DKIM keys, sessions, and ACME credentials.
+  After starting the service, make an initial encrypted backup:
+    ./rookery backup ~/backups/
 EOF
             ;;
         install) cat >&2 <<'EOF'
@@ -1650,8 +1648,8 @@ rookery master-key rotate
   After rotation, restart the stack to pick up the new key:
     sudo systemctl restart rookery
 
-  IMPORTANT: back up .env immediately after rotation. Losing ROOKERY_MASTER_KEY
-  bricks DKIM signing, session validation, and any ACME account keys.
+  Make a backup immediately after rotation:
+    ./rookery backup ~/backups/
 EOF
             ;;
         backup) cat >&2 <<'EOF'
