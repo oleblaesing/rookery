@@ -176,11 +176,30 @@ outbound_daily_limit_per_user = 1000
 # Per-destination-domain outbound rate limit: messages per hour. Default: 5000.
 outbound_rate_limit_per_domain = 5000
 
-# Route all outbound SMTP through a relay host instead of direct MX lookup.
-# Useful when outbound port 25 is blocked (ISP/cloud NAT) or in development.
-# Leave unset for direct MX delivery (production default).
-# relay_host = "smtp-relay.example.com"
-# relay_port = 25
+# Smarthost: route all outbound mail through a trusted upstream SMTP submission
+# endpoint instead of direct MX delivery. The upstream is either a commercial
+# relay (SES/Postmark/Mailgun) or another rookery instance acting as a relay.
+# rookery DKIM-signs every message before handoff; the smarthost is opaque
+# transport. This is the realistic fix for a fresh VPS IP whose outbound mail is
+# junked by Gmail/Outlook regardless of correct DKIM/SPF/DMARC. See ADR-0030.
+#
+# Off by default → direct MX delivery. To enable, uncomment and fill in:
+# [smtp.smarthost]
+# enabled     = true
+# host        = "smtp.postmarkapp.com"   # or "email-smtp.us-east-1.amazonaws.com", or a relay rookery's hostname
+# port        = 587                       # 587 (STARTTLS) or 465 (implicit TLS)
+# username    = "your-smtp-username"      # API token id, or the relay-client id issued by the relay rookery
+# require_tls = true                       # mandatory TLS — a credential-bearing session is never sent in the clear
+# auth        = true
+# The password comes from the ROOKERY_SMTP_RELAY_PASSWORD env var in .env, never this file.
+#
+# Dev (capture outbound in mailpit) is just a smarthost with the security knobs off:
+# [smtp.smarthost]
+# enabled     = true
+# host        = "mailpit"
+# port        = 1025
+# auth        = false
+# require_tls = false
 
 # --------------------------------------------------------------------------- #
 # Per-instance policy
@@ -261,6 +280,12 @@ TOML
     # bind-mounted data/messages directory without a chown.
     env_gen ROOKERY_UID "$(id -u)"
     env_gen ROOKERY_GID "$(id -g)"
+    # Outbound smarthost SASL password (ADR-0030). Empty by default; uncomment and
+    # set when [smtp.smarthost] is enabled with auth = true. The container reads
+    # .env via env_file, so an uncommented value flows in on the next restart.
+    if ! grep -q 'ROOKERY_SMTP_RELAY_PASSWORD' "$SCRIPT_DIR/.env"; then
+        printf '# ROOKERY_SMTP_RELAY_PASSWORD=\n' >> "$SCRIPT_DIR/.env"
+    fi
 
     # ---- data/messages (bind-mounted blob store) ----------------------------
     if [ ! -d "$SCRIPT_DIR/data/messages" ]; then

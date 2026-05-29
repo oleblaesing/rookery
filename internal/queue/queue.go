@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"time"
@@ -50,13 +51,27 @@ type Worker struct {
 	cfg  *config.Config
 	// deliverFn is the direct-MX SMTP delivery function; replaceable for tests.
 	deliverFn func(ctx context.Context, fromDomain, from, to string, msg []byte) error
+	// signFn signs an outbound message; defaults to the DKIM manager's Sign,
+	// replaceable for tests.
+	signFn func(ctx context.Context, domain string, r io.Reader) (io.Reader, error)
+	// smarthostFn delivers via the configured smarthost; defaults to
+	// smtppkg.DeliverViaSmarthost, replaceable for tests.
+	smarthostFn func(ctx context.Context, fromDomain string, sh smtppkg.Smarthost, from, to string, msg []byte) error
 }
 
 // NewWorker creates a Worker.
 func NewWorker(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, cfg *config.Config,
 	deliverFn func(ctx context.Context, fromDomain, from, to string, msg []byte) error,
 ) *Worker {
-	return &Worker{db: db, st: st, dkim: dk, cfg: cfg, deliverFn: deliverFn}
+	return &Worker{
+		db:          db,
+		st:          st,
+		dkim:        dk,
+		cfg:         cfg,
+		deliverFn:   deliverFn,
+		signFn:      dk.Sign,
+		smarthostFn: smtppkg.DeliverViaSmarthost,
+	}
 }
 
 // Run starts the delivery loop and blocks until ctx is cancelled.
@@ -174,24 +189,12 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 			return true, nil
 		}
 	} else {
-		// External delivery: DKIM-sign then send via relay or direct MX.
-		signedReader, err := w.dkim.Sign(ctx, domain, bytes.NewReader(rawMsg))
-		if err != nil {
-			slog.Warn("queue: DKIM signing failed, delivering unsigned", "queue_id", queueID, "err", err)
-			signedReader = bytes.NewReader(rawMsg)
-		}
-		signedBytes := new(bytes.Buffer)
-		if _, err := signedBytes.ReadFrom(signedReader); err != nil {
+		// External delivery: DKIM-sign then send via smarthost or direct MX.
+		var internalErr error
+		deliveryErr, internalErr = w.deliverExternal(ctx, domain, fromAddress, recipient, rawMsg)
+		if internalErr != nil {
 			w.markFailed(ctx, queueID, messageID, "internal: could not buffer signed message")
 			return true, nil
-		}
-
-		if w.cfg.SMTP.RelayHost != "" {
-			deliveryErr = smtppkg.DeliverViaRelay(ctx,
-				w.cfg.SMTP.RelayHost, w.cfg.SMTP.RelayPort,
-				fromAddress, recipient, signedBytes.Bytes())
-		} else {
-			deliveryErr = w.deliverFn(ctx, domain, fromAddress, recipient, signedBytes.Bytes())
 		}
 
 		if deliveryErr == nil {
@@ -215,6 +218,38 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 	nextDelay := retryDelays[attempts+1]
 	w.markRetry(ctx, queueID, attempts+1, nextDelay, deliveryErr.Error())
 	return true, nil
+}
+
+// deliverExternal DKIM-signs rawMsg and hands it off to the smarthost (when
+// [smtp.smarthost] is enabled) or to direct MX delivery. Signing always happens
+// before the branch, so the sign-then-handoff invariant (ADR-0030) holds for
+// both paths. deliveryErr is the result of the delivery attempt; a non-nil
+// internalErr means the signed message could not be prepared and the row should
+// be failed rather than retried. This method touches no database state so it is
+// unit-testable in isolation.
+func (w *Worker) deliverExternal(ctx context.Context, domain, from, to string, rawMsg []byte) (deliveryErr, internalErr error) {
+	signedReader, err := w.signFn(ctx, domain, bytes.NewReader(rawMsg))
+	if err != nil {
+		slog.Warn("queue: DKIM signing failed, delivering unsigned", "domain", domain, "err", err)
+		signedReader = bytes.NewReader(rawMsg)
+	}
+	signedBytes := new(bytes.Buffer)
+	if _, err := signedBytes.ReadFrom(signedReader); err != nil {
+		return nil, fmt.Errorf("buffer signed message: %w", err)
+	}
+
+	if w.cfg.SMTP.Smarthost.Enabled {
+		sh := w.cfg.SMTP.Smarthost
+		return w.smarthostFn(ctx, domain, smtppkg.Smarthost{
+			Host:       sh.Host,
+			Port:       sh.Port,
+			Username:   sh.Username,
+			Password:   w.cfg.Secrets.SMTPRelayPassword,
+			RequireTLS: sh.RequireTLS,
+			Auth:       sh.Auth,
+		}, from, to, signedBytes.Bytes()), nil
+	}
+	return w.deliverFn(ctx, domain, from, to, signedBytes.Bytes()), nil
 }
 
 func (w *Worker) markDelivered(ctx context.Context, queueID string) {

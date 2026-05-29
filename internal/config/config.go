@@ -10,6 +10,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -100,14 +101,46 @@ type SMTPConfig struct {
 	// Defaults to 1000. Set explicitly to 0 to disable the limit. See §11.4.
 	OutboundDailyLimitPerUser int `toml:"outbound_daily_limit_per_user"`
 
-	// RelayHost, if non-empty, routes all outbound SMTP deliveries through this
-	// relay host instead of direct MX lookup. Useful in development (set to the
-	// mailpit service name) or behind a NAT that blocks outbound port 25.
-	// Defaults to "" (direct MX delivery).
-	RelayHost string `toml:"relay_host"`
+	// Smarthost configures routing all outbound mail through an upstream SMTP
+	// submission endpoint instead of direct MX delivery. See ADR-0030.
+	Smarthost SmarthostConfig `toml:"smarthost"`
+}
 
-	// RelayPort is the SMTP port on RelayHost. Defaults to 25.
-	RelayPort int `toml:"relay_port"`
+// SmarthostConfig configures an outbound smarthost: a trusted upstream SMTP
+// submission endpoint (a commercial relay like SES/Postmark/Mailgun, another
+// rookery instance acting as a relay, or mailpit in development) through which
+// all outbound mail is routed. rookery DKIM-signs every message before handoff;
+// the smarthost is opaque transport. See ADR-0030 and §11.10 of PLAN.md.
+//
+// The dev-only relay_host/relay_port mechanism was folded into this block:
+// capturing outbound in mailpit is just a smarthost with Auth and RequireTLS
+// turned off.
+type SmarthostConfig struct {
+	// Enabled routes all outbound through the smarthost when true. When false
+	// (the default), rookery does direct MX delivery.
+	Enabled bool `toml:"enabled"`
+
+	// Host is the smarthost's hostname. Required when Enabled.
+	Host string `toml:"host"`
+
+	// Port is the submission port. Defaults to 587 (STARTTLS). Use 465 for
+	// implicit TLS.
+	Port int `toml:"port"`
+
+	// Username is the SASL username. Required when Auth.
+	Username string `toml:"username"`
+
+	// RequireTLS enforces TLS for the session (mandatory STARTTLS on 587;
+	// implicit TLS on 465). Defaults to true. A smarthost session carries AUTH
+	// credentials, so unlike opportunistic MX delivery, a failure to establish
+	// TLS aborts the attempt rather than sending plaintext. Set to false only
+	// for a trusted no-TLS endpoint such as dev mailpit.
+	RequireTLS bool `toml:"require_tls"`
+
+	// Auth enables SASL authentication. Defaults to true. Set to false only for
+	// an unauthenticated endpoint such as dev mailpit. The password comes from
+	// the ROOKERY_SMTP_RELAY_PASSWORD environment variable, never the file.
+	Auth bool `toml:"auth"`
 }
 
 // SpamConfig controls spam filtering via rspamd.
@@ -164,6 +197,11 @@ type Secrets struct {
 	// SessionKey is the HMAC key for session cookie signing. From
 	// ROOKERY_SESSION_KEY. See §11.2.
 	SessionKey string
+
+	// SMTPRelayPassword is the SASL password for the outbound smarthost. From
+	// ROOKERY_SMTP_RELAY_PASSWORD. Required iff [smtp.smarthost] has both
+	// enabled and auth set. See §11.11 and ADR-0030.
+	SMTPRelayPassword string
 }
 
 // defaults fills in any field the operator did not set in the TOML file. It
@@ -198,8 +236,14 @@ func defaults(c *Config, md toml.MetaData) {
 	if !md.IsDefined("smtp", "outbound_daily_limit_per_user") {
 		c.SMTP.OutboundDailyLimitPerUser = 1000
 	}
-	if !md.IsDefined("smtp", "relay_port") {
-		c.SMTP.RelayPort = 25
+	if !md.IsDefined("smtp", "smarthost", "port") {
+		c.SMTP.Smarthost.Port = 587
+	}
+	if !md.IsDefined("smtp", "smarthost", "require_tls") {
+		c.SMTP.Smarthost.RequireTLS = true
+	}
+	if !md.IsDefined("smtp", "smarthost", "auth") {
+		c.SMTP.Smarthost.Auth = true
 	}
 	if !md.IsDefined("policy", "default_quota_bytes") {
 		c.Policy.DefaultQuotaBytes = 5 * 1024 * 1024 * 1024 // 5 GiB
@@ -242,6 +286,7 @@ func Load(path string) (*Config, error) {
 	cfg.Secrets.DBPassword = os.Getenv("ROOKERY_DB_PASSWORD")
 	cfg.Secrets.MasterKey = os.Getenv("ROOKERY_MASTER_KEY")
 	cfg.Secrets.SessionKey = os.Getenv("ROOKERY_SESSION_KEY")
+	cfg.Secrets.SMTPRelayPassword = os.Getenv("ROOKERY_SMTP_RELAY_PASSWORD")
 
 	if cfg.Domain == "" {
 		return nil, fmt.Errorf("config: domain is required (set in rookery.toml)")
@@ -256,7 +301,37 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("env: ROOKERY_SESSION_KEY is required")
 	}
 
+	if err := validateSmarthost(&cfg); err != nil {
+		return nil, err
+	}
+
 	return &cfg, nil
+}
+
+// validateSmarthost checks the [smtp.smarthost] block for internal consistency
+// when it is enabled, and logs a warning if TLS is disabled (a credential-
+// bearing session over plaintext). It is a no-op when the smarthost is off.
+func validateSmarthost(cfg *Config) error {
+	sh := &cfg.SMTP.Smarthost
+	if !sh.Enabled {
+		return nil
+	}
+	if sh.Host == "" {
+		return fmt.Errorf("config: [smtp.smarthost] host is required when enabled")
+	}
+	if sh.Auth {
+		if sh.Username == "" {
+			return fmt.Errorf("config: [smtp.smarthost] username is required when auth is enabled")
+		}
+		if cfg.Secrets.SMTPRelayPassword == "" {
+			return fmt.Errorf("env: ROOKERY_SMTP_RELAY_PASSWORD is required when [smtp.smarthost] auth is enabled")
+		}
+	}
+	if !sh.RequireTLS {
+		slog.Warn("config: [smtp.smarthost] require_tls is false — outbound mail (and any SASL credentials) will be sent without enforced TLS",
+			"host", sh.Host)
+	}
+	return nil
 }
 
 // ExternalURL returns the base URL used in links sent to users.

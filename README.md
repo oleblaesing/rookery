@@ -40,10 +40,11 @@ spam.
 
 What you can do:
 - Warm the IP gradually (send small volumes to trusted addresses first).
-- Use a transactional email relay (AWS SES, Postmark, Mailgun) as a smarthost — Phase 7
-  will make this a first-class configuration option.
+- Use a transactional email relay (AWS SES, Postmark, Mailgun) as a smarthost. This is
+  a first-class configuration option: set the `[smtp.smarthost]` block in `rookery.toml`
+  and the `ROOKERY_SMTP_RELAY_PASSWORD` secret in `.env`, then restart. See ADR-0030.
 - Arrange to send outbound through a **relay rookery** — another rookery instance
-  whose IP already has a delivery history, acting as your upstream. Same Phase 7
+  whose IP already has a delivery history, acting as your upstream. Same
   configuration, same `[smtp.smarthost]` block, same wire shape (SMTP submission); the
   smarthost just happens to be another rookery rather than a commercial provider.
   rookery signs the user's domain DKIM key *before* handing the message off, so the

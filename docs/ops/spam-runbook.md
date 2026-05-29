@@ -51,15 +51,20 @@ of self-hosted email. PLAN.md §9.1 and §10 document this honestly:
    use Gmail. Ask them to mark your mail as "not spam" when it lands in the spam
    folder. This builds reputation gradually.
 
-3. **Use a smarthost relay (Phase 8 feature).** Services like AWS SES, Postmark,
-   or Mailgun charge per message but send from IPs with pre-built reputation.
-   Gmail-bound mail reliably lands in inboxes from day one. Configure via
-   `rookery.toml`'s `[smtp.relay_host]` setting (full relay integration is Phase 8;
-   basic relay_host forwarding exists today).
+3. **Use a smarthost relay.** Services like AWS SES, Postmark, or Mailgun charge
+   per message but send from IPs with pre-built reputation. Gmail-bound mail
+   reliably lands in inboxes from day one. Configure the `[smtp.smarthost]` block
+   in `rookery.toml` (host/port/username, `require_tls = true`, `auth = true`) and
+   set `ROOKERY_SMTP_RELAY_PASSWORD` in `.env`, then restart. rookery DKIM-signs
+   every message locally before relaying it over an authenticated TLS submission
+   session. See ADR-0030 for the design.
 
-4. **Use a relay rookery (Phase 8 feature).** Another rookery instance with an
-   established IP reputation can relay your outbound mail under PLAN.md §11.10's
-   relay-rookery shape. Like a commercial relay but operated by a person you know.
+4. **Use a relay rookery.** Another rookery instance with an established IP
+   reputation can relay your outbound mail. To rookery this is identical to a
+   commercial relay — the same `[smtp.smarthost]` block, just pointed at the other
+   instance's hostname with the relay-client credentials it issued you. Like a
+   commercial relay but operated by a person you know. (Acting *as* a relay rookery
+   for others is the second half of the feature — see ADR-0030 Phase B.)
 
 5. **Provision a clean IP.** Some providers (especially in Europe — Hetzner,
    Netcup, certain OVH products) have reputation-clean ranges. A dedicated IP
