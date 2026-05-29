@@ -37,6 +37,7 @@ var migrationsFS embed.FS
 type Store struct {
 	DB         *pgxpool.Pool
 	MessageDir string
+	ExportDir  string
 }
 
 // Open connects to Postgres, runs pending migrations, and returns a Store.
@@ -62,8 +63,17 @@ func Open(ctx context.Context, dbURL, messageDir string) (*Store, error) {
 		return nil, fmt.Errorf("store: create message_dir %s: %w", messageDir, err)
 	}
 
+	// ExportDir lives inside MessageDir so it inherits the existing bind mount
+	// and is writable by the container process without a separate bind mount or
+	// any host-side setup beyond what rookery init already does.
+	exportDir := filepath.Join(messageDir, "exports")
+	if err := os.MkdirAll(exportDir, 0o750); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("store: create export_dir %s: %w", exportDir, err)
+	}
+
 	slog.Info("store: connected and migrated", "message_dir", messageDir)
-	return &Store{DB: pool, MessageDir: messageDir}, nil
+	return &Store{DB: pool, MessageDir: messageDir, ExportDir: exportDir}, nil
 }
 
 // Close releases the database pool.

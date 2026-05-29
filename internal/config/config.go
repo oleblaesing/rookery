@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -256,6 +257,20 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// ExternalURL returns the base URL used in links sent to users.
+//   - localhost / *.localhost → http:// with port when non-80
+//   - everything else         → https:// with no port (Caddy owns 443)
+func (c *Config) ExternalURL() string {
+	d := c.Domain
+	if d == "localhost" || strings.HasSuffix(d, ".localhost") {
+		if c.HTTP.Port != 80 {
+			return fmt.Sprintf("http://%s:%d", d, c.HTTP.Port)
+		}
+		return "http://" + d
+	}
+	return "https://" + d
 }
 
 // DBUrl returns the Postgres connection URL. The coordinates are fixed —

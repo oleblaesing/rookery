@@ -222,6 +222,88 @@ sudo systemctl enable --now rookery
 
 ---
 
+## Moving between instances (per-user export / import)
+
+Each user can export their entire mailbox as a PGP-encrypted archive and import it
+on another instance. The server never decrypts the archive — it is encrypted to
+your own public key and decrypted in the browser using the private key you already
+hold in your session.
+
+### Export
+
+1. Log into instance A.
+2. Go to **Settings → data & keys → full data archive**, click **export archive**.
+3. The server assembles the archive in the background and sends a message to your
+   inbox when ready (within seconds to minutes depending on mailbox size). Check
+   your inbox.
+4. The inbox message contains two links: a direct download link and a migration
+   deep-link.
+
+### Import on instance B
+
+**Using the migration deep-link (easiest):**
+
+1. Open the deep-link from the inbox message on instance A.
+2. Replace `instance-a.example` at the start of the URL with `instance-b.example`.
+3. Open the modified URL while logged into instance B.
+4. The settings page opens the import tab with the URL pre-filled — click **import**.
+5. Your browser fetches the encrypted archive from instance A, decrypts it with your
+   private key, and sends the plaintext to instance B for ingestion.
+
+**Using the CLI (large archives, or if streaming import is slow):**
+
+```sh
+# Download and decrypt the archive locally:
+curl -L https://instance-a.example/export/<token> \
+  | gpg -d > rookery-archive.tar
+
+# Inspect the contents:
+tar tf rookery-archive.tar
+
+# Import into instance B:
+tar -O -xf rookery-archive.tar \
+  | curl -X POST \
+         --data-binary @- \
+         -H "Content-Type: application/octet-stream" \
+         -H "X-CSRF-Token: <your-csrf-token>" \
+         https://instance-b.example/api/v1/users/me/import
+```
+
+The CSRF token is in the `rookery_csrf` cookie (not HttpOnly — read it with JavaScript or
+`document.cookie` in the browser console).
+
+### What moves and what doesn't
+
+**Moves:** messages (all folders), message attachments metadata, your known-keys cache,
+drafts, and your active public key (for reference in the manifest).
+
+**Does NOT move:** email addresses, custom domains (re-establish these on instance B
+through the normal flows), DKIM keys, sessions, invites, or any other user's data.
+
+Message headers keep their original sender/recipient addresses verbatim.
+
+### Archive format
+
+The archive is a standard tar file, PGP-encrypted to your public key:
+
+```
+manifest.json            — provenance, counts, addresses/domains list
+public_key.asc           — your exported public key
+known_keys.json          — correspondent key cache
+drafts.json              — unsent drafts
+messages.json            — all message metadata
+message_attachments.json — attachment metadata
+blobs/<sha256>.eml       — raw RFC 5322 message files (content-addressed)
+```
+
+To decrypt and inspect manually:
+
+```sh
+gpg -d rookery-archive-<fingerprint8>.tar.gpg | tar x
+```
+
+---
+
 ## Local development
 
 Everything runs through the `rookery` dispatcher. No Makefile, no host-side

@@ -373,12 +373,54 @@ PUT    /api/v1/known-keys/{fingerprint}         # Manually set / override a key 
 
 ---
 
+### 9. Export / Import (per-user data portability — ADR-0039)
+
+**Authenticated endpoints:**
+
+```
+POST /api/v1/users/me/export
+    Queue an async archive export job.
+    Returns: { "job_id": "<uuid>", "status": "pending" }
+    When ready, sends an inbox notification with download and migration links.
+
+GET  /api/v1/users/me/export/status
+    Returns the most recent export job for the authenticated user.
+    Returns: { "status": "pending"|"ready"|"downloaded"|"expired"|"failed"|"none",
+               "expires_at": "<RFC 3339>" }
+
+GET  /api/v1/users/me/import/fetch?url=<archive-url>
+    Proxy endpoint: instance B fetches the encrypted archive from instance A
+    and streams it to the browser. HTTPS URLs only; SSRF-protected.
+    Returns: application/octet-stream (binary PGP ciphertext)
+
+POST /api/v1/users/me/import
+    Accept a plaintext tar stream (already decrypted by the browser).
+    Content-Type: application/octet-stream
+    Returns: { "imported_messages": N, "imported_blobs": N,
+               "imported_known_keys": N, "imported_drafts": N,
+               "skipped_messages": N }
+```
+
+**Unauthenticated download endpoint:**
+
+```
+GET  /export/{token}
+    Bearer-token download of a ready export archive. No session required.
+    Token is single-use (marked "downloaded" after first serve); file deleted
+    after 24-hour expiry. Responds with Content-Disposition attachment and
+    Access-Control-Allow-Origin: * (for cross-origin fetch from instance B).
+    Returns 404 for missing, expired, or not-yet-ready jobs.
+```
+
+---
+
 ## Unauthenticated public endpoints
 
 ```
 GET  /healthz                                    # Health check (no auth required)
 GET  /api/v1/status                              # Server version + domain (no auth required)
 GET  /invite/{token}                             # Invite landing page (HTML; no auth required)
+GET  /export/{token}                      # Export archive download (bearer-token auth)
 ```
 
 **WKD (Web Key Directory) — Advanced Method only (see ADR-0024):**
@@ -405,4 +447,5 @@ Method (`<domain>/.well-known/openpgpkey/...`) is not supported per ADR-0024.
 | Phase 3 | Domains (full CRUD + DNS verification), Addresses (multi-address + aliases). |
 | Phase 4 | Operator observability endpoints (internal). |
 | Phase 5 | Known Keys (full CRUD). Cursor pagination. |
-| Phase 6 | Mailbox export/import endpoints. |
+| Phase 4 (now) | Mailbox export/import endpoints (ADR-0039, implemented standalone). |
+| Phase 6 | *(export/import already done; remaining: client-side search, chunked attachments)* |

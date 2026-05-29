@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `rookery` is a PGP-first, self-hostable mail server — inbound/outbound SMTP, WKD key publishing, and a server-rendered web client — in a single Go binary and one container. The server never holds users' PGP private keys. Authentication is challenge/response signed by the private key; no passphrase hash is stored server-side. See `PLAN.md` for the full design document and `docs/adr/` for architectural decision records.
 
-Current phase: **Phase 4** (custom domains). Phases 1–3 are complete. Phase 3 delivered HTTPS via Caddy sidecar (`--profile prod`); see `docs/adr/ADR-0024.md`.
+Current phase: **Phase 4** (custom domains). Phases 1–3 are complete. Phase 3 delivered HTTPS via Caddy sidecar (`--profile prod`); see `docs/adr/ADR-0024.md`. Per-user data export/import (ADR-0039) was implemented standalone ahead of Phase 6/7.
 
 ## Development commands
 
@@ -66,8 +66,9 @@ Both share a single `*store.Store` (Postgres pool + blob root path). Graceful sh
 
 ### Storage
 
-- **Postgres** (`jackc/pgx/v5`): all metadata, sessions, keys, messages metadata, invites.
+- **Postgres** (`jackc/pgx/v5`): all metadata, sessions, keys, messages metadata, invites, export_jobs.
 - **Content-addressed blob store**: raw `.eml` files at `<message_dir>/sha256/<ab>/<cd>/<hash>.eml`. Blobs are written atomically (temp file + rename). Multiple recipients share one blob. The host directory is `./data/messages/` (bind-mounted into the container at `/var/lib/rookery/messages`, the binary's hardcoded default). `rookery init` creates this directory and records `ROOKERY_UID`/`ROOKERY_GID` in `.env`; `compose.yaml` uses `user: "${ROOKERY_UID}:${ROOKERY_GID}"` so the container writes as the operator's own UID without any `chown`. `message_dir` remains overridable in `rookery.toml` for non-container use (e.g. `go run`).
+- **Export archive store**: encrypted `.tar.gpg` archives at `<message_dir>/exports/<job-id>.tar.gpg`. Lives inside the `message_dir` bind mount so it requires no additional host-side setup — `store.Open` creates the subdirectory at startup. Archives expire after 24 hours; a background cleanup worker deletes them. Host path: `./data/messages/exports/`. Excluded from `rookery backup` (temporary files, not user data).
 - **Migrations**: SQL files in `internal/store/migrations/`, embedded via `embed.FS`, applied at startup by `golang-migrate`. Migration files are `NNNN_name.up.sql` / `NNNN_name.down.sql`.
 
 ### HTTP layer (`internal/web/`)
@@ -112,3 +113,11 @@ Both share a single `*store.Store` (Postgres pool + blob root path). Graceful sh
 - `.env`: `ROOKERY_DB_PASSWORD`, `POSTGRES_PASSWORD`, `ROOKERY_MASTER_KEY`, `ROOKERY_SESSION_KEY`, `ROOKERY_UID`, `ROOKERY_GID`. Included in `./rookery backup` — losing `ROOKERY_MASTER_KEY` bricks DKIM keys.
 - `rookery.service`: staged systemd unit with `User=` filled in. Promoted to `/etc/systemd/system/` by `sudo rookery install`.
 - Config loaded in `internal/config/config.go`. The `ROOKERY_CONFIG` env var overrides the default path `/etc/rookery/rookery.toml`.
+
+### Export/import (`internal/archive/`)
+
+- `ExportUser(ctx, db, st, userID, domain, w)` — streams a PGP-encrypted tar archive to `w`.
+- `ImportUser(ctx, db, st, userID, r)` — reads a plaintext tar stream from `r` and ingests.
+- HTTP handlers in `internal/web/handlers_export.go`: `POST /api/v1/users/me/export` (async, queues job), `GET /api/v1/users/me/export/status` (poll), `GET /export/{token}` (unauthenticated download), `GET /api/v1/users/me/import/fetch` (SSRF-safe proxy), `POST /api/v1/users/me/import`.
+- Export jobs tracked in the `export_jobs` table (migration 0007). Archives stored in `data/exports/` (derived as sibling of `data/messages/`). Hourly cleanup worker in `CleanupExpiredExports` removes files after 24h expiry.
+- See `docs/adr/ADR-0039.md` for design rationale.

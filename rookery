@@ -1293,7 +1293,8 @@ cmd_backup() {
     if [ -z "$out_file" ]; then
         tar -c \
             -C "$stagedir"   db.dump caddy-data.tar \
-            -C "$SCRIPT_DIR" rookery.toml .env Caddyfile data/messages \
+            -C "$SCRIPT_DIR" rookery.toml .env Caddyfile \
+                --exclude='data/messages/exports' data/messages \
           | gzip \
           | ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
               openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ROOKERY_BACKUP_PASS \
@@ -1302,7 +1303,8 @@ cmd_backup() {
         tmp_out="${out_file}.tmp.$$"
         tar -c \
             -C "$stagedir"   db.dump caddy-data.tar \
-            -C "$SCRIPT_DIR" rookery.toml .env Caddyfile data/messages \
+            -C "$SCRIPT_DIR" rookery.toml .env Caddyfile \
+                --exclude='data/messages/exports' data/messages \
           | gzip \
           | ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
               openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ROOKERY_BACKUP_PASS \

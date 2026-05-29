@@ -71,6 +71,8 @@ services:
       - ./rookery.toml:/etc/rookery/rookery.toml:ro
       # Bind mount for message blobs. Created by `rookery init`, owned by the
       # operator. Accessible on the host at ./data/messages/.
+      # Export archives live at ./data/messages/exports/ (a subdirectory) so they
+      # inherit this mount and need no separate bind mount or host-side setup.
       - ./data/messages:/var/lib/rookery/messages
     env_file: ./.env
     # Healthcheck is implemented as a `rookery healthcheck` subcommand

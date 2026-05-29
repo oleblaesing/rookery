@@ -5,9 +5,9 @@
   <h1>settings</h1>
 
   <div class="tab-strip" role="tablist">
-    <button role="tab" aria-controls="tab-privatekey" aria-selected="true"  id="tab-btn-privatekey" class="tab-active">private key</button>
-    <button role="tab" aria-controls="tab-domains"    aria-selected="false" id="tab-btn-domains">custom domains</button>
-    <button role="tab" aria-controls="tab-delete"     aria-selected="false" id="tab-btn-delete">delete account</button>
+    <button role="tab" aria-controls="tab-datakeys" aria-selected="true"  id="tab-btn-datakeys" class="tab-active">data &amp; keys</button>
+    <button role="tab" aria-controls="tab-domains"  aria-selected="false" id="tab-btn-domains">custom domains</button>
+    <button role="tab" aria-controls="tab-delete"   aria-selected="false" id="tab-btn-delete">delete account</button>
   </div>
 
   {{/* ---- custom domains tab ---- */}}
@@ -109,42 +109,18 @@
 
   </div>{{/* end tab-domains */}}
 
-  {{/* ---- private key tab ---- */}}
-  <div id="tab-privatekey" role="tabpanel" aria-labelledby="tab-btn-privatekey" class="tab-panel tab-panel-active">
+  {{/* ---- data & keys tab ---- */}}
+  <div id="tab-datakeys" role="tabpanel" aria-labelledby="tab-btn-datakeys" class="tab-panel tab-panel-active">
 
-    <div class="info-block narrow-form">
-      <p>Your recovery file contains your private key, encrypted with your
-      passphrase. The server does not have a copy of either.</p>
-      <p><strong>This file is your second factor.</strong> Logging in requires
-      both the file and the passphrase — a stolen passphrase is useless without
-      it, and a stolen file is useless without the passphrase. No TOTP app or
-      SMS code needed; the recovery file plays that role structurally.</p>
-      <p>Re-exporting this file with a new passphrase <strong>changes your
-      login passphrase</strong> — the server authenticates you by verifying a
-      signature from your key, not by checking a stored password. The new file
-      replaces the old one; use the new passphrase to log in on any device from
-      that point on.</p>
-      <p>If you lose both the recovery file and your browser's local storage,
-      your mail is unrecoverable. <strong>Store it off-device</strong> — a USB
-      drive, a printed copy in a sealed envelope, an encrypted external
-      backup.</p>
-      <p>While you are logged in, your private key is held in plaintext in
-      browser <code>localStorage</code>. It is cleared on logout. <strong>Log
-      out when you are done</strong>, especially on shared or untrusted
-      machines where another user or process might read browser storage.</p>
-    </div>
-
+    <h3>private key export</h3>
     <form id="export-form" class="narrow-form">
       <div class="field">
-        <label for="export-passphrase">private key passphrase</label>
+        <label for="export-passphrase">passphrase</label>
         <input type="password" id="export-passphrase" name="export_passphrase"
                autocomplete="new-password" placeholder="passphrase">
-        <p class="field-hint">This passphrase encrypts your private key and acts as
-        your first factor. Your private key file is the second factor — logging in
-        requires both. Leave blank to export without a passphrase.</p>
       </div>
       <div class="field">
-        <label for="export-passphrase-confirm">confirm private key passphrase</label>
+        <label for="export-passphrase-confirm">confirm passphrase</label>
         <input type="password" id="export-passphrase-confirm" name="export_passphrase_confirm"
                autocomplete="new-password" placeholder="repeat passphrase">
       </div>
@@ -154,7 +130,35 @@
       <p id="export-error" class="field-hint error" style="display:none"></p>
     </form>
 
-  </div>{{/* end tab-privatekey */}}
+    <h3>full data export</h3>
+    <form id="export-archive-form" class="narrow-form">
+      <div class="field">
+        <label for="export-new-instance">new instance address <span class="field-optional">(optional)</span></label>
+        <input type="text" id="export-new-instance" name="new_instance"
+               autocomplete="off" placeholder="new-instance.example">
+        <p class="field-hint">If provided, a migration link for that instance is included in the notification.</p>
+      </div>
+      <div class="form-actions">
+        <button type="submit" id="export-archive-btn" class="button">export archive</button>
+      </div>
+      <p id="export-archive-status" class="field-hint" style="display:none"></p>
+    </form>
+
+    <h3>full data import</h3>
+    <form id="import-form" class="narrow-form">
+      <div class="field">
+        <label for="import-url">archive URL</label>
+        <input type="url" id="import-url" name="import_url"
+               placeholder="https://old-instance.example/api/v1/export/…">
+      </div>
+      <div class="form-actions">
+        <button type="submit" id="import-btn" class="button">import</button>
+      </div>
+      <p id="import-status" class="field-hint" style="display:none"></p>
+      <p id="import-error" class="field-hint error" style="display:none"></p>
+    </form>
+
+  </div>{{/* end tab-datakeys */}}
 
   {{/* ---- delete account tab ---- */}}
   <div id="tab-delete" role="tabpanel" aria-labelledby="tab-btn-delete" class="tab-panel">
@@ -244,6 +248,15 @@
   if (hash) {
     var hashTarget = document.querySelector('[aria-controls="' + hash + '"]');
     if (hashTarget) activateTab(hashTarget);
+  }
+
+  // ?migrate=<url> → activate import tab and pre-fill the URL field.
+  var migrateURL = new URLSearchParams(location.search).get('migrate');
+  if (migrateURL) {
+    var importTabBtn = document.querySelector('[aria-controls="tab-datakeys"]');
+    if (importTabBtn) activateTab(importTabBtn);
+    var importURLInput = document.getElementById('import-url');
+    if (importURLInput) importURLInput.value = migrateURL;
   }
 
   // ---- Domain management ----

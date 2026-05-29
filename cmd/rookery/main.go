@@ -192,6 +192,9 @@ func runServer() int {
 	go runDailyWorker(ctx, "cert-expiry", func(ctx context.Context) error {
 		return domMgr.CheckCertExpiry(ctx)
 	})
+	go runHourlyWorker(ctx, "export-cleanup", func(ctx context.Context) error {
+		return web.CleanupExpiredExports(ctx, st.DB, st.ExportDir)
+	})
 
 	select {
 	case <-ctx.Done():

@@ -1,0 +1,11 @@
+{{define "title"}}archive ready — {{.InstanceName}}{{end}}
+
+{{define "content"}}
+<section class="form-page">
+  <h1>archive ready</h1>
+  <p class="field-hint">This link expires in 24 hours.</p>
+  <div class="form-actions">
+    <a href="{{.DownloadURL}}" class="button">download archive</a>
+  </div>
+</section>
+{{end}}

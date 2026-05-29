@@ -45,7 +45,7 @@
 
 import * as openpgp from 'openpgp';
 
-export const ROOKERY_CRYPTO_VERSION = "0.1.0-phase2";
+export const ROOKERY_CRYPTO_VERSION = "0.1.0-phase4";
 
 // --------------------------------------------------------------------------
 // Key generation
@@ -421,6 +421,58 @@ export async function encryptMessage(bodyText, recipientArmoredKeys, senderPubli
     signingKeys: signingKey || undefined,
     format: 'armored',
   });
+}
+
+// --------------------------------------------------------------------------
+// Archive decryption (import flow)
+// --------------------------------------------------------------------------
+
+/**
+ * decryptArchive(privateKey, encryptedBytes) → Uint8Array
+ *
+ * Decrypts a binary (non-armored) PGP archive produced by archive.ExportUser.
+ * The result is the raw plaintext tar bytes, which the caller POSTs to
+ * /api/v1/users/me/import.
+ *
+ * privateKey: an unlocked openpgp.PrivateKey from loadSessionKey().
+ * encryptedBytes: Uint8Array of the binary PGP ciphertext.
+ *
+ * Note: we buffer the full decrypted archive in memory before returning.
+ * A streaming path through OpenPGP.js + streaming request body (fetch with
+ * { duplex: 'half' }) would reduce peak memory for very large archives but
+ * requires browser support that varies (Chrome ≥ 105, Firefox lacks it as of
+ * 2026). Buffering is correct and simple; streaming is a future optimisation.
+ */
+export async function decryptArchive(privateKey, encryptedBytes) {
+  const message = await openpgp.readMessage({ binaryMessage: encryptedBytes });
+  const { data } = await openpgp.decrypt({
+    message,
+    decryptionKeys: privateKey,
+    format: 'binary',
+    expectSigned: false,
+  });
+  // data may be a Uint8Array or a ReadableStream depending on the input size
+  // and the OpenPGP.js version. Normalise to Uint8Array.
+  if (data instanceof Uint8Array) {
+    return data;
+  }
+  // Consume a ReadableStream.
+  const reader = data.getReader();
+  const chunks = [];
+  let totalLen = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    totalLen += value.length;
+  }
+  const out = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
 }
 
 function _randomHex(n) {

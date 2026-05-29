@@ -73,6 +73,10 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 	// Not authenticated — Caddy calls it from the same host.
 	r.Get("/internal/tls-ask", handleTLSAsk(domMgr))
 
+	// /api/v1/export/{token} — unauthenticated binary download (bearer token auth).
+	// Used by curl, the import proxy on instance B, and the download button.
+	r.Get("/api/v1/export/{token}", handleAPIExportDownload(db, cfg))
+
 	// ---- Authenticated middleware group ----
 	authAPI := auth.Middleware(ss, unauthAPI)
 	authHTML := auth.Middleware(ss, unauthHTML)
@@ -86,6 +90,8 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 			http.Redirect(w, r, "/inbox", http.StatusSeeOther)
 		})
 		r.Get("/settings", handleSettingsPage(db, cfg, domMgr))
+		// /export/{token} — session-authenticated; only the owning user can view.
+		r.Get("/export/{token}", handleExportPage(db, cfg))
 		r.Get("/inbox", handleInboxPage(db, cfg))
 		r.Get("/compose", handleComposePage(db, cfg))
 		r.Get("/partials/key-status", handleKeyStatusFragment(db))
@@ -143,6 +149,12 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Patch("/domains/{id}", handleAPIPatchDomain(domMgr))
 		r.Delete("/domains/{id}", handleAPIDeleteDomain(domMgr))
 		r.Post("/domains/{id}/verify", handleAPIVerifyDomain(domMgr))
+
+		// Export / import (per-user data portability, ADR-0039).
+		r.Post("/users/me/export", handleAPIExport(db, st, cfg))
+		r.Get("/users/me/export/status", handleAPIExportStatus(db))
+		r.Get("/users/me/import/fetch", handleAPIImportFetch())
+		r.Post("/users/me/import", handleAPIImport(db, st))
 	})
 
 	// Static assets. The path is tried in order:
