@@ -158,9 +158,50 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 		}
 	}
 
+	// Drop messages whose blob files are missing from disk (data loss / volume
+	// not mounted) so the export completes with what's actually present rather
+	// than failing entirely.
+	missingBlobs := make(map[string]struct{})
+	for _, digest := range blobs {
+		if _, statErr := os.Stat(st.BlobPath(digest)); os.IsNotExist(statErr) {
+			missingBlobs[digest] = struct{}{}
+		}
+	}
+	if len(missingBlobs) > 0 {
+		filtered := msgs[:0]
+		for _, m := range msgs {
+			if _, missing := missingBlobs[m.BlobSHA256]; !missing {
+				filtered = append(filtered, m)
+			}
+		}
+		msgs = filtered
+		seen = make(map[string]struct{}, len(msgs))
+		blobs = nil
+		for i := range msgs {
+			d := msgs[i].BlobSHA256
+			if _, ok := seen[d]; !ok {
+				seen[d] = struct{}{}
+				blobs = append(blobs, d)
+			}
+		}
+	}
+
 	attachments, err := fetchAttachments(ctx, db, userID)
 	if err != nil {
 		return err
+	}
+	if len(missingBlobs) > 0 {
+		includedIDs := make(map[string]struct{}, len(msgs))
+		for _, m := range msgs {
+			includedIDs[m.ID] = struct{}{}
+		}
+		fa := attachments[:0]
+		for _, a := range attachments {
+			if _, ok := includedIDs[a.MessageID]; ok {
+				fa = append(fa, a)
+			}
+		}
+		attachments = fa
 	}
 	knownKeys, err := fetchKnownKeys(ctx, db, userID)
 	if err != nil {

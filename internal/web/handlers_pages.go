@@ -478,9 +478,16 @@ func handleDeletePermanentPost(db *pgxpool.Pool, st *store.Store) http.HandlerFu
 			return
 		}
 
-		// Remove the blob from disk; log but don't fail on error.
-		if err := st.DeleteBlob(blobSHA256); err != nil {
-			slog.Error("permanent delete: blob removal failed", "msg_id", msgID, "digest", blobSHA256, "err", err)
+		// Blobs are shared across recipients; only remove the file when no
+		// other message row references it.
+		var remaining int
+		_ = db.QueryRow(r.Context(),
+			`SELECT COUNT(*) FROM messages WHERE blob_sha256 = $1`, blobSHA256,
+		).Scan(&remaining)
+		if remaining == 0 {
+			if err := st.DeleteBlob(blobSHA256); err != nil {
+				slog.Error("permanent delete: blob removal failed", "msg_id", msgID, "digest", blobSHA256, "err", err)
+			}
 		}
 
 		http.Redirect(w, r, "/inbox?folder=trash", http.StatusSeeOther)
