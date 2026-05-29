@@ -101,7 +101,30 @@ credential to one person at a time, exactly like any inter-MTA relay agreement.
 1. You must be running the prod profile (Caddy), because the submission listener
    reuses the TLS certificate Caddy provisions for your domain. There is no
    second ACME client.
-2. Set `submission_enabled = true` under `[smtp]` in `rookery.toml` and restart.
+2. **Let rookery read Caddy's certs.** By default Caddy runs as root and writes
+   its certificates as root-owned `0600` files, but the rookery process runs as
+   the distroless nonroot UID `65532` and cannot read them — the submission
+   listener will fail to start with "no readable certificate". Fix it once by
+   running Caddy under the same UID (the Caddy binary carries
+   `cap_net_bind_service`, so it still binds 80/443 as a non-root user):
+
+   ```sh
+   ./rookery stop
+
+   # Point the caddy container at the rookery container's UID/GID (65532).
+   printf 'CADDY_UID=65532\nCADDY_GID=65532\n' >> .env
+
+   # Hand Caddy's existing data to that UID (it was created root-owned).
+   proj=$(docker compose -f compose.yaml config | awk '/^name:/{print $2; exit}')
+   docker run --rm -v "${proj}_caddy-data:/data" -v "${proj}_caddy-config:/config" \
+     docker.io/library/alpine:latest chown -R 65532:65532 /data /config
+
+   ./rookery start --prod
+   ```
+
+   To revert, remove the `CADDY_UID`/`CADDY_GID` lines from `.env` and restart;
+   root can still read the now-UID-owned files, so nothing breaks.
+3. Set `submission_enabled = true` under `[smtp]` in `rookery.toml` and restart.
    This starts authenticated SMTP submission listeners on ports 465 (implicit
    TLS) and 587 (STARTTLS). AUTH is offered only over TLS; an unauthenticated
    session can never relay (this is never an open relay).

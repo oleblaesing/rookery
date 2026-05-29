@@ -74,9 +74,9 @@ type StorageConfig struct {
 	// MessageDir is the filesystem path where raw .eml message files are
 	// stored, content-addressed as messages/sha256/ab/cd/<hash>.eml.
 	//
-	// This must match the bind mount in compose.yaml. The default
+	// This must match the volume mount in compose.yaml. The default
 	// ("/var/lib/rookery/messages") is the only path the bundled compose
-	// stack mounts the rookery-messages volume at; if you change it here,
+	// stack mounts the messages-data volume at; if you change it here,
 	// you must also change the volume mount, or messages will be written
 	// to the container's writable layer and lost on container replacement.
 	MessageDir string `toml:"message_dir"`

@@ -292,10 +292,6 @@ TOML
     env_gen POSTGRES_PASSWORD   "$db_pass"
     env_gen ROOKERY_MASTER_KEY
     env_gen ROOKERY_SESSION_KEY
-    # Used by compose.yaml user: field so the container can write to the
-    # bind-mounted data/messages directory without a chown.
-    env_gen ROOKERY_UID "$(id -u)"
-    env_gen ROOKERY_GID "$(id -g)"
     # Outbound smarthost SASL password (ADR-0030). Empty by default; uncomment and
     # set when [smtp.smarthost] is enabled with auth = true. The container reads
     # .env via env_file, so an uncommented value flows in on the next restart.
@@ -303,13 +299,9 @@ TOML
         printf '# ROOKERY_SMTP_RELAY_PASSWORD=\n' >> "$SCRIPT_DIR/.env"
     fi
 
-    # ---- data/messages (bind-mounted blob store) ----------------------------
-    if [ ! -d "$SCRIPT_DIR/data/messages" ]; then
-        mkdir -p "$SCRIPT_DIR/data/messages"
-        info "created data/messages"
-    else
-        info "data/messages already exists — skipping"
-    fi
+    # Message blobs live in the `messages-data` named volume (see compose.yaml),
+    # which Docker creates on first `start` owned by the container's nonroot UID.
+    # Nothing to set up on the host.
 
     # ---- Caddyfile ----------------------------------------------------------
     if [ ! -f "$SCRIPT_DIR/Caddyfile" ]; then
@@ -409,12 +401,6 @@ cmd_start() {
         esac
     done
     need_init
-    if [ ! -d "$SCRIPT_DIR/data/messages" ]; then
-        die "data/messages missing — run './rookery init' first"
-    fi
-    if [ ! -w "$SCRIPT_DIR/data/messages" ]; then
-        die "data/messages is not writable by uid $(id -u) — fix with: sudo chown $(id -u):$(id -g) \"$SCRIPT_DIR/data/messages\""
-    fi
     if [ "$prod" -eq 1 ]; then
         dc --profile prod up --build "$@"
     else
@@ -1253,14 +1239,14 @@ cmd_relay_client() {
 # certificates, config files (rookery.toml, .env, Caddyfile), and the raw
 # message blob tree. The archive is AES-256-CBC encrypted with a passphrase.
 #
-# Ordering rule: pg_dump runs BEFORE the tar of data/messages/ so that a
+# Ordering rule: pg_dump runs BEFORE the tar of the message blobs so that a
 # message arriving mid-backup becomes at worst an orphan blob on restore
 # (no matching DB row — harmless garbage) rather than a dangling DB row
 # (row with no blob — a broken UI entry).
 #
 # The encrypted output streams through the pipeline and never spools the
-# full archive to disk; only the two intermediate files (db.dump and
-# caddy-data.tar) are buffered in a temp directory on the server.
+# full archive to disk; only the intermediate files (db.dump, caddy-data.tar,
+# and messages-data.tar) are buffered in a temp directory on the server.
 # ---------------------------------------------------------------------------
 cmd_backup() {
     need_init
@@ -1289,8 +1275,6 @@ cmd_backup() {
     for _f in rookery.toml .env Caddyfile; do
         [ -f "$SCRIPT_DIR/$_f" ] || die "backup: $_f not found — run './rookery init' first"
     done
-    [ -d "$SCRIPT_DIR/data/messages" ] \
-        || die "backup: data/messages not found — run './rookery init' first"
 
     # Determine where the archive goes.
     if [ -z "$output" ]; then
@@ -1346,16 +1330,26 @@ cmd_backup() {
         > "$stagedir/caddy-data.tar" \
         || die "backup: caddy-data archive failed"
 
+    # Step 3: archive the messages-data named volume (raw .eml blob tree).
+    # The exports/ subdirectory holds expiring archives, not user data, so it
+    # is excluded — matching the old host-side `--exclude data/messages/exports`.
+    info "backup: archiving message blobs..."
+    docker run --rm \
+        -v "${project}_messages-data:/v:ro" \
+        docker.io/library/alpine:latest \
+        tar -C /v --exclude=./exports -c . \
+        > "$stagedir/messages-data.tar" \
+        || die "backup: messages-data archive failed"
+
     info "backup: encrypting archive..."
 
-    # Step 3: stream the full archive — tar | gzip | openssl.
+    # Step 4: stream the full archive — tar | gzip | openssl.
     # ROOKERY_BACKUP_PASS is passed only into the openssl subprocess (inline
     # env assignment); it is never written to disk or exported to the shell.
     if [ -z "$out_file" ]; then
         tar -c \
-            -C "$stagedir"   db.dump caddy-data.tar \
+            -C "$stagedir"   db.dump caddy-data.tar messages-data.tar \
             -C "$SCRIPT_DIR" rookery.toml .env Caddyfile \
-                --exclude='data/messages/exports' data/messages \
           | gzip \
           | ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
               openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ROOKERY_BACKUP_PASS \
@@ -1363,9 +1357,8 @@ cmd_backup() {
     else
         tmp_out="${out_file}.tmp.$$"
         tar -c \
-            -C "$stagedir"   db.dump caddy-data.tar \
+            -C "$stagedir"   db.dump caddy-data.tar messages-data.tar \
             -C "$SCRIPT_DIR" rookery.toml .env Caddyfile \
-                --exclude='data/messages/exports' data/messages \
           | gzip \
           | ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
               openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ROOKERY_BACKUP_PASS \
@@ -1384,8 +1377,8 @@ cmd_backup() {
 #
 # Restores from an encrypted backup archive produced by `rookery backup`.
 # Refuses to run unless the working directory is a fresh checkout with no
-# existing .env, rookery.toml, or non-empty data/messages/. Restoring over
-# a live instance is out of scope; start from a clean git clone.
+# existing .env or rookery.toml. Restoring over a live instance is out of
+# scope; start from a clean git clone.
 # ---------------------------------------------------------------------------
 cmd_restore() {
     local file="" passphrase_file="" ROOKERY_BACKUP_PASS="" project
@@ -1416,15 +1409,6 @@ cmd_restore() {
         printf '    git clone <url> <dir> && cd <dir> && ./rookery restore %s\n' "$file" >&2
         exit 1
     fi
-    if [ -d "$SCRIPT_DIR/data/messages" ] && \
-       [ -n "$(ls -A "$SCRIPT_DIR/data/messages" 2>/dev/null)" ]; then
-        printf 'rookery: error: data/messages/ is not empty.\n' >&2
-        printf '  Restoring over an existing instance is not supported.\n' >&2
-        printf '  To restore into a fresh checkout:\n' >&2
-        printf '    git clone <url> <dir> && cd <dir> && ./rookery restore %s\n' "$file" >&2
-        exit 1
-    fi
-
     # Read the passphrase.
     if [ -n "$passphrase_file" ]; then
         [ -f "$passphrase_file" ] || die "restore: passphrase file not found: $passphrase_file"
@@ -1447,6 +1431,8 @@ cmd_restore() {
         || die "restore: archive did not contain db.dump — is this a rookery backup archive?"
     [ -f "$SCRIPT_DIR/caddy-data.tar" ] \
         || die "restore: archive did not contain caddy-data.tar"
+    [ -f "$SCRIPT_DIR/messages-data.tar" ] \
+        || die "restore: archive did not contain messages-data.tar"
 
     # Derive the compose project name for named-volume references.
     project=$(dc config 2>/dev/null | grep '^name:' | head -1 | awk '{print $2}')
@@ -1484,8 +1470,17 @@ cmd_restore() {
         < "$SCRIPT_DIR/caddy-data.tar" \
         || die "restore: caddy-data restore failed"
 
-    # Clean up the two intermediate files that were extracted at the repo root.
-    rm -f "$SCRIPT_DIR/db.dump" "$SCRIPT_DIR/caddy-data.tar"
+    # Restore the messages-data volume (raw .eml blob tree).
+    info "restore: restoring message blobs..."
+    docker run --rm \
+        -v "${project}_messages-data:/v" \
+        -i docker.io/library/alpine:latest \
+        sh -c 'cd /v && tar x' \
+        < "$SCRIPT_DIR/messages-data.tar" \
+        || die "restore: messages-data restore failed"
+
+    # Clean up the intermediate files that were extracted at the repo root.
+    rm -f "$SCRIPT_DIR/db.dump" "$SCRIPT_DIR/caddy-data.tar" "$SCRIPT_DIR/messages-data.tar"
 
     # Print a brief summary.
     local users msgs blobs
@@ -1495,7 +1490,10 @@ cmd_restore() {
     msgs=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
         psql -U rookery -d rookery -tA -c "SELECT count(*) FROM messages" 2>/dev/null \
         || printf '?')
-    blobs=$(find "$SCRIPT_DIR/data/messages" -name "*.eml" 2>/dev/null | wc -l | tr -d ' ')
+    blobs=$(docker run --rm -v "${project}_messages-data:/v:ro" \
+        docker.io/library/alpine:latest \
+        sh -c 'find /v -name "*.eml" 2>/dev/null | wc -l' | tr -d ' ' \
+        || printf '?')
 
     printf '\n' >&2
     info "Restore complete."
@@ -1737,12 +1735,12 @@ EOF
 rookery backup [path] [--passphrase-file <file>]
 
   Create an encrypted backup of the instance. The archive contains:
-    db.dump          pg_dump (custom format) of the rookery database
-    caddy-data.tar   Caddy TLS certificates and ACME state
-    rookery.toml     instance configuration
-    .env             secrets (DB password, master key, session key)
-    Caddyfile        reverse-proxy configuration
-    data/messages/   raw message blob tree
+    db.dump            pg_dump (custom format) of the rookery database
+    caddy-data.tar     Caddy TLS certificates and ACME state
+    messages-data.tar  raw message blob tree (the messages-data volume)
+    rookery.toml       instance configuration
+    .env               secrets (DB password, master key, session key)
+    Caddyfile          reverse-proxy configuration
 
   The archive is AES-256-CBC encrypted with a passphrase (prompted on the
   terminal, or read from --passphrase-file). The passphrase is the single
@@ -1774,8 +1772,8 @@ EOF
 rookery restore <archive> [--passphrase-file <file>]
 
   Restore from an encrypted backup archive created by `rookery backup`.
-  Only works on a fresh checkout — refuses to run if .env, rookery.toml,
-  or a non-empty data/messages/ already exists.
+  Only works on a fresh checkout — refuses to run if .env or rookery.toml
+  already exists.
 
   To restore into a fresh checkout:
     git clone <url> <dir> && cd <dir> && ./rookery restore <archive>
@@ -1785,7 +1783,8 @@ rookery restore <archive> [--passphrase-file <file>]
     2. Start postgres only (using the restored .env for credentials)
     3. pg_restore the database dump
     4. Restore the caddy-data volume (TLS certificates)
-    5. Print a brief summary (users, messages, blobs)
+    5. Restore the messages-data volume (raw .eml blob tree)
+    6. Print a brief summary (users, messages, blobs)
 
   After restore, start the full stack:
     ./rookery start  (or: sudo systemctl start rookery)

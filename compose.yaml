@@ -56,9 +56,9 @@ services:
         GIT_REVISION: ${GIT_REVISION:-dev}
     image: rookery:latest
     restart: unless-stopped
-    # Run as the host operator's UID:GID (written to .env by `rookery init`)
-    # so the bind-mounted data/messages directory is writable without chown.
-    user: "${ROOKERY_UID:-65532}:${ROOKERY_GID:-65532}"
+    # Runs as the distroless image's built-in `nonroot` user (UID/GID 65532).
+    # Message blobs live in the `messages-data` named volume, which Docker
+    # creates owned by the container's UID, so no host-side chown is needed.
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,11 +71,13 @@ services:
       # rookery.toml must exist on the host before the stack starts.
       # Edit it on the host; changes require a server restart.
       - ./rookery.toml:/etc/rookery/rookery.toml:ro
-      # Bind mount for message blobs. Created by `rookery init`, owned by the
-      # operator. Accessible on the host at ./data/messages/.
-      # Export archives live at ./data/messages/exports/ (a subdirectory) so they
-      # inherit this mount and need no separate bind mount or host-side setup.
-      - ./data/messages:/var/lib/rookery/messages
+      # Named volume for message blobs. Docker manages ownership (created owned
+      # by the container's nonroot UID), so there is no host-side setup or chown.
+      # Backed up via `./rookery backup` (which tars the volume through a helper
+      # container, the same way it handles caddy-data).
+      # Export archives live in an exports/ subdirectory of this volume, so they
+      # inherit the mount and need no separate volume.
+      - messages-data:/var/lib/rookery/messages
       # Read-only access to Caddy's TLS certificates so the relay-rookery
       # submission listener can reuse the cert Caddy provisions for the instance
       # domain instead of running a second ACME client (ADR-0030 §4). Mounted at
@@ -198,6 +200,15 @@ services:
   caddy:
     image: docker.io/library/caddy:2-alpine
     restart: unless-stopped
+    # Caddy runs as root (0:0) by default and stores its TLS certificates as
+    # root-owned 0600 files. A relay rookery (smtp.submission_enabled) needs the
+    # rookery process — which runs as the distroless nonroot UID 65532 — to READ
+    # those certs from the shared caddy-data volume. To allow that, set
+    # CADDY_UID=65532 / CADDY_GID=65532 in .env and chown the caddy-data +
+    # caddy-config volumes once (see docs/ops/spam-runbook.md, "Acting as a
+    # relay rookery"). The caddy binary carries cap_net_bind_service, so it
+    # still binds 80/443 as a non-root user.
+    user: "${CADDY_UID:-0}:${CADDY_GID:-0}"
     ports:
       - "80:80"               # ACME HTTP-01 challenges + HTTP→HTTPS redirect
       - "443:443"             # HTTPS
@@ -246,6 +257,7 @@ services:
     profiles: [lint]
 
 volumes:
+  messages-data:
   postgres-data:
   redis-data:
   rspamd-data:
