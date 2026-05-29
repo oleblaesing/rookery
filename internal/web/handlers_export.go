@@ -402,14 +402,15 @@ func sendExportNotification(ctx context.Context, db *pgxpool.Pool, st *store.Sto
 
 	var body string
 	if newInstance != "" {
-		migrateURL := schemeFor(newInstance) + "://" + newInstance + "/settings?migrate=" + url.QueryEscape(archiveURL)
+		migrateURL := schemeFor(newInstance) + "://" + newInstance + "/migrate?archive=" + url.QueryEscape(archiveURL)
 		body = fmt.Sprintf(`Your rookery data archive is ready for download.
 
 It expires in 24 hours.
 
   %s
 
-To migrate to %s, open this link while logged in there:
+To migrate to %s, open this link there (you do not need to be logged in —
+you will need an invite for that instance and your recovery file):
   %s
 
 To decrypt manually: gpg -d rookery-archive-*.tar.gpg | tar x

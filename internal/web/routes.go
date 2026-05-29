@@ -37,6 +37,11 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 	r.Get("/login", handleLoginPage(ss, cfg))
 	r.Get("/logout", handleLogoutPage(ss, cfg))
 
+	// Migration landing page (HTML, unauthenticated). Lets a user on a new
+	// instance import an archive from their old one: it registers an account
+	// with the archive's own key and ingests the data. See ADR-0039.
+	r.Get("/migrate", handleMigratePage(ss, cfg))
+
 	// ---- API v1 — invite validation (unauthenticated) ----
 	r.Get("/api/v1/invites/{token}", handleAPIGetInvite(db, cfg))
 
@@ -76,6 +81,12 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 	// /api/v1/export/{token} — unauthenticated binary download (bearer token auth).
 	// Used by curl, the import proxy on instance B, and the download button.
 	r.Get("/api/v1/export/{token}", handleAPIExportDownload(db, cfg))
+
+	// /api/v1/import/fetch — unauthenticated SSRF-safe proxy. The migration
+	// page (unauthenticated) fetches the encrypted archive from the old
+	// instance through this before the account exists. Carries no user
+	// context; security comes from the SSRF guards in handleAPIImportFetch.
+	r.Get("/api/v1/import/fetch", handleAPIImportFetch())
 
 	// ---- Authenticated middleware group ----
 	authAPI := auth.Middleware(ss, unauthAPI)
@@ -151,9 +162,10 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Post("/domains/{id}/verify", handleAPIVerifyDomain(domMgr))
 
 		// Export / import (per-user data portability, ADR-0039).
+		// The archive-fetch proxy is unauthenticated (see /api/v1/import/fetch
+		// above) because the migration flow runs before the account exists.
 		r.Post("/users/me/export", handleAPIExport(db, st, cfg))
 		r.Get("/users/me/export/status", handleAPIExportStatus(db))
-		r.Get("/users/me/import/fetch", handleAPIImportFetch())
 		r.Post("/users/me/import", handleAPIImport(db, st))
 	})
 

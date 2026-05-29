@@ -1,5 +1,5 @@
 /**
- * settings.js — data & keys tab: recovery file export, full archive export/import,
+ * settings.js — data & keys tab: recovery file export, full archive export,
  * and account deletion.
  *
  * Recovery file export: browser-side only. Re-encrypts the session key with a
@@ -8,10 +8,9 @@
  * Full archive export: calls POST /api/v1/users/me/export, polls status every
  * 5 seconds, and notifies the user to check their inbox when ready.
  *
- * Import: fetches the encrypted archive via the proxy endpoint
- * GET /api/v1/users/me/import/fetch?url=..., decrypts with the session private
- * key via RookeryCrypto.decryptArchive(), then POSTs the plaintext tar to
- * POST /api/v1/users/me/import.
+ * Import is not done here — it lives on the destination instance's logged-out
+ * /migrate page (see migrate.js), which creates the account and ingests the
+ * archive in one step.
  */
 
 (function () {
@@ -304,160 +303,6 @@
         setStatus('Could not reach the server.');
         btn.disabled = false;
       }
-    });
-  });
-}());
-
-/**
- * Import from archive.
- *
- * Flow:
- *   1. User pastes the archive URL (from their old instance's inbox message).
- *   2. JS fetches the encrypted archive via the proxy:
- *        GET /api/v1/users/me/import/fetch?url=<archive-url>
- *   3. RookeryCrypto.decryptArchive(privateKey, encryptedBytes) decrypts it.
- *   4. The plaintext tar bytes are POSTed to POST /api/v1/users/me/import.
- *   5. A summary is displayed.
- *
- * The private key is loaded from the session cache (already unlocked at login).
- * Archive decryption happens entirely in the browser; the server only proxies
- * the encrypted bytes and receives the plaintext tar.
- */
-(function () {
-  'use strict';
-
-  function ready(fn) {
-    if (document.readyState !== 'loading') { fn(); return; }
-    document.addEventListener('DOMContentLoaded', fn);
-  }
-
-  ready(function () {
-    const form     = document.getElementById('import-form');
-    const btn      = document.getElementById('import-btn');
-    const statusEl = document.getElementById('import-status');
-    const errorEl  = document.getElementById('import-error');
-
-    if (!form || !window.RookeryCrypto) return;
-
-    function csrfToken() {
-      const meta = document.querySelector('meta[name="csrf-token"]');
-      return meta ? meta.getAttribute('content') : '';
-    }
-
-    function showStatus(msg) {
-      statusEl.textContent = msg;
-      statusEl.style.display = '';
-      errorEl.style.display = 'none';
-    }
-
-    function showError(msg) {
-      errorEl.textContent = msg;
-      errorEl.style.display = '';
-      statusEl.style.display = 'none';
-    }
-
-    function setBusy(label) {
-      btn.disabled = true;
-      btn.textContent = label;
-    }
-
-    function setReady() {
-      btn.disabled = false;
-      btn.textContent = 'import';
-    }
-
-    form.addEventListener('submit', async function (e) {
-      e.preventDefault();
-      const archiveURL = document.getElementById('import-url').value.trim();
-      if (!archiveURL) {
-        showError('Paste the archive URL from your old instance.');
-        return;
-      }
-
-      setBusy('loading session key…');
-
-      const { loadSessionKey } = window.RookeryCrypto;
-      let privateKey;
-      try {
-        privateKey = await loadSessionKey();
-        if (!privateKey) {
-          showError('No session key found. Please log out and log in again to restore the session key.');
-          setReady();
-          return;
-        }
-      } catch (err) {
-        showError('Could not load session key: ' + err.message);
-        setReady();
-        return;
-      }
-
-      setBusy('fetching archive…');
-
-      let encryptedBytes;
-      try {
-        const proxyURL = '/api/v1/users/me/import/fetch?url=' + encodeURIComponent(archiveURL);
-        const resp = await fetch(proxyURL, { credentials: 'same-origin' });
-        if (!resp.ok) {
-          const body = await resp.json().catch(function () { return {}; });
-          showError('Could not fetch archive: ' + (body.error && body.error.message || 'HTTP ' + resp.status));
-          setReady();
-          return;
-        }
-        const buf = await resp.arrayBuffer();
-        encryptedBytes = new Uint8Array(buf);
-      } catch (err) {
-        showError('Fetch failed: ' + err.message);
-        setReady();
-        return;
-      }
-
-      setBusy('decrypting…');
-
-      let decryptedBytes;
-      try {
-        const { decryptArchive } = window.RookeryCrypto;
-        decryptedBytes = await decryptArchive(privateKey, encryptedBytes);
-      } catch (err) {
-        showError('Decryption failed: ' + err.message + '. Make sure you are logged in with the private key that matches this archive.');
-        setReady();
-        return;
-      }
-
-      setBusy('importing…');
-
-      try {
-        const resp = await fetch('/api/v1/users/me/import', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'X-CSRF-Token': csrfToken(),
-          },
-          body: decryptedBytes,
-          credentials: 'same-origin',
-        });
-        const body = await resp.json().catch(function () { return {}; });
-        if (!resp.ok) {
-          showError('Import failed: ' + (body.error && body.error.message || 'unknown error'));
-          setReady();
-          return;
-        }
-        const msgs   = body.imported_messages  || 0;
-        const blobs  = body.imported_blobs     || 0;
-        const keys   = body.imported_known_keys || 0;
-        const drafts = body.imported_drafts    || 0;
-        const skip   = body.skipped_messages   || 0;
-        showStatus(
-          'Import complete: ' + msgs + ' message(s) imported' +
-          (skip  > 0 ? ', ' + skip  + ' skipped (already present)' : '') +
-          ', ' + blobs + ' blob(s)' +
-          ', ' + keys  + ' known key(s)' +
-          ', ' + drafts + ' draft(s).'
-        );
-      } catch (err) {
-        showError('Import request failed: ' + err.message);
-      }
-
-      setReady();
     });
   });
 }());

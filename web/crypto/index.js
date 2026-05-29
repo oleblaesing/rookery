@@ -106,6 +106,17 @@ export async function readPrivateKey(armoredKey) {
   return openpgp.readPrivateKey({ armoredKey });
 }
 
+/**
+ * publicKeyArmoredFromPrivate(privateKey) → string (armored public key)
+ *
+ * Derives the ASCII-armored public key from an unlocked private key. Used by
+ * the migration flow to register a new account with the same key the archive
+ * was encrypted to, so the import ownership check matches by construction.
+ */
+export function publicKeyArmoredFromPrivate(privateKey) {
+  return privateKey.toPublic().armor();
+}
+
 // --------------------------------------------------------------------------
 // Recovery file
 // --------------------------------------------------------------------------

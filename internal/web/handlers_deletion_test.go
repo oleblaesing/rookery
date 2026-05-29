@@ -16,6 +16,7 @@ import (
 
 	"rookery/internal/auth"
 	"rookery/internal/config"
+	"rookery/internal/domains"
 	"rookery/internal/store"
 	"rookery/internal/web"
 )
@@ -104,9 +105,11 @@ func buildTestRouter(db *pgxpool.Pool, ss *auth.SessionStore, st *store.Store) h
 	r := chi.NewRouter()
 	// Register all routes via the real RegisterRoutes; we rely on the full
 	// route table being present so the CSRF and auth middleware are wired up.
-	// Pass a nil dkim.Manager and nil domains.Manager — deletion endpoints
-	// don't use them.
-	web.RegisterRoutes(r, cfg, db, st, nil, nil)
+	// A nil dkim.Manager is fine (those endpoints aren't exercised here), but
+	// domMgr must be non-nil: handleTLSAsk reads PrimaryDomain() at
+	// registration time, so a nil manager panics RegisterRoutes.
+	domMgr := domains.NewManager(db, cfg.Domain, "")
+	web.RegisterRoutes(r, cfg, db, st, nil, domMgr)
 	return r
 }
 

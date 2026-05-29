@@ -154,6 +154,53 @@ func handleInvitePage(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Confi
 }
 
 // -------------------------------------------------------------------------
+// GET /migrate — logged-out migration/import landing page
+// -------------------------------------------------------------------------
+
+type migratePageData struct {
+	InstanceName string
+	Domain       string
+	CSRFToken    string
+	ArchiveURL   string
+	InviteToken  string
+	User         *userProfile // nil — unauthenticated page; required by base template
+}
+
+// handleMigratePage renders the logged-out migration page. The user supplies
+// their recovery private key + passphrase, an invite token, and a username;
+// the browser fetches and decrypts the archive, then registers an account with
+// the archive's own key and imports the data (see migrate.js). The archive URL
+// and invite token are prefilled from the deep-link in the export notification.
+func handleMigratePage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Already logged in? The migration flow creates a new account, so send
+		// an authenticated user to their inbox instead.
+		if rawToken, ok := auth.TokenFromRequest(r); ok {
+			if _, err := ss.Get(r.Context(), rawToken); err == nil {
+				http.Redirect(w, r, "/inbox", http.StatusSeeOther)
+				return
+			}
+		}
+
+		// The registration POST issued from this page needs an unauthenticated
+		// CSRF token; reuse the existing cookie if present.
+		csrfToken, err := auth.EnsureUnauthCSRFCookie(w, r)
+		if err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		renderTemplate(w, "migrate.gohtml", migratePageData{
+			InstanceName: cfg.InstanceName,
+			Domain:       cfg.Domain,
+			CSRFToken:    csrfToken,
+			ArchiveURL:   r.URL.Query().Get("archive"),
+			InviteToken:  r.URL.Query().Get("invite"),
+		})
+	}
+}
+
+// -------------------------------------------------------------------------
 // GET /settings — account settings page
 // -------------------------------------------------------------------------
 

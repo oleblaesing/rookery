@@ -142,20 +142,9 @@
         <button type="submit" id="export-archive-btn" class="button">export archive</button>
       </div>
       <p id="export-archive-status" class="field-hint" style="display:none"></p>
-    </form>
-
-    <h3>full data import</h3>
-    <form id="import-form" class="narrow-form">
-      <div class="field">
-        <label for="import-url">archive URL</label>
-        <input type="url" id="import-url" name="import_url"
-               placeholder="https://old-instance.example/api/v1/export/…">
-      </div>
-      <div class="form-actions">
-        <button type="submit" id="import-btn" class="button">import</button>
-      </div>
-      <p id="import-status" class="field-hint" style="display:none"></p>
-      <p id="import-error" class="field-hint error" style="display:none"></p>
+      <p class="field-hint">Importing into a new instance is done from that
+      instance's <code>/migrate</code> page, not here — the archive link in the
+      "archive is ready" message opens it.</p>
     </form>
 
   </div>{{/* end tab-datakeys */}}
@@ -248,15 +237,6 @@
   if (hash) {
     var hashTarget = document.querySelector('[aria-controls="' + hash + '"]');
     if (hashTarget) activateTab(hashTarget);
-  }
-
-  // ?migrate=<url> → activate import tab and pre-fill the URL field.
-  var migrateURL = new URLSearchParams(location.search).get('migrate');
-  if (migrateURL) {
-    var importTabBtn = document.querySelector('[aria-controls="tab-datakeys"]');
-    if (importTabBtn) activateTab(importTabBtn);
-    var importURLInput = document.getElementById('import-url');
-    if (importURLInput) importURLInput.value = migrateURL;
   }
 
   // ---- Domain management ----

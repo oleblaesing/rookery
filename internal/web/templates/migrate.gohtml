@@ -1,0 +1,60 @@
+{{define "title"}}migrate to {{.InstanceName}}{{end}}
+
+{{define "scripts"}}
+<script src="{{assetURL "/static/crypto.js"}}" defer></script>
+<script src="{{assetURL "/static/migrate.js"}}" defer></script>
+{{end}}
+
+{{define "content"}}
+<section class="form-page">
+  <h1>migrate</h1>
+  <p class="instance-name">{{.InstanceName}}</p>
+
+  <div class="info-block">
+    <p>Move your mailbox here from another rookery instance. Provide the
+    recovery file and passphrase for your <em>old</em> account, the archive URL
+    from its "your archive is ready" message, and an invite for this instance.</p>
+    <p>A new account is created here with your existing key, and your archive is
+    imported. Your private key never leaves this browser — it only decrypts the
+    archive and proves the account is yours. <strong>If you lose the recovery
+    file, your mail is unrecoverable. There is no reset.</strong></p>
+  </div>
+
+  <p class="error" role="alert" hidden></p>
+
+  <form id="migrate-form">
+    <input type="hidden" name="_csrf" value="{{.CSRFToken}}">
+
+    <label for="invite_token">invite token</label>
+    <input type="text" id="invite_token" name="invite_token" required
+           autocomplete="off" value="{{.InviteToken}}"
+           placeholder="invite token for this instance">
+
+    <label for="local_part">username on this instance</label>
+    <div class="input-suffix-wrap">
+      <input type="text" id="local_part" name="local_part" required
+             pattern="[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]|[a-z0-9]"
+             autocomplete="username" placeholder="alice">
+      <span class="input-suffix">@{{.Domain}}</span>
+    </div>
+
+    <label for="archive_url">archive URL</label>
+    <input type="url" id="archive_url" name="archive_url" required
+           value="{{.ArchiveURL}}"
+           placeholder="https://old-instance.example/api/v1/export/…">
+
+    <label for="recovery_file">recovery file (.asc)</label>
+    <input type="file" id="recovery_file" name="recovery_file" accept=".asc,.txt" required>
+
+    <label for="passphrase">private key passphrase</label>
+    <input type="password" id="passphrase" name="passphrase"
+           autocomplete="current-password" placeholder="passphrase">
+    <p class="field-hint">The passphrase that encrypts your recovery file.
+    Leave blank if you exported without one.</p>
+
+    <div id="migrate-status" class="keygen-status" aria-live="polite"></div>
+
+    <button type="submit" id="migrate-btn">migrate</button>
+  </form>
+</section>
+{{end}}
