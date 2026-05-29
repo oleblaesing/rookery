@@ -51,7 +51,11 @@ What you can do:
   relay rookery is opaque transport — it cannot impersonate users cryptographically,
   only relay what has already been signed. The arrangement is bilateral and configured
   out of band; there is no directory, no federation protocol, no auto-discovery. It is
-  one operator agreeing to carry mail for another.
+  one operator agreeing to carry mail for another. If you want to *be* that upstream
+  for someone, enable the submission listener (`submission_enabled` under `[smtp]`)
+  and issue them a credential with `./rookery relay-client create` — but you inherit
+  their outbound reputation, so do it only for operators you trust. See ADR-0030 and
+  the "Acting as a relay rookery" section of `docs/ops/spam-runbook.md`.
 - Wait. Reputation improves over weeks as your IP establishes a clean sending history.
 
 If reliable delivery to Gmail is a hard requirement from day one, plan to use a

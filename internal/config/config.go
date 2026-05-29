@@ -104,6 +104,28 @@ type SMTPConfig struct {
 	// Smarthost configures routing all outbound mail through an upstream SMTP
 	// submission endpoint instead of direct MX delivery. See ADR-0030.
 	Smarthost SmarthostConfig `toml:"smarthost"`
+
+	// SubmissionEnabled turns this instance into a relay rookery: it starts an
+	// authenticated SMTP submission listener on ports 465/587 and relays mail
+	// from whitelisted downstream operators (rows in relay_clients) to the
+	// internet on their behalf. Off by default. See ADR-0030 §3 and Phase B of
+	// docs/smarthost-plan.md.
+	SubmissionEnabled bool `toml:"submission_enabled"`
+
+	// SubmissionCertsDir is the directory tree Caddy provisions TLS certificates
+	// into, mounted read-only into the rookery container. The submission listener
+	// reuses the cert/key for the instance domain found at
+	// <dir>/<ca>/<domain>/<domain>.{crt,key}. Defaults to "/data/caddy/certificates".
+	// Ignored when SubmissionCertFile/SubmissionKeyFile are set.
+	SubmissionCertsDir string `toml:"submission_certs_dir"`
+
+	// SubmissionCertFile and SubmissionKeyFile are an escape hatch: explicit PEM
+	// paths for the submission listener's TLS certificate, used instead of the
+	// Caddy cert-directory lookup when both are set. Renewal is then the
+	// operator's responsibility. See ADR-0030 ("Rejected: operator-supplied
+	// static cert paths as the primary mechanism").
+	SubmissionCertFile string `toml:"submission_cert_file"`
+	SubmissionKeyFile  string `toml:"submission_key_file"`
 }
 
 // SmarthostConfig configures an outbound smarthost: a trusted upstream SMTP
@@ -245,6 +267,9 @@ func defaults(c *Config, md toml.MetaData) {
 	if !md.IsDefined("smtp", "smarthost", "auth") {
 		c.SMTP.Smarthost.Auth = true
 	}
+	if !md.IsDefined("smtp", "submission_certs_dir") {
+		c.SMTP.SubmissionCertsDir = "/data/caddy/certificates"
+	}
 	if !md.IsDefined("policy", "default_quota_bytes") {
 		c.Policy.DefaultQuotaBytes = 5 * 1024 * 1024 * 1024 // 5 GiB
 	}
@@ -304,8 +329,29 @@ func Load(path string) (*Config, error) {
 	if err := validateSmarthost(&cfg); err != nil {
 		return nil, err
 	}
+	if err := validateSubmission(&cfg); err != nil {
+		return nil, err
+	}
 
 	return &cfg, nil
+}
+
+// validateSubmission checks the relay-rookery submission settings when the
+// listener is enabled. It is a no-op when submission is off.
+func validateSubmission(cfg *Config) error {
+	s := &cfg.SMTP
+	if !s.SubmissionEnabled {
+		return nil
+	}
+	// Explicit cert paths are all-or-nothing: a half-configured pair is a typo,
+	// not a fallback to the Caddy directory.
+	if (s.SubmissionCertFile == "") != (s.SubmissionKeyFile == "") {
+		return fmt.Errorf("config: [smtp] submission_cert_file and submission_key_file must both be set or both be empty")
+	}
+	if s.SubmissionCertFile == "" && s.SubmissionCertsDir == "" {
+		return fmt.Errorf("config: [smtp] submission_certs_dir is required when submission_enabled (or set explicit submission_cert_file/key_file)")
+	}
+	return nil
 }
 
 // validateSmarthost checks the [smtp.smarthost] block for internal consistency

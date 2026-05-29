@@ -201,6 +201,22 @@ outbound_rate_limit_per_domain = 5000
 # auth        = false
 # require_tls = false
 
+# Be a relay rookery: accept authenticated SMTP submissions (ports 465/587) from
+# whitelisted downstream operators and relay their already-signed mail to the
+# internet on their behalf. OFF by default. Only turn this on if you understand
+# that you inherit your downstreams' outbound reputation — relay only for operators
+# you know. Requires the prod profile (Caddy) so a TLS cert exists for your domain.
+# Issue/list/revoke client credentials with: ./rookery relay-client ...
+# See ADR-0030 and docs/ops/spam-runbook.md.
+# submission_enabled = false
+# The submission listener reuses the TLS cert Caddy provisions for your domain,
+# read from the caddy-data volume mounted read-only into the container. Override
+# the directory only if your Caddy layout differs:
+# submission_certs_dir = "/data/caddy/certificates"
+# Escape hatch: explicit PEM paths instead of the Caddy lookup (you own renewal):
+# submission_cert_file = "/etc/rookery/tls/fullchain.pem"
+# submission_key_file  = "/etc/rookery/tls/privkey.pem"
+
 # --------------------------------------------------------------------------- #
 # Per-instance policy
 # --------------------------------------------------------------------------- #
@@ -1211,6 +1227,26 @@ cmd_master_key_rotate() {
 }
 
 # ---------------------------------------------------------------------------
+# relay-client <create|list|revoke>
+#
+# Manages the whitelist of downstream operators allowed to use this instance as
+# a relay rookery (ADR-0030, Phase B). Requires the stack to be running. The
+# actual work (secret generation, bcrypt hashing, DB writes) is done by the
+# `rookery relay-client` binary subcommand inside the container.
+# ---------------------------------------------------------------------------
+cmd_relay_client() {
+    need_init
+    local verb="${1:-}"
+    case "$verb" in
+        create|list|revoke) ;;
+        "") die "usage: rookery relay-client <create [--label \"name\"]|list|revoke <username>>" ;;
+        *)  die "unknown relay-client subcommand '${verb}' — try: create, list, revoke" ;;
+    esac
+    dc exec -T rookery /usr/local/bin/rookery relay-client "$@" \
+        || die "relay-client: command failed — is the stack running? (./rookery start)"
+}
+
+# ---------------------------------------------------------------------------
 # backup [path]
 #
 # Creates an encrypted backup of the instance: postgres database, Caddy TLS
@@ -1679,6 +1715,24 @@ rookery master-key rotate
     ./rookery backup ~/backups/
 EOF
             ;;
+        relay-client) cat >&2 <<'EOF'
+rookery relay-client <create|list|revoke>
+
+  Manage the whitelist of downstream operators allowed to use this instance as
+  a relay rookery (ADR-0030). Requires the stack to be running, and the
+  submission listener enabled (smtp.submission_enabled = true in rookery.toml).
+
+  create [--label "alice's instance"]   Issue a username + secret (shown ONCE)
+                                        and print a ready-to-paste [smtp.smarthost]
+                                        block for the downstream operator.
+  list                                  List clients: username, enabled, rate, label.
+  revoke <username>                     Disable a client (the v1 abuse remedy).
+
+  Relay trust is bilateral and out-of-band — there is no auto-discovery. You
+  inherit your downstreams' outbound reputation, so relay only for operators you
+  know. See docs/ops/spam-runbook.md.
+EOF
+            ;;
         backup) cat >&2 <<'EOF'
 rookery backup [path] [--passphrase-file <file>]
 
@@ -1777,6 +1831,7 @@ Operations:
   user delete <address>                 Hard-delete a user and all their mail
   stats print                           Quick summary of users and queue state
   master-key rotate                     Rotate the server master key
+  relay-client create|list|revoke       Manage relay-rookery downstream clients
   backup [path]                         Create an encrypted backup archive
   restore <archive>                     Restore from a backup archive
   psql                                  psql shell in the postgres container
@@ -1811,6 +1866,7 @@ case "${1:-}" in
     user)        shift; cmd_user        "$@" ;;
     stats)       shift; cmd_stats       "$@" ;;
     master-key)  shift; cmd_master_key  "$@" ;;
+    relay-client) shift; cmd_relay_client "$@" ;;
     backup)      shift; cmd_backup      "$@" ;;
     restore)     shift; cmd_restore     "$@" ;;
     psql)        shift; cmd_psql            ;;

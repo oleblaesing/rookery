@@ -81,6 +81,65 @@ of self-hosted email. PLAN.md §9.1 and §10 document this honestly:
   at zero. Persistence and volume build reputation.
 - Getting upset at PLAN.md for being honest about this.
 
+## Acting as a relay rookery
+
+The flip side of "use a relay rookery" is *being* one: letting another operator
+you trust send their outbound mail through your instance, so it inherits your
+IP's reputation. This is the second half of the smarthost feature (ADR-0030,
+Phase B). It is **off by default** and you should turn it on only with eyes open.
+
+**The honest risk (PLAN §11.10):** when you relay for a downstream, your IP
+carries their mail. If they send spam — deliberately, or because their instance
+was compromised — Gmail and Outlook blame *your* IP, not theirs. Unlike a
+commercial relay you have no abuse team, no KYC, and no lawyers. **Only relay for
+operators you actually know and trust.** Relay trust here is bilateral and
+out-of-band: there is no directory, no auto-discovery, no federation. You hand a
+credential to one person at a time, exactly like any inter-MTA relay agreement.
+
+**Turn it on:**
+
+1. You must be running the prod profile (Caddy), because the submission listener
+   reuses the TLS certificate Caddy provisions for your domain. There is no
+   second ACME client.
+2. Set `submission_enabled = true` under `[smtp]` in `rookery.toml` and restart.
+   This starts authenticated SMTP submission listeners on ports 465 (implicit
+   TLS) and 587 (STARTTLS). AUTH is offered only over TLS; an unauthenticated
+   session can never relay (this is never an open relay).
+
+**Issue and manage downstream credentials** (the stack must be running):
+
+```sh
+# Issue a credential. The secret is printed ONCE and is not recoverable — only a
+# bcrypt hash is stored. The command also prints a ready-to-paste [smtp.smarthost]
+# block for the downstream operator's rookery.toml.
+./rookery relay-client create --label "alice's instance"
+
+# See who has credentials, whether they're enabled, their rate cap, last use.
+./rookery relay-client list
+
+# Disable a client — the only abuse remedy in v1. Takes effect on their next
+# authentication; revoke immediately if a downstream misbehaves.
+./rookery relay-client revoke relay-ab12cd34ef56
+```
+
+Each client has a per-hour rate cap (`rate_per_hour`, default 200); over-limit
+submissions are temp-failed (4xx) so the downstream's own queue retries. Adjust a
+client's cap directly in the `relay_clients` table via `./rookery psql` if needed.
+
+**What you relay is opaque transport.** rookery does **not** re-sign relayed mail
+— the downstream already DKIM-signed it, and that signature is what receivers
+verify. Your instance only forwards the bytes. Relayed mail rides the same
+outbound queue, retry, and bounce machinery as locally-composed mail.
+
+> **v1 limitation:** if onward delivery of a relayed message permanently fails,
+> rookery logs and drops it rather than generating a DSN back to the original
+> sender (it has no local mailbox to deposit one in). The downstream already
+> received a 250 at submission time. Bounce-to-sender for relayed mail is out of
+> scope for v1 (ADR-0030).
+
+The `relay_clients` table and the relayed queue rows live in Postgres, so they
+are captured by `./rookery backup` with no extra steps.
+
 ## Inbound spam that gets through
 
 If spam lands in your inbox (score below reject threshold):

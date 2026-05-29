@@ -118,18 +118,19 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	var queueID, messageID, recipient string
+	var queueID, messageID, recipient, relayClientID, mailFrom, queueBlob string
 	var attempts int
 	var createdAt time.Time
 	err = tx.QueryRow(ctx, `
-		SELECT q.id, q.message_id, q.recipient, q.attempts, q.created_at
+		SELECT q.id, COALESCE(q.message_id::text, ''), q.recipient, q.attempts, q.created_at,
+		       COALESCE(q.relay_client_id::text, ''), COALESCE(q.mail_from, ''), COALESCE(q.blob_sha256, '')
 		FROM   outbound_queue q
 		WHERE  q.status IN ('pending', 'delivering')
 		  AND  q.next_retry_at <= now()
 		ORDER  BY q.next_retry_at
 		LIMIT  1
 		FOR UPDATE SKIP LOCKED
-	`).Scan(&queueID, &messageID, &recipient, &attempts, &createdAt)
+	`).Scan(&queueID, &messageID, &recipient, &attempts, &createdAt, &relayClientID, &mailFrom, &queueBlob)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -148,20 +149,31 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("queue: commit claim: %w", err)
 	}
 
+	// Relayed mail (from a downstream relay client) carries no local messages
+	// row: the envelope sender and the already-signed blob live on the queue row
+	// itself, and it must NOT be DKIM-resigned (opaque transport, ADR-0030).
+	relayed := relayClientID != ""
+
 	// Load message metadata (sender, domain, blob digest).
 	var fromAddress, blobDigest, domain string
-	err = w.db.QueryRow(ctx, `
-		SELECT m.from_address, m.blob_sha256,
-		       COALESCE(d.domain, '')
-		FROM   messages m
-		LEFT JOIN users u ON u.id = m.user_id
-		LEFT JOIN addresses a ON a.id = u.primary_address_id
-		LEFT JOIN domains d ON d.domain = split_part(a.address, '@', 2)
-		WHERE  m.id = $1
-	`, messageID).Scan(&fromAddress, &blobDigest, &domain)
-	if err != nil {
-		w.markFailed(ctx, queueID, messageID, "internal: could not load message")
-		return true, nil
+	if relayed {
+		fromAddress = mailFrom
+		blobDigest = queueBlob
+		domain = w.cfg.Domain // EHLO domain for our onward delivery
+	} else {
+		err = w.db.QueryRow(ctx, `
+			SELECT m.from_address, m.blob_sha256,
+			       COALESCE(d.domain, '')
+			FROM   messages m
+			LEFT JOIN users u ON u.id = m.user_id
+			LEFT JOIN addresses a ON a.id = u.primary_address_id
+			LEFT JOIN domains d ON d.domain = split_part(a.address, '@', 2)
+			WHERE  m.id = $1
+		`, messageID).Scan(&fromAddress, &blobDigest, &domain)
+		if err != nil {
+			w.markFailed(ctx, queueID, messageID, "internal: could not load message")
+			return true, nil
+		}
 	}
 
 	// Read the raw blob.
@@ -188,6 +200,15 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 			slog.Info("queue: locally delivered", "queue_id", queueID)
 			return true, nil
 		}
+	} else if relayed {
+		// Relayed external delivery: opaque transport, no DKIM re-signing. The
+		// downstream already signed; we forward the bytes via direct MX.
+		deliveryErr = w.deliverFn(ctx, domain, fromAddress, recipient, rawMsg)
+		if deliveryErr == nil {
+			w.markDelivered(ctx, queueID)
+			slog.Info("queue: relayed", "queue_id", queueID, "attempts", attempts+1)
+			return true, nil
+		}
 	} else {
 		// External delivery: DKIM-sign then send via smarthost or direct MX.
 		var internalErr error
@@ -211,7 +232,15 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 	exceeded := time.Since(createdAt) >= maxDeliveryAge || attempts >= len(retryDelays)-1
 
 	if isHard || exceeded {
-		w.markBounced(ctx, queueID, messageID, fromAddress, recipient, deliveryErr.Error())
+		if relayed {
+			// No local sender to bounce to. Mark the row and log; the downstream
+			// already received a 250 at submission time (DSN-back-to-sender for
+			// relayed mail is out of scope for v1, see ADR-0030).
+			w.markFailed(ctx, queueID, messageID, truncateErr(deliveryErr.Error()))
+			slog.Warn("queue: relayed delivery permanently failed", "queue_id", queueID, "recipient", recipient, "err", deliveryErr)
+		} else {
+			w.markBounced(ctx, queueID, messageID, fromAddress, recipient, deliveryErr.Error())
+		}
 		return true, nil
 	}
 

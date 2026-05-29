@@ -136,3 +136,63 @@ func TestSmarthostValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestSubmissionDefaults(t *testing.T) {
+	setBaseSecrets(t)
+	cfg, err := Load(writeConfig(t, `domain = "rookery.example"`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SMTP.SubmissionEnabled {
+		t.Error("submission should be disabled by default")
+	}
+	if cfg.SMTP.SubmissionCertsDir != "/data/caddy/certificates" {
+		t.Errorf("default certs dir = %q", cfg.SMTP.SubmissionCertsDir)
+	}
+}
+
+func TestSubmissionValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{
+			name:    "enabled with default certs dir is ok",
+			body:    "domain = \"rookery.example\"\n[smtp]\nsubmission_enabled = true\n",
+			wantErr: false,
+		},
+		{
+			name:    "enabled with explicit cert pair is ok",
+			body:    "domain = \"rookery.example\"\n[smtp]\nsubmission_enabled = true\nsubmission_cert_file = \"/c.pem\"\nsubmission_key_file = \"/k.pem\"\n",
+			wantErr: false,
+		},
+		{
+			name:    "half cert pair is an error",
+			body:    "domain = \"rookery.example\"\n[smtp]\nsubmission_enabled = true\nsubmission_cert_file = \"/c.pem\"\n",
+			wantErr: true,
+		},
+		{
+			name:    "empty certs dir with no explicit pair is an error",
+			body:    "domain = \"rookery.example\"\n[smtp]\nsubmission_enabled = true\nsubmission_certs_dir = \"\"\n",
+			wantErr: true,
+		},
+		{
+			name:    "disabled ignores cert config",
+			body:    "domain = \"rookery.example\"\n[smtp]\nsubmission_enabled = false\nsubmission_certs_dir = \"\"\n",
+			wantErr: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseSecrets(t)
+			_, err := Load(writeConfig(t, tc.body))
+			if tc.wantErr && err == nil {
+				t.Error("expected validation error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}

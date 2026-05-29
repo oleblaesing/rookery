@@ -5,12 +5,14 @@
 //	rookery healthcheck                        — probe the local /healthz endpoint (container use)
 //	rookery delete-user <address>              — permanently delete a user account
 //	rookery rotate-master-key ...              — re-encrypt DKIM keys under a new master key
+//	rookery relay-client <create|list|revoke>  — manage relay-rookery client credentials
 package main
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,12 +22,14 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt"
 
 	"rookery/internal/config"
 	"rookery/internal/dkim"
@@ -56,6 +60,8 @@ func main() {
 		os.Exit(runDeleteUser(os.Args[2]))
 	case "rotate-master-key":
 		os.Exit(runRotateMasterKey(os.Args[2:]))
+	case "relay-client":
+		os.Exit(runRelayClient(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "rookery: unknown subcommand %q\n\n", os.Args[1])
 		printHelp()
@@ -83,6 +89,11 @@ Usage:
       Re-encrypt all DKIM private keys from the old master key to a new one.
       The rookery dispatcher (./rookery master-key rotate) generates the new
       key and invokes this subcommand; do not call it directly.
+
+  rookery relay-client <create|list|revoke> ...
+      Manage downstream relay-client credentials for the relay-rookery
+      submission listener (ADR-0030). The rookery dispatcher
+      (./rookery relay-client ...) is the operator-facing interface.
 
 `)
 }
@@ -170,7 +181,7 @@ func runServer() int {
 
 	smtpServer := smtp.NewServer(cfg, st.DB, st, nil)
 
-	serverErr := make(chan error, 2)
+	serverErr := make(chan error, 3)
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -182,6 +193,23 @@ func runServer() int {
 			serverErr <- fmt.Errorf("smtp: %w", err)
 		}
 	}()
+
+	// Relay-rookery submission listener (ports 465/587), opt-in. Reuses the TLS
+	// certificate Caddy provisions for the instance domain (ADR-0030 §3/§4).
+	if cfg.SMTP.SubmissionEnabled {
+		tlsCfg, err := smtp.LoadSubmissionTLS(cfg.SMTP.SubmissionCertsDir, cfg.Domain,
+			cfg.SMTP.SubmissionCertFile, cfg.SMTP.SubmissionKeyFile)
+		if err != nil {
+			slog.Error("submission: TLS setup failed; listener not started", "err", err)
+			return 1
+		}
+		submissionServer := smtp.NewSubmissionServer(cfg, st.DB, st, tlsCfg)
+		go func() {
+			if err := submissionServer.ListenAndServe(ctx); err != nil {
+				serverErr <- fmt.Errorf("submission: %w", err)
+			}
+		}()
+	}
 	go qWorker.Run(ctx)
 	go runHourlyWorker(ctx, "mta-sts-upgrade", func(ctx context.Context) error {
 		return domMgr.UpgradeMTASTSModes(ctx)
@@ -339,6 +367,179 @@ func runRotateMasterKey(args []string) int {
 
 	fmt.Printf("rotate-master-key: re-encrypted %d DKIM key(s) successfully\n", n)
 	return 0
+}
+
+// -------------------------------------------------------------------------
+// relay-client
+// -------------------------------------------------------------------------
+
+// runRelayClient implements `rookery relay-client {create,list,revoke}` — the
+// lifecycle for downstream relay-client credentials (ADR-0030 §3, Phase B).
+// The rookery dispatcher (./rookery relay-client ...) execs this in the running
+// container; it is not intended for direct invocation.
+func runRelayClient(args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: rookery relay-client <create|list|revoke> ...")
+		return 1
+	}
+
+	cfg, err := loadConfigForCLI()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relay-client: %v\n", err)
+		return 1
+	}
+
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, cfg.DBUrl())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relay-client: connect: %v\n", err)
+		return 1
+	}
+	defer pool.Close()
+
+	switch args[0] {
+	case "create":
+		return relayClientCreate(ctx, pool, cfg, args[1:])
+	case "list":
+		return relayClientList(ctx, pool)
+	case "revoke":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: rookery relay-client revoke <username>")
+			return 1
+		}
+		return relayClientRevoke(ctx, pool, args[1])
+	default:
+		fmt.Fprintf(os.Stderr, "relay-client: unknown subcommand %q\n", args[0])
+		return 1
+	}
+}
+
+func relayClientCreate(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, args []string) int {
+	var label string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--label" && i+1 < len(args):
+			label = args[i+1]
+			i++
+		case len(args[i]) > 8 && args[i][:8] == "--label=":
+			label = args[i][8:]
+		}
+	}
+
+	username := "relay-" + randHex(6)
+	secret := randHex(24)
+	hash, err := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.DefaultCost)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relay-client: hash secret: %v\n", err)
+		return 1
+	}
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO relay_clients (username, secret_hash, label)
+		VALUES ($1, $2, $3)
+	`, username, string(hash), label)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relay-client: insert: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf(`Relay client created.
+
+  username: %s
+  secret:   %s
+  label:    %q
+
+This secret is shown ONCE and is not recoverable — only its hash is stored.
+Hand the username + secret to the downstream operator out of band, along with
+the config block below for their rookery.toml:
+
+[smtp.smarthost]
+enabled     = true
+host        = %q
+port        = 587
+username    = %q
+require_tls = true
+auth        = true
+
+And in their .env:
+
+  ROOKERY_SMTP_RELAY_PASSWORD=%s
+
+Revoke any time with: rookery relay-client revoke %s
+`, username, secret, label, cfg.Domain, username, secret, username)
+	return 0
+}
+
+func relayClientList(ctx context.Context, pool *pgxpool.Pool) int {
+	rows, err := pool.Query(ctx, `
+		SELECT username, label, enabled, rate_per_hour, created_at, last_used_at
+		FROM   relay_clients
+		ORDER  BY created_at
+	`)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relay-client: query: %v\n", err)
+		return 1
+	}
+	defer rows.Close()
+
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "USERNAME\tENABLED\tRATE/H\tLABEL\tCREATED\tLAST USED")
+	for rows.Next() {
+		var username, label string
+		var enabled bool
+		var ratePerHour int
+		var createdAt time.Time
+		var lastUsed *time.Time
+		if err := rows.Scan(&username, &label, &enabled, &ratePerHour, &createdAt, &lastUsed); err != nil {
+			fmt.Fprintf(os.Stderr, "relay-client: scan: %v\n", err)
+			return 1
+		}
+		last := "never"
+		if lastUsed != nil {
+			last = lastUsed.Format("2006-01-02 15:04")
+		}
+		fmt.Fprintf(tw, "%s\t%t\t%d\t%s\t%s\t%s\n",
+			username, enabled, ratePerHour, label, createdAt.Format("2006-01-02"), last)
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "relay-client: rows: %v\n", err)
+		return 1
+	}
+	tw.Flush()
+	return 0
+}
+
+func relayClientRevoke(ctx context.Context, pool *pgxpool.Pool, username string) int {
+	tag, err := pool.Exec(ctx,
+		`UPDATE relay_clients SET enabled = FALSE WHERE username = $1`, username)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "relay-client: revoke: %v\n", err)
+		return 1
+	}
+	if tag.RowsAffected() == 0 {
+		fmt.Fprintf(os.Stderr, "relay-client: no client named %q\n", username)
+		return 1
+	}
+	fmt.Printf("relay-client: revoked %s (existing sessions are unaffected until they re-authenticate)\n", username)
+	return 0
+}
+
+func randHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // crypto/rand failure is unrecoverable
+	}
+	return hex.EncodeToString(b)
+}
+
+// loadConfigForCLI loads the instance config the same way the server does,
+// honoring ROOKERY_CONFIG. Used by CLI subcommands that need the DB URL/domain.
+func loadConfigForCLI() (*config.Config, error) {
+	cfgPath := os.Getenv("ROOKERY_CONFIG")
+	if cfgPath == "" {
+		cfgPath = "/etc/rookery/rookery.toml"
+	}
+	return config.Load(cfgPath)
 }
 
 // -------------------------------------------------------------------------

@@ -65,6 +65,8 @@ services:
     ports:
       - "8080:8080"           # HTTP. In production Caddy proxies this; in dev hit it directly.
       - "25:25"               # SMTP inbound MX
+      - "465:465"             # SMTP submission (implicit TLS) — relay rookery, active only when submission_enabled
+      - "587:587"             # SMTP submission (STARTTLS)     — relay rookery, active only when submission_enabled
     volumes:
       # rookery.toml must exist on the host before the stack starts.
       # Edit it on the host; changes require a server restart.
@@ -74,6 +76,13 @@ services:
       # Export archives live at ./data/messages/exports/ (a subdirectory) so they
       # inherit this mount and need no separate bind mount or host-side setup.
       - ./data/messages:/var/lib/rookery/messages
+      # Read-only access to Caddy's TLS certificates so the relay-rookery
+      # submission listener can reuse the cert Caddy provisions for the instance
+      # domain instead of running a second ACME client (ADR-0030 §4). Mounted at
+      # the same path Caddy uses (/data) so the cert layout matches:
+      # /data/caddy/certificates/<ca>/<domain>/<domain>.{crt,key}. Inert unless
+      # smtp.submission_enabled is set; empty in dev (no Caddy).
+      - caddy-data:/data:ro
     env_file: ./.env
     # Healthcheck is implemented as a `rookery healthcheck` subcommand
     # (see cmd/rookery/main.go) because the distroless runtime image
