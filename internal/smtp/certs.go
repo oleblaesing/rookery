@@ -50,8 +50,8 @@ func resolveCertPaths(certsDir, host, certFile, keyFile string) (cert, key strin
 	}
 	if len(matches) == 0 {
 		return "", "", fmt.Errorf("submission TLS: no readable certificate for %q under %s (looked for %s). "+
-			"Either Caddy has not issued one yet, or — more likely — rookery runs as a non-root user and cannot read Caddy's root-owned 0600 certs. "+
-			"See docs/ops/spam-runbook.md, \"Acting as a relay rookery\", for the CADDY_UID/CADDY_GID fix",
+			"Caddy has likely not issued one yet — confirm the prod profile is running and that Caddy has provisioned a cert for this host. "+
+			"See docs/ops/spam-runbook.md, \"Acting as a relay rookery\"",
 			host, certsDir, pattern)
 	}
 	cert = matches[0]

@@ -40,12 +40,6 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} \
     -o /out/rookery \
     ./cmd/rookery/
 
-# Stage an empty message_dir so the final image carries /var/lib/rookery/messages.
-# Docker copies this directory's ownership onto a fresh `messages-data` named
-# volume when it is first mounted; without it the volume would be created
-# root-owned and the nonroot (65532) container could not write blobs there.
-RUN mkdir -p /out/messages
-
 # --------------------------------------------------------------------------- #
 # Stage 2: JS build
 # --------------------------------------------------------------------------- #
@@ -76,15 +70,16 @@ RUN node_modules/.bin/esbuild \
 # --------------------------------------------------------------------------- #
 # Stage 3: Final distroless image
 # --------------------------------------------------------------------------- #
-FROM gcr.io/distroless/static-debian12:nonroot AS final
+# Runs as root (uid 0), like the postgres/redis/rspamd/caddy containers. This
+# keeps the runtime free of any UID/GID plumbing: root writes to the root-owned
+# messages-data volume and reads Caddy's root-owned TLS certs (for the relay
+# submission listener) without a single chown. The image is distroless — no
+# shell, no package manager, just the static binary — so the attack surface
+# stays minimal despite running as root inside the (namespaced) container.
+FROM gcr.io/distroless/static-debian12 AS final
 
 # Binary
 COPY --from=go-build /out/rookery /usr/local/bin/rookery
-
-# Message blob directory, owned by the distroless nonroot UID (65532). A fresh
-# `messages-data` volume mounted here inherits this ownership, so the nonroot
-# process can create blobs and the exports/ subdirectory without any chown.
-COPY --from=go-build --chown=65532:65532 /out/messages /var/lib/rookery/messages
 
 # Hand-written static assets (no build step needed — copy the whole directory)
 COPY web/static/ /opt/rookery/web/static/
