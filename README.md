@@ -1,313 +1,109 @@
 # rookery
 
-A PGP-first, self-hostable email server. SMTP + web client in one container.
+A PGP-first, self-hostable email server that comes with a web mail client and modern standards out-of-the-box.
 
-In *A Song of Ice and Fire*, a rookery is the room where the maester keeps the ravens
-that carry sealed messages between holdfasts. Each instance of this project is one
-operator's rookery. Some rookeries — the older, larger ones, whose ravens are trained
-to fly to distant lands — also carry messages on behalf of smaller holdfasts whose own
-ravens cannot make the journey; in this project, an instance playing that role is
-called a *relay rookery* (see [PLAN.md](PLAN.md) §11.10).
+*In A Song of Ice and Fire, a rookery is a place where the maester keeps the ravens that carry messages between other holdfasts' rookeries.*
 
----
+## Disclaimer
 
-## What this is
+This project was bootstrapped via vibe coding. I used it to learn alot about the email standard and related technology.
+However, I find it too valuable to just be a learning project. Now I'm cleaning it up to get in control again and to proof its secureness.
 
-- A mail server (inbound + outbound SMTP) that speaks standard email to the rest of the world.
-- A server-rendered web UI where PGP encryption and decryption happen in the browser.
-- One binary, one config file, one rebuild command. The traditional self-hosted mail stack — Postfix, Dovecot, Roundcube, rspamd, certbot, a PGP plugin, the WKD/MTA-STS/DKIM glue — collapses into one Go process and one compose stack. You do not need to learn `main.cf`, Dovecot's config syntax, or `opendkim.conf`. rspamd and Redis start alongside rookery automatically and require no configuration; ClamAV virus scanning is opt-in. Upgrading is `rookery update && sudo systemctl restart rookery` — the Containerfile is the build, so the source tree you pull *is* the upgrade. First-run on a fresh VPS takes under 30 minutes of active configuration time, but that is a side effect of the architecture, not the point of it.
-- Invite-only by default; pseudonymous by design; no name, no phone, no recovery email required.
+## Why is it valueable?
 
-**The server never holds your PGP private key.** It is generated in the browser
-during signup. Immediately after registration you are taken to settings where you
-set a passphrase and export the recovery file — the only durable copy of your key.
-Every login on every device — including the same browser you signed up in — requires
-the recovery file alongside your passphrase. Nothing is persisted between sessions.
-Losing the recovery file or the passphrase means losing your mail; there is no reset,
-and the server cannot help you.
+If you are a privacy minded person like me, you got only a few options when it comes to email with some ease of use: ProtonMail, Tuta etc.
 
-See [PLAN.md](PLAN.md) for the full design document.
+Rather than becoming a new competitor to those, I want to give the power of the decentralized email standard back into the users hand.
 
----
+Everyone with a bit of self-hosting/Linux knowledge, can setup their instances for themselves and their friends/family/business.
 
-## Warning: deliverability
+### The problem: knowledge and spammers
 
-**Outbound mail from a fresh IP to Gmail and Outlook will likely land in spam for weeks
-or months, regardless of how well-configured your DKIM/SPF/DMARC is.** This is an
-IP-reputation problem that affects every new self-hosted mail server. It is not a bug
-in rookery; it is a consequence of how large mail providers protect their users from
-spam.
+No one holds you back spinning up your own mail server today. But it is rough. To be able to get PGP encryption up and running as well as all other modern email standards you need a lot of knowledge in that domain
+and you must be willing to spin up and maintain a stack a few tools for the next years. rookery bundles all of them or better said, what they would do.
 
-What you can do:
-- Warm the IP gradually (send small volumes to trusted addresses first).
-- Use a transactional email relay (AWS SES, Postmark, Mailgun) as a smarthost. This is
-  a first-class configuration option: set the `[smtp.smarthost]` block in `rookery.toml`
-  and the `ROOKERY_SMTP_RELAY_PASSWORD` secret in `.env`, then restart. See ADR-0030.
-- Arrange to send outbound through a **relay rookery** — another rookery instance
-  whose IP already has a delivery history, acting as your upstream. Same
-  configuration, same `[smtp.smarthost]` block, same wire shape (SMTP submission); the
-  smarthost just happens to be another rookery rather than a commercial provider.
-  rookery signs the user's domain DKIM key *before* handing the message off, so the
-  relay rookery is opaque transport — it cannot impersonate users cryptographically,
-  only relay what has already been signed. The arrangement is bilateral and configured
-  out of band; there is no directory, no federation protocol, no auto-discovery. It is
-  one operator agreeing to carry mail for another. If you want to *be* that upstream
-  for someone, enable the submission listener (`submission_enabled` under `[smtp]`)
-  and issue them a credential with `./rookery relay-client create` — but you inherit
-  their outbound reputation, so do it only for operators you trust. See ADR-0030 and
-  the "Acting as a relay rookery" section of `docs/ops/spam-runbook.md`.
-- Wait. Reputation improves over weeks as your IP establishes a clean sending history.
+But the second problem with self-hosted email stays: spammers. The large email servers (Gmail, Yahoo etc.) won't trust you.
 
-If reliable delivery to Gmail is a hard requirement from day one, plan to use a
-smarthost from the start — commercial relay or relay rookery, either fits the same
-configuration slot.
+Thats where the concept of smarthosts comes into play. rookery is able to use commercial smarthosts to deliver/receive your mail,
+but it can also act as such. So the idea is to grow a network of rookeries that act as smarthosts for new instances then, to overcome that problem.
+Over time, your instance' IP will warm up and other mail servers will trust you.
 
-> A note on the relay-rookery option: this is genuinely useful, not a magic network
-> effect. In early days there will be one or a small handful of relay rookeries; their
-> operators will absorb most of the load and most of the abuse exposure (a relay
-> rookery's IP gets dirty if its downstream's users send spam, exactly as a commercial
-> smarthost's would). Acting as a relay rookery for instances whose operators you do
-> not know is unwise. The mechanism creates an option for new operators, not a
-> self-balancing network — see PLAN.md §11.10 for the honest framing.
+#### But how do I prevent spammers from using my rookery for their stuff?
 
----
+Everything is invite only. In order to get an account, the operator of the instance needs to create an invitation token/link first.
+An operator is able to suspend accounts anytime. The scale of rookery instances is small (friends/family/businesses). They are not huge mail providers like Gmail or Proton.
 
-## Quick start (operator)
+## So it's using PGP for encryption, right? How can I trust it?
 
-**Prerequisites:** a VPS with a public IPv4 (and ideally IPv6), a domain you control,
-and Docker installed (with the Compose v2 plugin). Port 25 must not be blocked by
-the VPS provider.
+Every use is in control of their private keys, it never touches the server. The flow looks like this:
 
-Docker is the only supported runtime; rootless Podman was evaluated and rejected
-(privileged-port binding, image-format and short-name quirks). See the header of
-`compose.yaml` for the full rationale.
+1. User receives invite link
+2. Users signs up (only thing required is an account name)
+3. Browser generates key pair, stores private key in localStorage
+4. User exports their private key and encrypts it with a passphrase (thats already 2FA!)
+5. User logs out, browser storage gets cleared
+6. In order to log in again, you need the exported key and the passphrase to decrypt it (no passphrase stored on the server either!)
 
-Everything goes through the `rookery` dispatcher script at the repo root.
-It wraps `docker compose`, generates secrets and config files, installs the
-systemd unit, and exposes every operator action as a subcommand. Run
-`./rookery help` for the full list.
+That has of course one downside: lose your key/passphrase and no one can help you.
+
+## Other features
+
+- Bring your own custom domain! Every rookery instance will give you instructions on how to set them up
+- Very few dependencies to prevent supply chain attacks.
+  - While the server/Go uses some, the client/JS only bundles one: OpenPGP.js - https://openpgpjs.org/
+
+## Cool, I'm sold. What do I need?
+
+The idea is to make things very easy for operators, some self-hosting/Linux knowledge will carry you already.
+
+- Buy a domain
+- Rent a small VPS, 5€ is enough (or host at home)
+- Install Docker on it (tried with Podman, but we need Ports like 25, 80, 443 etc. Easier with Docker)
+
+### My VPS Provider blocks port 25!
+
+Most do. But most of the time it's as easy as requesting unblocking it. In my case (Hetzner) the ticket was even resolved automatically.
+
+### Set it up
+
+And now it becomes very easy, as rookery built in `rookery` CLI carries you:
 
 ```sh
-# 1. Clone the repo into /opt/rookery on the VPS.
-#    The systemd unit hard-codes this path (WorkingDirectory=/opt/rookery),
-#    so cloning elsewhere means editing the unit or running rookery from a
-#    non-standard location. Take the standard path.
 sudo mkdir -p /opt/rookery
 sudo chown "$USER" /opt/rookery
-git clone <repo-url> /opt/rookery
+git clone https://github.com/oleblaesing/rookery.git /opt/rookery
 cd /opt/rookery
 
-# 2. Bootstrap. User-local: writes .env (random secrets), rookery.toml
-#    (from the example, with the flags pre-filled), Caddyfile, and a staged
-#    ./rookery.service. No sudo. Idempotent — safe to re-run.
 ./rookery init \
-    --domain rookery.example \
-    --email admin@rookery.example \
-    --name "My Rookery"
-#    Or with no flags to be prompted interactively.
+    --domain my-rookery.example.com \
+    --email mail-for-lets-encrypt@gmail.com \
+    --name "My rookery Instance" \
+    --clamav # Optional, if you want to scan your emails (not working for encrypted ones of course)
 
-# 3. Install the systemd unit. Copies ./rookery.service to
-#    /etc/systemd/system/ and runs `systemctl daemon-reload`. Run once per
-#    host. Does NOT enable or start.
+# This will create some config files etc. with generated passwords etc.
+# It will also create a systemd unit file with /opt/rookery being hardcoded - be aware!
+# The next command will copy the unit file to the systemd directory and reload the units.
+
 sudo ./rookery install
-
-# 4. Enable and start the service. Standard systemd from here.
 sudo systemctl enable --now rookery
-#    Spam filtering (rspamd + Redis) starts as part of the stack automatically
-#    and requires no configuration.
-#    ClamAV virus scanning is opt-in: ./rookery init --clamav (see docs/ops/deployment.md).
 
-# 5. Make an initial encrypted backup.
-./rookery backup ~/backups/
-#    The archive contains .env, the database, and all message blobs.
-#    Losing ROOKERY_MASTER_KEY bricks DKIM keys — back up before you need it.
-#    See "Backups" below for cron automation and the full backup model.
+# That's it! rookery is now running. Now check the DNS records you need in order to make it operate properly
 
-# 6. Check your DNS records.
 ./rookery check-dns
-#    Or read the values the server logged at startup:
-./rookery logs | grep DNS
 
-# 7. Publish the DNS records at your registrar and wait for propagation.
+# Now you can create an invite link for yourself:
 
-# 8. Create the first invite (for yourself).
 ./rookery invite create
-
-# 9. Visit the printed URL in your browser and complete the signup flow.
 ```
 
-Upgrading later:
+Upgrading it later:
 
 ```sh
 cd /opt/rookery
-./rookery update                # git pull --ff-only && docker compose build
+./rookery backup . # Will ask you for a password. You can restore the encrypted back on any instance via ./rookery restore backup.tar.gz.enc
+./rookery update
 sudo systemctl restart rookery
 ```
-
----
-
-## Running as a system service
-
-If you ran `./rookery init` and `sudo ./rookery install` per the quickstart,
-the systemd unit is already in place and you can `systemctl enable --now
-rookery`. The dispatcher generates the unit from a template, fills `User=`
-from `--user` (default: `whoami`), and the `install` subcommand handles the
-single sudo step (copy to `/etc/systemd/system/`, run `daemon-reload`).
-
-If you skipped the quickstart:
-
-```sh
-./rookery init           # generates ./rookery.service from your config
-sudo ./rookery install   # copies it to /etc/systemd/system/ + daemon-reload
-sudo systemctl enable --now rookery
-```
-
-The unit's `ExecStart` is `rookery start --prod`, so it brings up Caddy on
-80/443, rookery on 8080 behind it, and SMTP on 25.
-
-To enable ClamAV: `./rookery init --clamav && sudo ./rookery install && sudo systemctl restart rookery`.
-`--clamav` regenerates `./rookery.service` with the ClamAV compose profile; `install`
-pushes it to systemd. Never edit `/etc/systemd/system/rookery.service` directly —
-`rookery install` overwrites it.
-
-Logs: `sudo journalctl -u rookery -f` (systemd) or `./rookery logs` (container
-stdout).
-
----
-
-## Backups
-
-The backup model is simple: remember one passphrase, store one file somewhere
-you trust. Backups contain everything the instance needs to run on a fresh
-machine — Postgres data, Caddy TLS certificates, config files, and the raw
-message blob tree. The single secret required to decrypt a backup is the
-passphrase you choose when creating it; keep it somewhere safe and separate
-from the backup file itself.
-
-```sh
-# Write a timestamped archive to ~/backups/.
-./rookery backup ~/backups/
-
-# Stream the archive over SSH to a remote host.
-./rookery backup | ssh backup-host "cat > /backups/rookery-$(date +%F).enc"
-
-# Automate with cron using a passphrase file.
-# NOTE: the passphrase file reduces protection against a server-compromise
-# attacker who can read the filesystem (they can decrypt the backup too).
-# It still protects offsite backup copies from a storage-provider attacker.
-./rookery backup --passphrase-file /etc/rookery/backup.key ~/backups/
-```
-
-Example crontab for nightly backups:
-
-```cron
-0 3 * * * cd /opt/rookery && ./rookery backup --passphrase-file /etc/rookery/backup.key /srv/backups/
-```
-
-**To restore on a fresh machine:**
-
-```sh
-git clone <repo-url> /opt/rookery
-cd /opt/rookery
-./rookery restore /path/to/rookery-backup-20260526-030000.tar.gz.enc
-# Answer the passphrase prompt, wait for postgres to restore, then:
-sudo ./rookery install
-sudo systemctl enable --now rookery
-```
-
-**What is NOT in the backup:**
-
-- **User PGP private keys.** The server has never held them — by design (see
-  [PLAN.md §11.1](PLAN.md)). A complete per-user backup is *the server backup
-  plus that user's own recovery file*. Users should export and safeguard their
-  recovery file from the Settings page.
-- **rspamd spam-filter training data.** After a restore the spam filter
-  relearns from traffic over a few weeks. This is a deliberate trade-off for
-  archive simplicity — rspamd's training data is a cache, not user data.
-
----
-
-## Moving between instances (per-user export / import)
-
-Each user can export their entire mailbox as a PGP-encrypted archive and import it
-on another instance. The server never decrypts the archive — it is encrypted to
-your own public key and decrypted in the browser using the private key you already
-hold in your session.
-
-### Export
-
-1. Log into instance A.
-2. Go to **Settings → data & keys → full data archive**, click **export archive**.
-3. The server assembles the archive in the background and sends a message to your
-   inbox when ready (within seconds to minutes depending on mailbox size). Check
-   your inbox.
-4. The inbox message contains two links: a direct download link and a migration
-   deep-link.
-
-### Import on instance B
-
-**Using the migration deep-link (easiest):**
-
-1. Open the deep-link from the inbox message on instance A.
-2. Replace `instance-a.example` at the start of the URL with `instance-b.example`.
-3. Open the modified URL while logged into instance B.
-4. The settings page opens the import tab with the URL pre-filled — click **import**.
-5. Your browser fetches the encrypted archive from instance A, decrypts it with your
-   private key, and sends the plaintext to instance B for ingestion.
-
-**Using the CLI (large archives, or if streaming import is slow):**
-
-```sh
-# Download and decrypt the archive locally:
-curl -L https://instance-a.example/export/<token> \
-  | gpg -d > rookery-archive.tar
-
-# Inspect the contents:
-tar tf rookery-archive.tar
-
-# Import into instance B:
-tar -O -xf rookery-archive.tar \
-  | curl -X POST \
-         --data-binary @- \
-         -H "Content-Type: application/octet-stream" \
-         -H "X-CSRF-Token: <your-csrf-token>" \
-         https://instance-b.example/api/v1/users/me/import
-```
-
-The CSRF token is in the `rookery_csrf` cookie (not HttpOnly — read it with JavaScript or
-`document.cookie` in the browser console).
-
-### What moves and what doesn't
-
-**Moves:** messages (all folders), message attachments metadata, your known-keys cache,
-drafts, and your active public key (for reference in the manifest).
-
-**Does NOT move:** email addresses, custom domains (re-establish these on instance B
-through the normal flows), DKIM keys, sessions, invites, or any other user's data.
-
-Message headers keep their original sender/recipient addresses verbatim.
-
-### Archive format
-
-The archive is a standard tar file, PGP-encrypted to your public key:
-
-```
-manifest.json            — provenance, counts, addresses/domains list
-public_key.asc           — your exported public key
-known_keys.json          — correspondent key cache
-drafts.json              — unsent drafts
-messages.json            — all message metadata
-message_attachments.json — attachment metadata
-blobs/<sha256>.eml       — raw RFC 5322 message files (content-addressed)
-```
-
-To decrypt and inspect manually:
-
-```sh
-gpg -d rookery-archive-<fingerprint8>.tar.gpg | tar x
-```
-
----
 
 ## Local development
 
@@ -315,95 +111,11 @@ Everything runs through the `rookery` dispatcher. No Makefile, no host-side
 toolchain required beyond Docker (with the Compose v2 plugin).
 
 ```sh
-# First run only: bootstrap secrets and rookery.toml.
-# Accept the example defaults or pass --domain / --email / --name to skip
-# the prompts. Generates ./rookery.service and Caddyfile too — both inert in
-# dev, both gitignored.
-./rookery init
-
-# Start the dev stack (rookery + postgres + mailpit SMTP sink).
-# Web UI at http://localhost:8080. Mailpit UI at http://localhost:8025.
+./rookery init \
+    --domain localhost \
+    --email you@localhost \
+    --name "My rookery Dev Box"
 ./rookery start
-# (./rookery stop / ./rookery restart as needed.)
-
-# Inject a message into the dev stack's inbound SMTP.
-./rookery send-mail alice@localhost
-
-# Generate an invite URL.
 ./rookery invite create
-
-# Run the Go test suite inside a container.
-./rookery test
-
-# Run go vet.
-./rookery vet
-
-# Drop into a psql shell.
-./rookery psql
-
-# Pull upstream changes and rebuild (does not restart).
-./rookery update
-./rookery restart
-
-# Operator: user management.
-./rookery user suspend alice@localhost
-./rookery user unsuspend alice@localhost
-./rookery user delete alice@localhost
-
-# Operator: quick stats (active users, messages last 24h, queue depth).
-./rookery stats print
-
-# Operator: rotate the master key (re-encrypts DKIM keys; restart after).
-./rookery master-key rotate
-
-# Escape hatches if you need raw docker compose:
-./rookery exec rspamd rspamc stat
-./rookery compose ps
+./rookery send-mail --encrypted --fetch-key you@localhost
 ```
-
-The JS crypto module is bundled inside the container build.
-
----
-
-## Repository layout
-
-```
-cmd/rookery-server/     Main binary: HTTP + SMTP + background workers
-internal/
-  smtp/                 Inbound + outbound SMTP
-  web/                  HTTP handlers, html/template rendering
-    templates/          *.gohtml files
-  keydir/               Local key directory, WKD publishing, auto-attach
-  discovery/            Remote key discovery (WKD, keyservers)
-  store/                DB + blob storage
-  auth/                 User auth, sessions, 2FA
-  queue/                Outbound mail queue
-  domains/              Custom-domain registration, DNS verification
-  acme/                 Per-domain ACME (Let's Encrypt)
-  addresses/            Address routing, aliases, plus-addressing
-  lifecycle/            Account deletion, backup, export/import
-  config/               Config file + env var loading
-web/
-  static/               Hand-written CSS, partials.js, vendored crypto assets
-  partials/             Source for partials.js (hand-written, no build step)
-  crypto/               Source for the JS crypto module (bundled by esbuild)
-docs/
-  adr/                  Architecture decision records
-  api/                  HTTP API documentation
-  ops/                  Operator docs
-    deployment.md       Full setup walkthrough (VPS → first invite)
-    dns.md              Every required DNS record explained
-    troubleshooting.md  Common failure modes and how to fix them
-    spam-runbook.md     Spam filtering: what rookery does, what it can't, tuning
-    custom-domains.md   Custom domain setup (user self-serve flow)
-    runbook.md          Dispatcher subcommand reference + common psql queries
-rspamd/
-  local.d/              rspamd drop-in config (redis.conf, antivirus.conf)
-rookery                 Operator + developer dispatcher (single POSIX shell script)
-compose.yaml            Service definitions consumed by the dispatcher
-Containerfile           The build (multi-stage; also a valid Dockerfile)
-PLAN.md                 Full design document
-LICENSE                 AGPLv3
-```
-
-
