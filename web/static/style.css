@@ -622,6 +622,7 @@ details > .info-block { margin-top: 0.5rem; }
   color: #c9bfa8; /* slightly warmer/dimmer than headings — reading comfort */
   margin: 0;
   background: none;
+  border: none; /* override the base <pre> border; body is flush with the rest */
   padding: 0;
 }
 

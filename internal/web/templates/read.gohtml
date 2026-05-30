@@ -36,15 +36,15 @@
       </span>
       {{- else if eq .Message.SecurityState "pgp_signed_plaintext"}}
       <span class="badge badge-signed" id="security-badge">
-        ✓ PGP signed plaintext — verifying signature…
+        🖋️ PGP signed plaintext — verifying signature…
       </span>
       {{- else if eq .Message.Folder "sent"}}
       <span class="badge badge-plaintext" id="security-badge">
-        ⚠ sent in plaintext (no encryption)
+        ⚠️ sent in plaintext (no encryption)
       </span>
       {{- else}}
       <span class="badge badge-plaintext" id="security-badge">
-        ⚠ this message was received in plaintext
+        ⚠️ this message was received in plaintext
       </span>
       {{- end}}
     </div>

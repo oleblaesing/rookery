@@ -56,9 +56,9 @@
           {{- if eq .SecurityState "pgp_encrypted"}}
           <span class="security-badge encrypted" title="PGP encrypted">🔒</span>
           {{- else if eq .SecurityState "pgp_signed_plaintext"}}
-          <span class="security-badge signed" title="PGP signed, not encrypted">✓</span>
+          <span class="security-badge signed" title="PGP signed, not encrypted">🖋️</span>
           {{- else}}
-          <span class="security-badge plaintext" title="plaintext">⚠</span>
+          <span class="security-badge plaintext" title="plaintext — not encrypted">⚠️</span>
           {{- end}}
         </td>
       </tr>

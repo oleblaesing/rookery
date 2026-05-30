@@ -101,12 +101,12 @@
         badgeEl.className = 'badge badge-encrypted';
       } else if (securityState === 'pgp_signed_plaintext') {
         const labels = {
-          verified:    '✓ signed plaintext — signature verified',
-          unknown_key: '✓ signed plaintext — signature unverified (key not known)',
-          invalid:     '⚠ signed plaintext — signature INVALID',
-          none:        'plaintext',
+          verified:    '🖋️ signed plaintext — signature verified',
+          unknown_key: '🖋️ signed plaintext — signature unverified (key not known)',
+          invalid:     '⚠️ signed plaintext — signature INVALID',
+          none:        '⚠️ plaintext',
         };
-        badgeEl.textContent = labels[status] || '✓ signed plaintext';
+        badgeEl.textContent = labels[status] || '🖋️ signed plaintext';
         badgeEl.className = 'badge badge-signed';
       }
     }
