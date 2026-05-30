@@ -22,16 +22,18 @@
 </head>
 <body>
   <header class="site-header">
-    <a href="/" class="site-name">{{.InstanceName}}</a>
-    {{- if .User}}
-    <nav class="site-nav">
-      <a href="/inbox">inbox</a>
-      <a href="/settings">settings</a>
-      <a href="#" data-action="logout" class="logout-link"
-         title="Your private key is in browser localStorage while logged in. Log out on shared or untrusted machines.">log out</a>
-    </nav>
-    <span class="site-user">{{.User.PrimaryAddress}}</span>
-    {{- end}}
+    <div class="header-inner">
+      <a href="/" class="site-name">{{.InstanceName}}</a>
+      {{- if .User}}
+      <nav class="site-nav">
+        <a href="/inbox">inbox</a>
+        <a href="/settings">settings</a>
+        <a href="#" data-action="logout" class="logout-link"
+           title="Your private key is in browser localStorage while logged in. Log out on shared or untrusted machines.">log out</a>
+      </nav>
+      <span class="site-user">{{.User.PrimaryAddress}}</span>
+      {{- end}}
+    </div>
   </header>
   <main>
     {{block "content" .}}{{end}}
@@ -39,7 +41,9 @@
   <script src="{{assetURL "/static/partials.js"}}" defer></script>
   {{block "scripts" .}}{{end}}
   <footer class="site-footer">
-    <span>powered by <a href="https://github.com/anomalyco/rookery">rookery</a></span>
+    <div class="footer-inner">
+      <span>powered by <a href="https://github.com/anomalyco/rookery">rookery</a></span>
+    </div>
   </footer>
 </body>
 </html>

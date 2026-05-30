@@ -83,12 +83,18 @@ hr {
    ------------------------------------------------------------------------- */
 
 .site-header {
+  border-bottom: 1px solid #21262d;
+  background: #0d1117;
+}
+/* Inner wrapper shares main's column so the site name lines up with body
+   content; the header bar/border itself stays full-bleed. */
+.header-inner {
   display: flex;
   align-items: baseline;
   gap: 1.5rem;
+  max-width: 900px;
+  margin: 0 auto;
   padding: 0.65rem 1.5rem;
-  border-bottom: 1px solid #21262d;
-  background: #0d1117;
 }
 
 .site-name {
@@ -147,6 +153,13 @@ main {
   max-width: 440px;
 }
 
+/* Separate stacked forms from the headings/sections that follow them, so a
+   trailing button never collides with the next <h3> (e.g. settings tabs).
+   .inline-form resets this to 0 via class specificity. */
+form {
+  margin: 0 0 1.5rem;
+}
+
 .field + .field {
   margin-top: 1rem;
 }
@@ -165,7 +178,9 @@ label:first-child { margin-top: 0; }
 
 input[type="text"],
 input[type="email"],
-input[type="password"] {
+input[type="password"],
+textarea,
+select {
   display: block;
   width: 100%;
   padding: 0.45rem 0.7rem;
@@ -178,20 +193,54 @@ input[type="password"] {
 }
 input[type="text"]::placeholder,
 input[type="email"]::placeholder,
-input[type="password"]::placeholder {
+input[type="password"]::placeholder,
+textarea::placeholder {
   color: #484f58;
 }
-input:focus {
+input:focus,
+textarea:focus,
+select:focus {
   outline: none;
   border-color: #7dd3c8;
   box-shadow: 0 0 0 2px rgba(125, 211, 200, 0.15);
 }
+textarea {
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 8rem;
+}
+input:disabled,
+textarea:disabled {
+  color: #8b949e;
+  background: #161b22;
+  cursor: not-allowed;
+}
 
+/* File inputs: style the browser's native picker button to match buttons. */
 input[type="file"] {
   display: block;
+  width: 100%;
   margin-top: 0.25rem;
-  font-size: 0.875rem;
+  font-size: 0.8125rem;
   color: #8b949e;
+}
+input[type="file"]::file-selector-button {
+  margin-right: 0.75rem;
+  padding: 0.35rem 0.9rem;
+  background: #161b22;
+  color: #8b949e;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+input[type="file"]::file-selector-button:hover {
+  background: #1c2128;
+  color: #e6d9c2;
+  border-color: #484f58;
 }
 
 input[type="checkbox"] {
@@ -279,6 +328,29 @@ button:disabled {
   margin-top: 0.25rem;
   margin-bottom: 0;
 }
+.field-hint.warning { color: #d29922; }
+/* Inline form error: keep it a light hint, not the heavy .error block. */
+.field-hint.error {
+  color: #f85149;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* "(optional)" qualifier inside a label — opt out of the label's caps styling. */
+.field-optional {
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: #484f58;
+}
+
+/* Compact button variant (settings: remove / check now). */
+.button-small {
+  margin-top: 0;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8125rem;
+}
 
 .instance-name {
   font-size: 0.875rem;
@@ -340,6 +412,36 @@ button:disabled {
 }
 .info-block p:last-child { margin-bottom: 0; }
 
+/* -------------------------------------------------------------------------
+   Disclosure (<details>) — progressive reveal for long helper text
+   ------------------------------------------------------------------------- */
+
+details {
+  margin-bottom: 1.25rem;
+}
+summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  font-size: 0.8125rem;
+  letter-spacing: 0.05em;
+  color: #7dd3c8;
+  padding: 0.15rem 0;
+}
+summary::-webkit-details-marker { display: none; }
+summary::before {
+  content: "▸";
+  display: inline-block;
+  width: 1.1em;
+  color: #484f58;
+}
+details[open] > summary::before { content: "▾"; }
+summary:hover { color: #a5e3df; }
+/* A details that wraps an info-block shouldn't double its bottom margin. */
+details > .info-block:last-child,
+details > .verify-status-container:last-child { margin-bottom: 0; }
+details > .info-block { margin-top: 0.5rem; }
+
 .no-recovery {
   font-size: 0.8125rem;
   color: #484f58;
@@ -372,6 +474,9 @@ button:disabled {
   align-items: baseline;
   gap: 1rem;
   margin-bottom: 0.75rem;
+}
+.compose-btn {
+  margin-top: 0;
 }
 .message-count {
   font-size: 0.8125rem;
@@ -423,6 +528,12 @@ button:disabled {
   border-bottom: 1px solid #161b22;
   vertical-align: middle;
 }
+/* Flush the table's outer edges with the heading/toolbar above it, so the
+   list doesn't read as an extra inset panel. */
+.message-list th:first-child,
+.message-list td:first-child { padding-left: 0; }
+.message-list th:last-child,
+.message-list td:last-child { padding-right: 0; }
 .message-row:last-child td { border-bottom: none; }
 .message-row:hover td { background: #161b22; }
 .message-row.unread td { background: #0f1e1d; }
@@ -448,7 +559,12 @@ button:disabled {
    Read page
    ------------------------------------------------------------------------- */
 
-.message-view {}
+/* Reading/writing pages share a comfortable measure rather than stretching
+   the full main column (which is sized for wide settings tables). */
+.message-view,
+.compose {
+  max-width: 44rem;
+}
 
 .message-header {
   border-bottom: 1px solid #21262d;
@@ -555,6 +671,31 @@ button:disabled {
   font-size: 0.8125rem;
 }
 
+/* Compose form */
+.compose-to-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.compose-to-row input {
+  flex: 1;
+}
+.key-status-hint {
+  font-size: 0.8125rem;
+  color: #484f58;
+  white-space: nowrap;
+}
+.compose-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+.compose-status {
+  font-size: 0.875rem;
+  color: #8b949e;
+}
+
 /* Compose: selected-files list under the file input */
 .selected-files {
   list-style: none;
@@ -606,12 +747,16 @@ button:disabled {
 
 .site-footer {
   border-top: 1px solid #21262d;
+  margin-top: 3rem;
+}
+.footer-inner {
+  max-width: 900px;
+  margin: 0 auto;
   padding: 0.65rem 1.5rem;
   font-size: 0.75rem;
   letter-spacing: 0.05em;
   color: #30363d;
   text-align: center;
-  margin-top: 3rem;
 }
 .site-footer a {
   color: #484f58;
@@ -768,7 +913,7 @@ button:disabled {
   .message-meta {
     grid-template-columns: 3.5rem 1fr;
   }
-  .site-header {
+  .header-inner {
     flex-wrap: wrap;
     gap: 0.75rem;
   }

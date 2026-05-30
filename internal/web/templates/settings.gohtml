@@ -35,20 +35,24 @@
                   onclick="checkDomain('{{.ID}}')">check now</button>
         </div>
         {{if and .VerifiedAt (eq .MTASTSMode "testing")}}
-        <p class="field-hint">
-          MTA-STS is in <strong>testing</strong> mode — external senders may still fall back
-          to unencrypted delivery.
-          {{if .MTASTSEnforceAt}}
-          It will automatically upgrade to <strong>enforce</strong> mode around
-          {{formatDatetime .MTASTSEnforceAt}}.
-          {{else}}
-          It will upgrade to <strong>enforce</strong> mode shortly.
-          {{end}}
-          You will receive a notification at <strong>postmaster@{{.Name}}</strong>
-          with a DNS record to update when that happens.
-        </p>
+        <details>
+          <summary>MTA-STS is in testing mode — what this means</summary>
+          <p class="field-hint">
+            External senders may still fall back to unencrypted delivery.
+            {{if .MTASTSEnforceAt}}
+            It will automatically upgrade to <strong>enforce</strong> mode around
+            {{formatDatetime .MTASTSEnforceAt}}.
+            {{else}}
+            It will upgrade to <strong>enforce</strong> mode shortly.
+            {{end}}
+            You will receive a notification at <strong>postmaster@{{.Name}}</strong>
+            with a DNS record to update when that happens.
+          </p>
+        </details>
         {{end}}
-        <div id="verify-status-{{.ID}}" class="verify-status-container">
+        <details{{if not .VerifiedAt}} open{{end}}>
+          <summary>DNS records</summary>
+          <div id="verify-status-{{.ID}}" class="verify-status-container">
           <p class="field-hint">Publish the records below, then click <em>check now</em>.</p>
           <table class="dns-records">
             <thead>
@@ -69,7 +73,8 @@
               {{end}}
             </tbody>
           </table>
-        </div>
+          </div>
+        </details>
       </li>
       {{end}}
     </ul>
@@ -152,22 +157,26 @@
   {{/* ---- delete account tab ---- */}}
   <div id="tab-delete" role="tabpanel" aria-labelledby="tab-btn-delete" class="tab-panel">
 
-    <div class="info-block narrow-form">
-      <p>Deleting your account is <strong>immediate and irreversible</strong>.
-      There is no grace period and no undo. The following is removed
-      permanently from the server:</p>
-      <ul>
-        <li>All received and sent messages, including encrypted blobs.</li>
-        <li>Your public key, all addresses, and all active sessions.</li>
-        <li>Custom domains you exclusively own (and their DKIM keys).</li>
-        <li>Drafts and your known-keys cache.</li>
-      </ul>
-      <p>Mail that has already been delivered to other people's inboxes, and
-      public-key copies auto-attached to past outbound mail, are not
-      affected — the server cannot reach into recipients' mailboxes.</p>
-      <p>Your recovery file is yours to deal with separately; deleting your
-      account does not touch files on your own devices.</p>
-    </div>
+    <p class="field-hint warning">Deleting your account is <strong>immediate and
+    irreversible</strong> — there is no grace period and no undo.</p>
+
+    <details class="narrow-form">
+      <summary>what gets deleted, and what doesn't</summary>
+      <div class="info-block">
+        <p>The following is removed permanently from the server:</p>
+        <ul>
+          <li>All received and sent messages, including encrypted blobs.</li>
+          <li>Your public key, all addresses, and all active sessions.</li>
+          <li>Custom domains you exclusively own (and their DKIM keys).</li>
+          <li>Drafts and your known-keys cache.</li>
+        </ul>
+        <p>Mail that has already been delivered to other people's inboxes, and
+        public-key copies auto-attached to past outbound mail, are not
+        affected — the server cannot reach into recipients' mailboxes.</p>
+        <p>Your recovery file is yours to deal with separately; deleting your
+        account does not touch files on your own devices.</p>
+      </div>
+    </details>
 
     {{if gt .UnreadLast24h 0}}
     <p class="field-hint warning">Unread messages received in the last 24 h: <strong>{{.UnreadLast24h}}</strong>. They will be permanently deleted.</p>
