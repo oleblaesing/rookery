@@ -179,6 +179,7 @@ label:first-child { margin-top: 0; }
 input[type="text"],
 input[type="email"],
 input[type="password"],
+input[type="search"],
 textarea,
 select {
   display: block;
@@ -194,6 +195,7 @@ select {
 input[type="text"]::placeholder,
 input[type="email"]::placeholder,
 input[type="password"]::placeholder,
+input[type="search"]::placeholder,
 textarea::placeholder {
   color: #484f58;
 }
@@ -258,6 +260,7 @@ button, .button {
   border-radius: 4px;
   font-size: 0.875rem;
   font-family: inherit;
+  line-height: 1.5; /* pin so native <button> and <a class="button"> match height */
   letter-spacing: 0.04em;
   cursor: pointer;
   text-decoration: none;
@@ -508,6 +511,38 @@ details > .info-block { margin-top: 0.5rem; }
   font-size: 0.9375rem;
 }
 
+.mailbox-search {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin-bottom: 1.25rem;
+}
+.mailbox-search input[type="search"] {
+  margin-bottom: 0;
+  max-width: 24rem;
+}
+.mailbox-search button,
+.mailbox-search .button {
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+.pagination .disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.page-indicator {
+  font-size: 0.8125rem;
+  color: #484f58;
+}
+
 .message-list {
   width: 100%;
   border-collapse: collapse;
@@ -539,16 +574,16 @@ details > .info-block { margin-top: 0.5rem; }
 .message-row.unread td { background: #0f1e1d; }
 .message-row.unread .col-from a { color: #e6d9c2; font-weight: 600; }
 
-.col-status  { width: 1.25rem; }
 .col-from    { width: 16rem; }
 .col-subject {}
 .col-date    { width: 9rem; white-space: nowrap; font-size: 0.8125rem; color: #484f58; }
-.col-security { width: 2rem; text-align: center; }
+.col-security { width: 2rem; text-align: right; }
+
+.unread-dot  { color: #7dd3c8; font-size: 0.55rem; vertical-align: middle; margin-right: 0.4rem; }
 
 .message-list a { text-decoration: none; color: #8b949e; }
 .message-list a:hover { color: #e6d9c2; }
 
-.unread-dot  { color: #7dd3c8; font-size: 0.55rem; }
 
 .security-badge { font-size: 0.75rem; }
 .security-badge.plaintext  { color: #d29922; }

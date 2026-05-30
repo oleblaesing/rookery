@@ -5,8 +5,8 @@
   <div class="mailbox-toolbar">
     <h1>{{if eq .Folder "inbox"}}inbox{{else if eq .Folder "sent"}}sent{{else if eq .Folder "trash"}}trash{{else if eq .Folder "bounced"}}bounced{{else}}{{.Folder}}{{end}}</h1>
     <a href="/compose" class="button compose-btn">+ compose</a>
-    {{- if .Messages}}
-    <span class="message-count">{{len .Messages}} message{{if gt (len .Messages) 1}}s{{end}}</span>
+    {{- if .Total}}
+    <span class="message-count">{{.Total}} message{{if gt .Total 1}}s{{end}}</span>
     {{- end}}
   </div>
 
@@ -17,13 +17,21 @@
     <a href="/inbox?folder=bounced" {{if eq .Folder "bounced"}}class="active"{{end}}>bounced</a>
   </nav>
 
+  <form class="mailbox-search" method="get" action="/inbox" role="search">
+    <input type="hidden" name="folder" value="{{.Folder}}">
+    <input type="search" name="q" value="{{.Query}}" placeholder="search from, to, subject…" aria-label="search messages">
+    <button type="submit" class="button-secondary">search</button>
+    {{- if .Query}}
+    <a href="/inbox?folder={{.Folder}}" class="button button-secondary">clear</a>
+    {{- end}}
+  </form>
+
   {{- if not .Messages}}
-  <p class="empty-state">no messages</p>
+  <p class="empty-state">{{if .Query}}no messages match “{{.Query}}”{{else}}no messages{{end}}</p>
   {{- else}}
   <table class="message-list">
     <thead>
       <tr>
-        <th class="col-status" aria-label="status"></th>
         <th class="col-from">{{if or (eq .Folder "sent") (eq .Folder "bounced")}}to{{else}}from{{end}}</th>
         <th class="col-subject">subject</th>
         <th class="col-date">date</th>
@@ -34,10 +42,8 @@
     {{- range .Messages}}
       <tr class="message-row{{if not .IsRead}} unread{{end}}"
           data-message-id="{{.ID}}">
-        <td class="col-status">
-          {{- if not .IsRead}}<span class="unread-dot" aria-label="unread">●</span>{{end}}
-        </td>
         <td class="col-from">
+          {{- if not .IsRead}}<span class="unread-dot" aria-label="unread">●</span>{{end}}
           {{- if or (eq $.Folder "sent") (eq $.Folder "bounced")}}
           <a href="/messages/{{.ID}}">{{if .To}}{{index .To 0}}{{else}}(no recipient){{end}}</a>
           {{- else}}
@@ -65,6 +71,22 @@
     {{- end}}
     </tbody>
   </table>
+  {{- end}}
+
+  {{- if gt .TotalPages 1}}
+  <nav class="pagination">
+    {{- if .HasPrev}}
+    <a class="button button-secondary button-small" href="/inbox?folder={{.Folder}}{{if .Query}}&q={{.Query}}{{end}}&page={{.PrevPage}}">← prev</a>
+    {{- else}}
+    <span class="button button-secondary button-small disabled">← prev</span>
+    {{- end}}
+    <span class="page-indicator">page {{.Page}} of {{.TotalPages}}</span>
+    {{- if .HasNext}}
+    <a class="button button-secondary button-small" href="/inbox?folder={{.Folder}}{{if .Query}}&q={{.Query}}{{end}}&page={{.NextPage}}">next →</a>
+    {{- else}}
+    <span class="button button-secondary button-small disabled">next →</span>
+    {{- end}}
+  </nav>
   {{- end}}
 </section>
 {{end}}

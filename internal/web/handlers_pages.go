@@ -3,8 +3,11 @@ package web
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -285,23 +288,39 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Ma
 // GET /inbox — server-rendered inbox list
 // -------------------------------------------------------------------------
 
+// inboxPageSize is the number of messages shown per inbox page.
+const inboxPageSize = 50
+
 type inboxPageData struct {
 	InstanceName string
 	User         *userProfile
 	Messages     []messageListItem
 	Folder       string
 	CSRFToken    string
+
+	// Search + pagination state for the template.
+	Query      string
+	Total      int
+	Page       int
+	TotalPages int
+	HasPrev    bool
+	HasNext    bool
+	PrevPage   int
+	NextPage   int
 }
 
 func handleInboxPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
 		folder := r.URL.Query().Get("folder")
-		if folder == "" {
+		if folder == "" || !validFolders[folder] {
 			folder = "inbox"
 		}
-		if !validFolders[folder] {
-			folder = "inbox"
+
+		query := strings.TrimSpace(r.URL.Query().Get("q"))
+		page := 1
+		if p, err := strconv.Atoi(r.URL.Query().Get("page")); err == nil && p > 1 {
+			page = p
 		}
 
 		user, err := fetchUserByID(r.Context(), db, userID)
@@ -310,15 +329,47 @@ func handleInboxPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query(r.Context(), `
+		// Base filter, with an optional search clause over from/to/subject only
+		// (never the message body). The args slice is shared by the count and
+		// page queries so positional placeholders line up.
+		where := "user_id = $1 AND folder = $2"
+		args := []any{userID, folder}
+		if query != "" {
+			args = append(args, "%"+query+"%")
+			where += fmt.Sprintf(
+				" AND (from_address ILIKE $%[1]d OR subject ILIKE $%[1]d"+
+					" OR array_to_string(to_addresses, ' ') ILIKE $%[1]d)",
+				len(args))
+		}
+
+		var total int
+		if err := db.QueryRow(r.Context(),
+			"SELECT count(*) FROM messages WHERE "+where, args...).Scan(&total); err != nil {
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		totalPages := (total + inboxPageSize - 1) / inboxPageSize
+		if totalPages < 1 {
+			totalPages = 1
+		}
+		if page > totalPages {
+			page = totalPages
+		}
+		offset := (page - 1) * inboxPageSize
+
+		listSQL := fmt.Sprintf(`
 			SELECT id, thread_id, folder, from_address, to_addresses, cc_addresses,
 			       subject, message_date, size_bytes, is_read, is_starred,
 			       security_state, signature_status, has_attachments, received_at
 			FROM   messages
-			WHERE  user_id = $1 AND folder = $2
+			WHERE  %s
 			ORDER  BY message_date DESC
-			LIMIT  100
-		`, userID, folder)
+			LIMIT  $%d OFFSET $%d
+		`, where, len(args)+1, len(args)+2)
+		args = append(args, inboxPageSize, offset)
+
+		rows, err := db.Query(r.Context(), listSQL, args...)
 		if err != nil {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
 			return
@@ -350,6 +401,14 @@ func handleInboxPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			Messages:     msgs,
 			Folder:       folder,
 			CSRFToken:    auth.CSRFTokenFromContext(r.Context()),
+			Query:        query,
+			Total:        total,
+			Page:         page,
+			TotalPages:   totalPages,
+			HasPrev:      page > 1,
+			HasNext:      page < totalPages,
+			PrevPage:     page - 1,
+			NextPage:     page + 1,
 		})
 	}
 }
