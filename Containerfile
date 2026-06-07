@@ -18,25 +18,19 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-amd64} \
 
 FROM docker.io/library/node:22-bookworm-slim AS js-build
 
-WORKDIR /src/web/crypto
+WORKDIR /src
 
-COPY web/crypto/package.json web/crypto/package-lock.json ./
+COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts
 
-COPY web/crypto/ ./
-RUN node_modules/.bin/esbuild \
-    --bundle \
-    --minify \
-    --format=iife \
-    --global-name=RookeryCrypto \
-    --outfile=/out/crypto.js \
-    index.js
+COPY client/ ./client/
+RUN npm run build
 
 FROM gcr.io/distroless/static-debian12 AS final
 
 COPY --from=go-build /out/rookery /usr/local/bin/rookery
-COPY web/static/ /opt/rookery/web/static/
-COPY --from=js-build /out/crypto.js /opt/rookery/web/static/crypto.js
+COPY static/ /opt/rookery/web/static/
+COPY --from=js-build /src/static/crypto.js /opt/rookery/web/static/crypto.js
 
 EXPOSE 8080 25
 

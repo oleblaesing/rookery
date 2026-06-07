@@ -1,8 +1,8 @@
-web/crypto/node_modules/
+node_modules/
 config/rookery
 config/caddy
 rookery-server
 *.out
 *.test
-web/static/crypto.js
+static/crypto.js
 *.tar.gz.enc

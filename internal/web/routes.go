@@ -174,7 +174,7 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 	//   2. web/static               — repo layout (local dev with `go run`)
 	staticDir := "/opt/rookery/web/static"
 	if _, err := os.Stat(staticDir); err != nil {
-		staticDir = "web/static"
+		staticDir = "static"
 	}
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 }
