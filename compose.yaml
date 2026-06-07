@@ -1,53 +1,4 @@
-# compose.yaml — service definitions consumed by the `rookery` dispatcher.
-#
-# Operators and developers drive this file via the rookery script at the repo
-# root, not via `docker compose` directly. The dispatcher generates .env,
-# rookery.toml, Caddyfile, and ./rookery.service, picks the right --profile,
-# and wraps `docker compose` underneath. See docs/adr/ADR-0033.md for the
-# rationale and the full subcommand surface.
-#
-#   ./rookery init               # bootstrap (user-local: .env, rookery.toml, Caddyfile, ./rookery.service)
-#   sudo ./rookery install       # promote to a systemd service (one sudo step)
-#   ./rookery start              # dev (rookery + postgres + mailpit, port 8080)
-#   ./rookery start --prod       # production with HTTPS via Caddy (systemd uses this form)
-#   ./rookery stop / restart
-#   ./rookery update             # git pull --ff-only && docker compose build
-#   ./rookery test               # run tests
-#   ./rookery vet                # run go vet
-#   ./rookery compose <args>     # escape hatch for raw docker compose
-#
-# TLS / HTTPS:
-#   `rookery init` generates the Caddyfile from the domain in rookery.toml
-#   (whether or not the operator will run `install` later — it's inert in dev).
-#   Caddy handles TLS termination and ACME certificate provisioning; rookery
-#   speaks plain HTTP on port 8080.
-#
-# `rookery init` writes .env (with random secrets) on the host before any
-# `start`. This is necessary because Compose snapshots env_file into each
-# container at *creation* time — before any service runs — so secrets must
-# exist on disk before `docker compose up` is called.
-#
-# On first run:
-#   1. ./rookery init --domain rookery.example --email you@rookery.example --name "My Rookery"
-#      (or run ./rookery init with no flags and answer the prompts)
-#   2. sudo ./rookery install && sudo systemctl enable --now rookery
-#      Back up .env afterwards, especially ROOKERY_MASTER_KEY.
-#
-# Docker (with Compose v2) is the only supported runtime. Rootless Podman was
-# evaluated and rejected: privileged-port binding, OCI vs Docker image format,
-# short-name resolution, and podman-compose bookkeeping noise all combine into
-# too much friction for too little gain. Operators on Podman hosts can run the
-# Docker CLI against the Podman socket if they really want to, but that path
-# is not tested. See docs/ops/ for the full operator guide.
-#
-# Image references are fully qualified (e.g. docker.io/library/alpine rather
-# than alpine) purely as good hygiene — Docker accepts both forms.
-
 services:
-
-  # -------------------------------------------------------------------------- #
-  # rookery — the mail server + web client                                     #
-  # -------------------------------------------------------------------------- #
   rookery:
     build:
       context: .
@@ -56,61 +7,31 @@ services:
         GIT_REVISION: ${GIT_REVISION:-dev}
     image: rookery:latest
     restart: unless-stopped
-    # Runs as root (uid 0) inside the container — like the other service
-    # containers — so it writes to the root-owned messages-data volume and reads
-    # Caddy's root-owned TLS certs (relay submission listener) without any chown
-    # or UID/GID plumbing. The image is distroless (no shell), keeping the
-    # attack surface minimal. See the Containerfile final stage for rationale.
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"           # HTTP. In production Caddy proxies this; in dev hit it directly.
-      - "25:25"               # SMTP inbound MX
-      - "465:465"             # SMTP submission (implicit TLS) — relay rookery, active only when submission_enabled
-      - "587:587"             # SMTP submission (STARTTLS)     — relay rookery, active only when submission_enabled
+      - "8080:8080"
+      - "25:25"
+      - "465:465"
+      - "587:587"
+    env_file: ./config/rookery/.env
     volumes:
-      # rookery.toml must exist on the host before the stack starts.
-      # Edit it on the host; changes require a server restart.
-      - ./rookery.toml:/etc/rookery/rookery.toml:ro
-      # Named volume for message blobs. The container runs as root, so it writes
-      # to this root-owned volume directly — no host-side setup or chown.
-      # Backed up via `./rookery backup` (which tars the volume through a helper
-      # container, the same way it handles caddy-data).
-      # Export archives live in an exports/ subdirectory of this volume, so they
-      # inherit the mount and need no separate volume.
+      - ./config/rookery/rookery.toml:/etc/rookery/rookery.toml:ro
       - messages-data:/var/lib/rookery/messages
-      # Read-only access to Caddy's TLS certificates so the relay-rookery
-      # submission listener can reuse the cert Caddy provisions for the instance
-      # domain instead of running a second ACME client (ADR-0030 §4). Mounted at
-      # the same path Caddy uses (/data) so the cert layout matches:
-      # /data/caddy/certificates/<ca>/<domain>/<domain>.{crt,key}. rookery runs
-      # as root, so it reads Caddy's root-owned 0600 certs directly — no chown.
-      # Inert unless smtp.submission_enabled is set; empty in dev (no Caddy).
       - caddy-data:/data:ro
-    env_file: ./.env
-    # Healthcheck is implemented as a `rookery healthcheck` subcommand
-    # (see cmd/rookery/main.go) because the distroless runtime image
-    # has no shell or wget/curl. It lives here rather than as a HEALTHCHECK
-    # directive in the Containerfile so the compose file is the single source
-    # of truth for runtime behaviour.
     healthcheck:
       test: ["CMD", "/usr/local/bin/rookery", "healthcheck"]
       interval: 15s
       timeout: 5s
       retries: 3
-
-  # -------------------------------------------------------------------------- #
-  # postgres                                                                   #
-  # -------------------------------------------------------------------------- #
   postgres:
     image: docker.io/library/postgres:17-alpine
     restart: unless-stopped
-    env_file: ./.env
+    env_file: ./config/rookery/.env
     environment:
       POSTGRES_DB:   rookery
       POSTGRES_USER: rookery
-      # POSTGRES_PASSWORD comes from env_file (same value as ROOKERY_DB_PASSWORD)
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -118,31 +39,27 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  # -------------------------------------------------------------------------- #
-  # redis — backing store for rspamd (rate limits, fuzzy hashes, bayes data)  #
-  # -------------------------------------------------------------------------- #
-  redis:
-    image: docker.io/library/redis:7-alpine
+  caddy:
+    image: docker.io/library/caddy:2-alpine
     restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
     volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      rookery:
+        condition: service_healthy
+    profiles: [prod]
 
-  # -------------------------------------------------------------------------- #
-  # rspamd — inbound spam filter (ADR-0032)                                   #
-  # HTTP check API on port 11333 (rookery calls it; not exposed to the host). #
-  # rspamd config overrides live in ./rspamd/local.d/ (operator-editable).   #
-  # -------------------------------------------------------------------------- #
   rspamd:
     image: docker.io/rspamd/rspamd:latest
     restart: unless-stopped
     volumes:
-      - ./rspamd/local.d:/etc/rspamd/local.d:ro
+      - ./config/rspamd:/etc/rspamd/local.d:ro
       - rspamd-data:/var/lib/rspamd
     depends_on:
       redis:
@@ -153,12 +70,16 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
-
-  # -------------------------------------------------------------------------- #
-  # clamav — virus scanner (opt-in; adds ~1 GB RAM — see §10 of PLAN.md)     #
-  # Enable with: ./rookery start --profile clamav  (or add to systemd unit).  #
-  # rspamd talks to clamd on port 3310; no Go-side changes needed.            #
-  # -------------------------------------------------------------------------- #
+  redis:
+    image: docker.io/library/redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   clamav:
     image: docker.io/clamav/clamav:stable
     restart: unless-stopped
@@ -169,13 +90,8 @@ services:
       interval: 60s
       timeout: 30s
       retries: 3
-      start_period: 120s   # signature DB load takes time
-    profiles: [clamav]
+      start_period: 120s
 
-  # -------------------------------------------------------------------------- #
-  # mailpit — SMTP test sink (dev profile only)                                #
-  # UI at http://localhost:8025                                                #
-  # -------------------------------------------------------------------------- #
   mailpit:
     image: docker.io/axllent/mailpit:latest
     restart: unless-stopped
@@ -183,47 +99,14 @@ services:
       - "127.0.0.1:1025:1025"
       - "127.0.0.1:8025:8025"
     environment:
-      # Relay all mail mailpit receives to rookery's inbound SMTP on port 25.
-      # This lets you use the mailpit UI (http://localhost:8025) or its send
-      # API to inject test messages into rookery as if they came from the internet.
       MP_SMTP_RELAY_HOST: rookery
       MP_SMTP_RELAY_PORT: "25"
-      # No auth or TLS on the internal rookery SMTP listener (port 25 is for
-      # unauthenticated inbound MX delivery on the Docker network).
       MP_SMTP_RELAY_AUTH: none
     depends_on:
       rookery:
         condition: service_healthy
     profiles: [dev]
 
-  # -------------------------------------------------------------------------- #
-  # caddy — TLS termination and HTTPS (prod profile only)                      #
-  # Caddyfile is auto-generated by `rookery init` from rookery.toml.           #
-  # -------------------------------------------------------------------------- #
-  caddy:
-    image: docker.io/library/caddy:2-alpine
-    restart: unless-stopped
-    # Caddy runs as root (Docker default) and stores its TLS certificates as
-    # root-owned 0600 files. rookery also runs as root, so a relay rookery
-    # (smtp.submission_enabled) reads those certs from the shared caddy-data
-    # volume directly — no UID matching or chown needed.
-    ports:
-      - "80:80"               # ACME HTTP-01 challenges + HTTP→HTTPS redirect
-      - "443:443"             # HTTPS
-      - "443:443/udp"         # HTTP/3 (QUIC)
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data      # Caddy stores TLS certificates here
-      - caddy-config:/config
-    depends_on:
-      rookery:
-        condition: service_healthy
-    profiles: [prod]
-
-  # -------------------------------------------------------------------------- #
-  # test — run the Go test suite and exit                                      #
-  # ./rookery test                                                              #
-  # -------------------------------------------------------------------------- #
   test:
     image: docker.io/library/golang:1.25-bookworm
     working_dir: /src
@@ -234,15 +117,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    env_file: ./.env
+    env_file: ./config/rookery/.env
     command: go test -v -count=1 ./...
     restart: "no"
     profiles: [test]
-
-  # -------------------------------------------------------------------------- #
-  # lint — run go vet and exit                                                 #
-  # ./rookery vet                                                               #
-  # -------------------------------------------------------------------------- #
   lint:
     image: docker.io/library/golang:1.25-bookworm
     working_dir: /src

@@ -49,6 +49,8 @@ That has of course one downside: lose your key/passphrase and no one can help yo
 ## Other features
 
 - Bring your own custom domain! Every rookery instance will give you instructions on how to set them up
+- Spam detection via rspamd/Redis (only works for unencrypted emails)
+- ClamAV scanning for unencrypted emails
 - Very few dependencies to prevent supply chain attacks.
   - While the server/Go uses some, the client/JS only bundles one: OpenPGP.js - https://openpgpjs.org/
 
@@ -58,7 +60,13 @@ The idea is to make things very easy for operators, some self-hosting/Linux know
 
 - Buy a domain
 - Rent a small VPS, 5€ is enough (or host at home)
-- Install Docker on it (tried with Podman, but we need Ports like 25, 80, 443 etc. Easier with Docker)
+- Install git, dig, openssl and Docker on it (tried with Podman, but we need Ports like 25, 80, 443 etc. Easier with Docker)
+- Allow incoming traffic on ports:
+  - 25
+  - 80
+  - 443 (tcp/udp)
+  - 465 # If you want to act as a smarthost rookery
+  - 587 # If you want to act as a smarthost rookery
 
 ### My VPS Provider blocks port 25!
 
@@ -78,7 +86,6 @@ cd /opt/rookery
     --domain my-rookery.example.com \
     --email mail-for-lets-encrypt@gmail.com \
     --name "My rookery Instance" \
-    --clamav # Optional, if you want to scan your emails (not working for encrypted ones of course)
 
 # This will create some config files etc. with generated passwords etc.
 # It will also create a systemd unit file with /opt/rookery being hardcoded - be aware!
@@ -107,9 +114,6 @@ sudo systemctl restart rookery
 
 ## Local development
 
-Everything runs through the `rookery` dispatcher. No Makefile, no host-side
-toolchain required beyond Docker (with the Compose v2 plugin).
-
 ```sh
 ./rookery init \
     --domain localhost \
@@ -117,5 +121,4 @@ toolchain required beyond Docker (with the Compose v2 plugin).
     --name "My rookery Dev Box"
 ./rookery start
 ./rookery invite create
-./rookery send-mail --encrypted --fetch-key you@localhost
 ```

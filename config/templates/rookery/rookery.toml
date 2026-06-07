@@ -1,0 +1,21 @@
+domain = "rookery.example.com"
+contact_email = "me@example.com"
+instance_name = "My Rookery Instance"
+
+[log]
+level = "info"
+
+[smtp]
+max_message_bytes = 26214400
+outbound_rate_limit_per_user = 200
+outbound_daily_limit_per_user = 1000
+outbound_rate_limit_per_domain = 5000
+
+[policy]
+default_quota_bytes = 5368709120
+trash_retention_days = 30
+session_expiry_days = 7
+log_connecting_ips = false
+
+[spam]
+rspamd_url = "http://rspamd:11333"

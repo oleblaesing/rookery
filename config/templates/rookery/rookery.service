@@ -1,0 +1,15 @@
+[Unit]
+Description=rookery mail server
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/rookery
+ExecStart=/opt/rookery/rookery start --prod -d
+ExecStop=/opt/rookery/rookery stop
+User=@USER@
+
+[Install]
+WantedBy=multi-user.target

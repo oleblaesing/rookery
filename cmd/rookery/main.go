@@ -272,7 +272,7 @@ func runHealthcheck() int {
 // delete-user
 // -------------------------------------------------------------------------
 
-func runDeleteUser(address string) int {
+func runDeleteUser(accountName string) int {
 	ctx := context.Background()
 
 	cfgPath := os.Getenv("ROOKERY_CONFIG")
@@ -294,12 +294,12 @@ func runDeleteUser(address string) int {
 
 	var userID string
 	err = st.DB.QueryRow(ctx,
-		`SELECT user_id FROM addresses WHERE lower(address) = lower($1) LIMIT 1`,
-		address,
+		`SELECT user_id FROM addresses WHERE lower(local_part) = lower($1)`,
+		accountName,
 	).Scan(&userID)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			fmt.Fprintf(os.Stderr, "delete-user: no user found for %q\n", address)
+			fmt.Fprintf(os.Stderr, "delete-user: no user found for %q\n", accountName)
 		} else {
 			fmt.Fprintf(os.Stderr, "delete-user: lookup: %v\n", err)
 		}
@@ -311,7 +311,7 @@ func runDeleteUser(address string) int {
 		return 1
 	}
 
-	fmt.Printf("delete-user: deleted %s\n", address)
+	fmt.Printf("delete-user: deleted %s\n", accountName)
 	return 0
 }
 

@@ -1,1879 +1,274 @@
-#!/bin/sh
-# rookery — operator and developer dispatcher for a rookery instance.
-#
-# Single entry point for every instance operation: bootstrap, start, stop,
-# restart, update, invite generation, test injection, and more.
-# Wraps docker compose; operators never need to invoke docker compose directly.
-#
-# Usage: ./rookery <subcommand> [flags] [args]
-#        ./rookery help <subcommand>
-#
-# See docs/adr/ADR-0033.md for rationale and the full subcommand surface.
+#!/usr/bin/env bash
 
 set -eu
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOKERY_SMTP="${ROOKERY_SMTP:-smtp://localhost:25}"
-ROOKERY_HTTP="${ROOKERY_HTTP:-http://localhost:8080}"
-# Global used by the send-mail encrypted path for temp-dir cleanup.
-_SEND_MAIL_TMPDIR=""
-# Passed as a build arg so the binary embeds the git hash for cache busting.
-GIT_REVISION="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo dev)"
-export GIT_REVISION
+export GIT_REVISION="$(git rev-parse --short HEAD)"
 
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-die()  { printf 'rookery: error: %s\n' "$*" >&2; exit 1; }
-info() { printf 'rookery: %s\n'        "$*" >&2; }
-
-# Run docker compose against the project compose file, regardless of CWD.
-dc() { docker compose -f "$SCRIPT_DIR/compose.yaml" "$@"; }
-
-# Fail with a one-line hint if init has not been run.
-need_init() {
-    if [ ! -f "$SCRIPT_DIR/.env" ] || [ ! -f "$SCRIPT_DIR/rookery.toml" ]; then
-        die ".env or rookery.toml missing — run './rookery init' first"
-    fi
-}
-
-# Read a string value from rookery.toml on the host.
 toml_get() {
-    grep -E "^[[:space:]]*${1}[[:space:]]*=" "$SCRIPT_DIR/rookery.toml" \
-        | head -1 \
-        | sed 's/.*=[[:space:]]*"\([^"]*\)".*/\1/'
+    grep -E "^${1} *=" "./config/rookery/rookery.toml" | head -1 | cut -d= -f2- | tr -d ' "'
 }
 
-# Read a variable from .env; prints the value (empty if missing).
 env_get() {
-    grep -E "^${1}=" "$SCRIPT_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-
+    grep -E "^${1}=" "./config/rookery/.env" | head -1 | cut -d= -f2-
 }
 
-# Write a variable to .env if it is missing or empty.
-# Usage: env_gen VAR [value]   — omit value to auto-generate with openssl.
-env_gen() {
-    local var="$1" val="${2:-}"
-    local cur
-    cur=$(env_get "$var")
-    if [ -z "$cur" ]; then
-        grep -v "^${var}=" "$SCRIPT_DIR/.env" > "$SCRIPT_DIR/.env.tmp" 2>/dev/null \
-            && mv "$SCRIPT_DIR/.env.tmp" "$SCRIPT_DIR/.env" || true
-        [ -z "$val" ] && val=$(openssl rand -hex 32)
-        printf '%s=%s\n' "$var" "$val" >> "$SCRIPT_DIR/.env"
-        info "generated $var"
-    fi
+exec_rookery() {
+    docker compose exec -T rookery /usr/local/bin/rookery "$@"
 }
 
-# Read a passphrase from /dev/tty with echo disabled. Prints value to stdout.
-# Prompts and newline go to /dev/tty (never to stdout or stderr).
-_read_passphrase() {
-    local prompt="$1" pass old_stty
-    [ -e /dev/tty ] || die "no /dev/tty available — use --passphrase-file for non-interactive use"
-    old_stty=$(stty -g </dev/tty 2>/dev/null || true)
-    printf '%s' "$prompt" >/dev/tty
-    stty -echo </dev/tty 2>/dev/null || true
-    IFS= read -r pass </dev/tty
-    stty "$old_stty" </dev/tty 2>/dev/null || true
-    printf '\n' >/dev/tty
-    printf '%s' "$pass"
+exec_postgres() {
+    local db_pass=$(env_get POSTGRES_PASSWORD)
+
+    docker compose exec -T -e PGPASSWORD="$db_pass" postgres "$@"
 }
 
-# ---------------------------------------------------------------------------
-# init
-# ---------------------------------------------------------------------------
-cmd_init() {
-    local opt_domain="" opt_email="" opt_name="" opt_user="" opt_no_prompt=0 opt_clamav=0
+psql_c() {
+    exec_postgres psql -h localhost -U rookery -d rookery -tAqc "$1"
+}
 
+if [ "$1" == "init" ]; then
+    opt_domain=""
+    opt_email=""
+    opt_name=""
+
+    shift
+    
     while [ $# -gt 0 ]; do
         case "$1" in
-            --domain)    shift; opt_domain="${1:-}";    shift ;;
-            --email)     shift; opt_email="${1:-}";     shift ;;
-            --name)      shift; opt_name="${1:-}";      shift ;;
-            --user)      shift; opt_user="${1:-}";      shift ;;
-            --no-prompt) opt_no_prompt=1;               shift ;;
-            --clamav)    opt_clamav=1;                  shift ;;
-            --) shift; break ;;
-            -*) die "unknown flag: $1" ;;
+            --domain)    shift; opt_domain="$1";    shift ;;
+            --email)     shift; opt_email="$1";     shift ;;
+            --name)      shift; opt_name="$1";      shift ;;
             *)  break ;;
         esac
     done
 
-    command -v openssl >/dev/null 2>&1 \
-        || die "openssl is required for secret generation — install it and retry"
+    mkdir -p "./config/rookery" "./config/caddy"
 
-    # ---- rookery.toml -------------------------------------------------------
-    if [ ! -f "$SCRIPT_DIR/rookery.toml" ]; then
-        cat > "$SCRIPT_DIR/rookery.toml" << 'TOML'
-# rookery.toml — instance configuration file.
-#
-# Generated by `./rookery init`. Edit the values below, then run
-# `./rookery restart` to apply changes.
-#
-# Secrets (DB password, master key, session key) are NOT in this file.
-# They come from environment variables; see compose.yaml.
-#
-# Changes to this file require a server restart.
-#
-# Every setting below includes its default value so you can see what you're
-# changing. You only need to set values that differ from the default.
-
-# --------------------------------------------------------------------------- #
-# Required settings
-# --------------------------------------------------------------------------- #
-
-# Primary mail domain for this instance. All @<domain> addresses live here.
-# Users can add their own custom domains later (see §5.2b of PLAN.md).
-domain = "rookery.example"        # CHANGE_ME
-
-# Let's Encrypt contact email. Used by Caddy (the reverse proxy that handles
-# TLS) for expiry notices. Set it in Caddyfile too. Optional here — it is not
-# read by the rookery binary itself.
-contact_email = "admin@rookery.example"   # CHANGE_ME (optional)
-
-# Human-readable display name shown to users on signup pages.
-# Defaults to the value of `domain` if not set.
-instance_name = "My Rookery"      # optional
-
-# --------------------------------------------------------------------------- #
-# HTTP listener
-# --------------------------------------------------------------------------- #
-[http]
-# Bind address. 0.0.0.0 = all interfaces.
-host = "0.0.0.0"
-
-# Port for the HTTP server. Default: 8080.
-#
-# rookery always serves plain HTTP. TLS termination is handled by Caddy (the
-# reverse proxy defined in Caddyfile). In development you hit this port
-# directly in your browser. In production Caddy forwards HTTPS traffic here.
-# Change this only if 8080 conflicts with something else on your host.
-port = 8080
-
-# --------------------------------------------------------------------------- #
-# Logging
-# --------------------------------------------------------------------------- #
-[log]
-# Minimum log level to emit. One of: debug, info, warn, error.
-# Structured JSON output to stdout. Default: info.
-level = "info"
-
-# --------------------------------------------------------------------------- #
-# SMTP
-# --------------------------------------------------------------------------- #
-[smtp]
-# Maximum accepted message size in bytes. Default: 26214400 (25 MiB).
-# Note: PGP base64 encoding inflates messages by ~33%, so a 16 MiB plaintext
-# attachment will become ~21 MiB on the wire. Size accordingly.
-max_message_bytes = 26214400
-
-# Per-user outbound rate limit: messages per hour. Default: 200.
-outbound_rate_limit_per_user = 200
-
-# Per-user outbound rate limit: messages per day. Default: 1000.
-outbound_daily_limit_per_user = 1000
-
-# Per-destination-domain outbound rate limit: messages per hour. Default: 5000.
-outbound_rate_limit_per_domain = 5000
-
-# Smarthost: route all outbound mail through a trusted upstream SMTP submission
-# endpoint instead of direct MX delivery. The upstream is either a commercial
-# relay (SES/Postmark/Mailgun) or another rookery instance acting as a relay.
-# rookery DKIM-signs every message before handoff; the smarthost is opaque
-# transport. This is the realistic fix for a fresh VPS IP whose outbound mail is
-# junked by Gmail/Outlook regardless of correct DKIM/SPF/DMARC. See ADR-0030.
-#
-# Off by default → direct MX delivery. To enable, uncomment and fill in:
-# [smtp.smarthost]
-# enabled     = true
-# host        = "smtp.postmarkapp.com"   # or "email-smtp.us-east-1.amazonaws.com", or a relay rookery's hostname
-# port        = 587                       # 587 (STARTTLS) or 465 (implicit TLS)
-# username    = "your-smtp-username"      # API token id, or the relay-client id issued by the relay rookery
-# require_tls = true                       # mandatory TLS — a credential-bearing session is never sent in the clear
-# auth        = true
-# The password comes from the ROOKERY_SMTP_RELAY_PASSWORD env var in .env, never this file.
-#
-# Dev (capture outbound in mailpit) is just a smarthost with the security knobs off:
-# [smtp.smarthost]
-# enabled     = true
-# host        = "mailpit"
-# port        = 1025
-# auth        = false
-# require_tls = false
-
-# Be a relay rookery: accept authenticated SMTP submissions (ports 465/587) from
-# whitelisted downstream operators and relay their already-signed mail to the
-# internet on their behalf. OFF by default. Only turn this on if you understand
-# that you inherit your downstreams' outbound reputation — relay only for operators
-# you know. Requires the prod profile (Caddy) so a TLS cert exists for your domain.
-# Issue/list/revoke client credentials with: ./rookery relay-client ...
-# See ADR-0030 and docs/ops/spam-runbook.md.
-# submission_enabled = false
-# The submission listener reuses the TLS cert Caddy provisions for your domain,
-# read from the caddy-data volume mounted read-only into the container. Override
-# the directory only if your Caddy layout differs:
-# submission_certs_dir = "/data/caddy/certificates"
-# Escape hatch: explicit PEM paths instead of the Caddy lookup (you own renewal):
-# submission_cert_file = "/etc/rookery/tls/fullchain.pem"
-# submission_key_file  = "/etc/rookery/tls/privkey.pem"
-
-# --------------------------------------------------------------------------- #
-# Per-instance policy
-# --------------------------------------------------------------------------- #
-[policy]
-# Default per-user mailbox quota in bytes. Default: 5368709120 (5 GiB).
-# Per-user overrides via: UPDATE users SET quota_bytes = ... WHERE ...;
-default_quota_bytes = 5368709120
-
-# Days before messages in Trash are hard-deleted. Default: 30.
-# Set to 0 for immediate hard delete on trash.
-trash_retention_days = 30
-
-# Days of inactivity before a session expires. Default: 7.
-session_expiry_days = 7
-
-# Log connecting IP addresses on the web UI and submission ports.
-# Default: false (pseudonymity-preserving). Set to true only if you understand
-# the trade-off: logging IPs enables abuse investigation at the cost of
-# undermining the pseudonymity property the system is designed to provide.
-# See §5.4, §11.2 of PLAN.md.
-log_connecting_ips = false
-
-# --------------------------------------------------------------------------- #
-# Spam filtering
-# --------------------------------------------------------------------------- #
-[spam]
-# rspamd HTTP check API endpoint. Default: http://rspamd:11333 (the bundled
-# rspamd container, always running alongside rookery and postgres).
-# Set to "" to disable spam filtering entirely (not recommended).
-rspamd_url = "http://rspamd:11333"
-TOML
-        info "created rookery.toml"
-
-        if [ -z "$opt_domain" ] && [ "$opt_no_prompt" -eq 0 ]; then
-            printf 'rookery: primary domain (e.g. rookery.example.com): ' >&2
-            read -r opt_domain
-        fi
-        if [ -z "$opt_email" ] && [ "$opt_no_prompt" -eq 0 ]; then
-            printf "rookery: Let's Encrypt contact email (Enter to skip): " >&2
-            read -r opt_email
-        fi
-        if [ -z "$opt_name" ] && [ "$opt_no_prompt" -eq 0 ]; then
-            printf 'rookery: instance display name (Enter to use domain): ' >&2
-            read -r opt_name
-        fi
+    if [ ! -f "./config/rookery/rookery.toml" ]; then
+        cp "./config/templates/rookery/rookery.toml" "./config/rookery/rookery.toml"
 
         if [ -n "$opt_domain" ]; then
-            sed -i "s|^domain = \"rookery.example\".*|domain = \"${opt_domain}\"|" \
-                "$SCRIPT_DIR/rookery.toml"
+            sed -i "s|^domain = \"rookery.example.com\".*|domain = \"${opt_domain}\"|" "./config/rookery/rookery.toml"
         fi
         if [ -n "$opt_email" ]; then
-            sed -i "s|^contact_email = \"admin@rookery.example\".*|contact_email = \"${opt_email}\"|" \
-                "$SCRIPT_DIR/rookery.toml"
+            sed -i "s|^contact_email = \"me@example.com\".*|contact_email = \"${opt_email}\"|" "./config/rookery/rookery.toml"
         fi
         if [ -n "$opt_name" ]; then
-            sed -i "s|^instance_name = \"My Rookery\".*|instance_name = \"${opt_name}\"|" \
-                "$SCRIPT_DIR/rookery.toml"
+            sed -i "s|^instance_name = \"My Rookery Instance\".*|instance_name = \"${opt_name}\"|" "./config/rookery/rookery.toml"
         fi
-    else
-        info "rookery.toml already exists — skipping"
     fi
 
-    # ---- .env (secrets) -----------------------------------------------------
-    if [ ! -f "$SCRIPT_DIR/.env" ]; then
-        touch "$SCRIPT_DIR/.env"
-    fi
-    # Both names carry the same value: ROOKERY_DB_PASSWORD for the Go server,
-    # POSTGRES_PASSWORD for the postgres container image.
-    local db_pass
-    db_pass=$(env_get ROOKERY_DB_PASSWORD)
-    [ -z "$db_pass" ] && db_pass=$(openssl rand -hex 32)
-    env_gen ROOKERY_DB_PASSWORD "$db_pass"
-    env_gen POSTGRES_PASSWORD   "$db_pass"
-    env_gen ROOKERY_MASTER_KEY
-    env_gen ROOKERY_SESSION_KEY
-    # Outbound smarthost SASL password (ADR-0030). Empty by default; uncomment and
-    # set when [smtp.smarthost] is enabled with auth = true. The container reads
-    # .env via env_file, so an uncommented value flows in on the next restart.
-    if ! grep -q 'ROOKERY_SMTP_RELAY_PASSWORD' "$SCRIPT_DIR/.env"; then
-        printf '# ROOKERY_SMTP_RELAY_PASSWORD=\n' >> "$SCRIPT_DIR/.env"
+    if [ ! -f "./config/rookery/.env" ]; then
+        cp "./config/templates/rookery/.env" "./config/rookery/.env"
+
+        db_pass=$(openssl rand -hex 32)
+
+        sed -i "s|^ROOKERY_DB_PASSWORD=$|ROOKERY_DB_PASSWORD=${db_pass}|" "./config/rookery/.env"
+        sed -i "s|^POSTGRES_PASSWORD=$|POSTGRES_PASSWORD=${db_pass}|" "./config/rookery/.env"
+        sed -i "s|^ROOKERY_MASTER_KEY=$|ROOKERY_MASTER_KEY=$(openssl rand -hex 32)|" "./config/rookery/.env"
+        sed -i "s|^ROOKERY_SESSION_KEY=$|ROOKERY_SESSION_KEY=$(openssl rand -hex 32)|" "./config/rookery/.env"
     fi
 
-    # Message blobs live in the `messages-data` named volume (see compose.yaml),
-    # which Docker creates on first `start` owned by the container's nonroot UID.
-    # Nothing to set up on the host.
+    if [ ! -f "./config/caddy/Caddyfile" ]; then
+        cp "./config/templates/caddy/Caddyfile" "./config/caddy/Caddyfile"
 
-    # ---- Caddyfile ----------------------------------------------------------
-    if [ ! -f "$SCRIPT_DIR/Caddyfile" ]; then
-        local domain email
-        domain=$(toml_get domain)
-        email=$(toml_get contact_email)
-
-        [ -z "$domain" ] && domain="rookery.example"
-        [ "$domain" = "rookery.example" ] \
-            && info "warning: domain is still 'rookery.example' — edit rookery.toml before going live"
-
-        {
-            # Global options block.
-            if [ -n "$email" ] && [ "$email" != "admin@rookery.example" ]; then
-                printf '{\n\temail %s\n\ton_demand_tls {\n\t\task http://rookery:8080/internal/tls-ask\n\t\tinterval 2m\n\t\tburst 5\n\t}\n}\n\n' "$email"
-            else
-                printf '{\n\ton_demand_tls {\n\t\task http://rookery:8080/internal/tls-ask\n\t\tinterval 2m\n\t\tburst 5\n\t}\n}\n\n'
-            fi
-            # Primary domain + standard subdomains (explicit ACME certs).
-            printf '%s openpgpkey.%s mta-sts.%s {\n\treverse_proxy rookery:8080\n}\n\n' \
-                "$domain" "$domain" "$domain"
-            # Catch-all block for custom-domain CNAMEs (on-demand TLS).
-            # Caddy asks /internal/tls-ask before issuing any cert in this block.
-            printf ':443 {\n\ttls {\n\t\ton_demand\n\t}\n\treverse_proxy rookery:8080\n}\n'
-        } > "$SCRIPT_DIR/Caddyfile"
-        info "generated Caddyfile for domain '${domain}'"
-    else
-        info "Caddyfile already exists — skipping"
+        sed -i "s|@DOMAIN@|${opt_domain}|g" "./config/caddy/Caddyfile"
+        sed -i "s|@EMAIL@|${opt_email}|" "./config/caddy/Caddyfile"
     fi
 
-    # ---- ./rookery.service --------------------------------------------------
-    local _svc_exists=0
-    [ -f "$SCRIPT_DIR/rookery.service" ] && _svc_exists=1
-    if [ "$_svc_exists" -eq 0 ] || [ "$opt_clamav" -eq 1 ]; then
-        local svc_user="${opt_user:-$(whoami)}"
-        local execstart="/opt/rookery/rookery start --prod -d"
-        [ "$opt_clamav" -eq 1 ] && execstart="/opt/rookery/rookery start --prod --profile clamav -d"
-        cat > "$SCRIPT_DIR/rookery.service" << EOF
-[Unit]
-Description=rookery mail server
-After=docker.service network-online.target
-Requires=docker.service
+    if [ ! -f "./config/rookery/rookery.service" ]; then
+        cp "./config/templates/rookery/rookery.service" "./config/rookery/rookery.service"
 
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=/opt/rookery
-ExecStart=${execstart}
-ExecStop=/opt/rookery/rookery stop
-User=${svc_user}
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        if [ "$_svc_exists" -eq 1 ]; then
-            info "rookery.service regenerated with ClamAV profile — re-run: sudo ./rookery install && sudo systemctl restart rookery"
-        else
-            info "staged rookery.service with User=${svc_user}${opt_clamav:+ (ClamAV profile enabled)}"
-        fi
-    else
-        info "rookery.service already exists — skipping (pass --clamav to regenerate with ClamAV profile)"
+        sed -i "s|@USER@|$(whoami)|" "./config/rookery/rookery.service"
     fi
+fi
 
-    printf '\n' >&2
-    info "init complete."
-    info ""
-    info "Next steps:"
-    info "  sudo ./rookery install          # copy systemd unit, daemon-reload"
-    info "  sudo systemctl enable --now rookery"
-    info "  ./rookery backup ~/backups/     # make an initial encrypted backup"
-    info "  ./rookery invite create         # generate the first invite URL"
-}
-
-# ---------------------------------------------------------------------------
-# install
-# ---------------------------------------------------------------------------
-cmd_install() {
-    [ "$(id -u)" -eq 0 ] \
-        || die "rookery install must be run as root (use: sudo ./rookery install)"
-    [ -f "$SCRIPT_DIR/rookery.service" ] \
-        || die "rookery.service not found — run './rookery init' first"
-    install -m644 "$SCRIPT_DIR/rookery.service" /etc/systemd/system/rookery.service
+if [ "$1" == "install" ]; then
+    install -m644 "./config/rookery/rookery.service" /etc/systemd/system/rookery.service
     systemctl daemon-reload
-    info "systemd unit installed at /etc/systemd/system/rookery.service"
-    info "Run: sudo systemctl enable --now rookery"
-}
+fi
 
-# ---------------------------------------------------------------------------
-# start [--prod] [extra docker compose up flags]
-# ---------------------------------------------------------------------------
-cmd_start() {
-    local prod=0
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --prod) prod=1; shift ;;
-            *)      break ;;
-        esac
-    done
-    need_init
-    if [ "$prod" -eq 1 ]; then
-        dc --profile prod up --build "$@"
+if [ "$1" == "start" ]; then
+    if [ "${2:-}" == "--prod" ]; then
+        docker compose --profile prod up -d
     else
-        dc --profile dev up --build "$@"
+        docker compose --profile dev up --build
     fi
-}
+fi
 
-# ---------------------------------------------------------------------------
-# stop
-# ---------------------------------------------------------------------------
-cmd_stop() {
-    need_init
-    dc down "$@"
-}
+if [ "$1" == "stop" ]; then
+    docker compose down
+fi
 
-# ---------------------------------------------------------------------------
-# restart [--prod] [extra flags]
-# ---------------------------------------------------------------------------
-cmd_restart() {
-    need_init
-    cmd_stop
-    cmd_start "$@"
-}
+if [ "$1" == "update" ]; then
+    git fetch
+    git pull --ff-only
+    docker compose build
+fi
 
-# ---------------------------------------------------------------------------
-# update
-# ---------------------------------------------------------------------------
-cmd_update() {
-    need_init
-    git -C "$SCRIPT_DIR" fetch \
-        || die "git fetch failed"
-    git -C "$SCRIPT_DIR" pull --ff-only \
-        || die "git pull --ff-only failed — branch has diverged or has local commits; resolve manually"
-    dc build
-    info "update complete — restart to apply: sudo systemctl restart rookery"
-}
-
-# ---------------------------------------------------------------------------
-# logs [service]
-# ---------------------------------------------------------------------------
-cmd_logs() {
-    dc logs -f "${1:-rookery}"
-}
-
-# ---------------------------------------------------------------------------
-# ps
-# ---------------------------------------------------------------------------
-cmd_ps() {
-    dc ps "$@"
-}
-
-# ---------------------------------------------------------------------------
-# invite create [validity_days]
-# ---------------------------------------------------------------------------
-cmd_invite_create() {
-    need_init
-
-    local validity="${1:-}"
-    case "$validity" in
-        "")       ;;
-        *[!0-9]*) die "validity_days must be a positive integer (got '${validity}')" ;;
-    esac
-
-    local domain
+if [ "$1" == "create-invite" ]; then
     domain=$(toml_get domain)
-    [ -n "$domain" ] || die "could not read domain from rookery.toml"
-
-    local token
     token=$(openssl rand -hex 32)
-    [ -n "$token" ] || die "failed to generate invite token"
 
-    local expires_sql
-    if [ -n "$validity" ]; then
-        expires_sql="now() + interval '${validity} days'"
+    psql_c "INSERT INTO invites (token, expires_at) VALUES ('${token}', now() + interval '1 days');"
+
+    if [ "$domain" = "localhost" ]; then
+        echo "http://localhost:8080/invite/${token}"
     else
-        expires_sql="NULL"
+        echo "https://${domain}/invite/${token}"
     fi
+fi
 
-    local db_pass
-    db_pass=$(env_get POSTGRES_PASSWORD)
-    [ -n "$db_pass" ] || die "POSTGRES_PASSWORD not found in .env"
+if [ "$1" == "check-dns" ]; then
+    domain=$(toml_get "domain")
 
-    dc exec -T \
-        -e PGPASSWORD="$db_pass" \
-        postgres \
-        psql -h localhost -U rookery -d rookery -q -t \
-        -c "INSERT INTO invites (token, expires_at) VALUES ('${token}', ${expires_sql});" \
-        >/dev/null
+    dkim_ed=$(psql_c "
+        SELECT 'v=DKIM1; k=ed25519; p=' || replace(encode(public_key_der, 'base64'), chr(10), '')
+        FROM dkim_keys dk
+        JOIN domains d ON d.id = dk.domain_id
+        WHERE d.domain='${domain}'
+            AND dk.selector='rookery-ed25519'
+            AND dk.is_active=TRUE
+        LIMIT 1;
+    ")
+    dkim_rsa=$(psql_c "
+        SELECT 'v=DKIM1; k=rsa; p=' || replace(encode(public_key_der, 'base64'), chr(10), '')
+        FROM dkim_keys dk
+        JOIN domains d ON d.id = dk.domain_id
+        WHERE d.domain='${domain}'
+            AND dk.selector='rookery-rsa'
+            AND dk.is_active=TRUE
+        LIMIT 1;
+    ")
+    mtasts_id=$(psql_c "
+        SELECT mta_sts_id
+        FROM domains
+        WHERE domain='${domain}'
+            AND is_primary=TRUE
+        LIMIT 1;
+    ")
 
-    case "$domain" in
-        localhost|127.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|192.168.*|::1)
-            # Read the HTTP port from rookery.toml; default 8080.
-            local http_port
-            http_port=$(grep -E "^[[:space:]]*port[[:space:]]*=" \
-                "$SCRIPT_DIR/rookery.toml" 2>/dev/null \
-                | head -1 | sed 's/.*=[[:space:]]*//' | tr -d ' "')
-            [ -z "$http_port" ] && http_port="8080"
-            printf 'http://%s:%s/invite/%s\n' "$domain" "$http_port" "$token"
-            ;;
-        *)
-            printf 'https://%s/invite/%s\n' "$domain" "$token"
-            ;;
-    esac
-}
+    row() {
+        local wanted="$(tr -d '"[:space:]' <<< "${3:-}")"
+        local actual="$(dig +short "$2" "$1" | tr -d '"[:space:]')"
+        local result="[MISS]"
 
-cmd_invite() {
-    case "${1:-}" in
-        create) shift; cmd_invite_create "$@" ;;
-        "")     die "usage: rookery invite create [validity_days]" ;;
-        *)      die "unknown invite subcommand '${1}' — try: rookery invite create" ;;
-    esac
-}
+        if [ -n "$actual" ]; then
+            if [ -z "$wanted" ]; then
+                result="[ OK ]"
+            elif [ "$actual" = "$wanted" ]; then
+                result="[ OK ]"
+            fi
+        fi
 
-# ---------------------------------------------------------------------------
-# send-mail [flags] <to> [from] [subject] [body]
-# ---------------------------------------------------------------------------
-
-# Wrapper called by the encrypted path; uses the temp homedir set in
-# _SEND_MAIL_TMPDIR so we never touch the operator's own keyring.
-_send_mail_gpg() {
-    gpg --homedir "$_SEND_MAIL_TMPDIR" --batch --yes --quiet "$@"
-}
-
-_send_mail_cleanup() {
-    [ -n "$_SEND_MAIL_TMPDIR" ] && rm -rf -- "$_SEND_MAIL_TMPDIR"
-    _SEND_MAIL_TMPDIR=""
-}
-
-cmd_send_mail() {
-    local encrypted=0 pubkey_file="" fetch_key=0 spam=0 attach_file="" attach_example=0
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --encrypted) encrypted=1; shift ;;
-            --pubkey)
-                shift
-                pubkey_file="${1:-}"
-                [ -n "$pubkey_file" ] || die "--pubkey requires a file path argument"
-                shift ;;
-            --fetch-key) fetch_key=1; shift ;;
-            --spam) spam=1; shift ;;
-            --attachment)
-                shift
-                # Peek at the next token: consume it as a file path only if it
-                # exists on disk; otherwise generate an example attachment.
-                if [ -f "${1:-}" ]; then
-                    attach_file="$1"
-                    shift
-                else
-                    attach_example=1
-                fi ;;
-            --) shift; break ;;
-            -*) die "unknown flag: $1" ;;
-            *)  break ;;
-        esac
-    done
-
-    local to="${1:-}"
-    local from="${2:-sender@example.com}"
-    local subject="${3:-test message $(date '+%H:%M:%S')}"
-    local body="${4:-This is a test message injected by rookery send-mail at $(date).}"
-
-    [ -n "$to" ] || {
-        printf 'usage: rookery send-mail [--encrypted --pubkey <file>|--fetch-key] [--spam] <to> [from] [subject] [body]\n' >&2
-        exit 1
+        printf '%s\t%s\t%s\t%s\n' "$result" "$1" "$2" "${3:-}"
     }
 
-    if [ "$encrypted" -eq 1 ] && [ -z "$pubkey_file" ] && [ "$fetch_key" -eq 0 ]; then
-        die "--encrypted requires either --pubkey <file> or --fetch-key"
-    fi
-    if [ -n "$pubkey_file" ] && [ "$fetch_key" -eq 1 ]; then
-        die "--pubkey and --fetch-key are mutually exclusive"
-    fi
-    if { [ -n "$pubkey_file" ] || [ "$fetch_key" -eq 1 ]; } && [ "$encrypted" -eq 0 ]; then
-        die "--pubkey / --fetch-key require --encrypted"
-    fi
-    if [ "$spam" -eq 1 ] && [ "$encrypted" -eq 1 ]; then
-        die "--spam and --encrypted are mutually exclusive"
-    fi
-    if [ "$spam" -eq 1 ] && { [ -n "$attach_file" ] || [ "$attach_example" -eq 1 ]; }; then
-        die "--spam and --attachment are mutually exclusive"
-    fi
+    {
+        printf 'STATUS\tTYPE\tNAME\tVALUE\n'
 
-    # ---- Resolve attachment (shared by both paths) ---------------------------
-    local att_name="" att_mime="" att_b64="" att_label=""
-    if [ -n "$attach_file" ] || [ "$attach_example" -eq 1 ]; then
-        if [ "$attach_example" -eq 1 ]; then
-            att_name="example-attachment.txt"
-            att_mime="text/plain"
-            local _att_content
-            _att_content=$(printf 'This is a test attachment generated by rookery send-mail.\nGenerated: %s\n' "$(date)")
-            att_b64=$(printf '%s' "$_att_content" | base64 -w 76 2>/dev/null || \
-                      printf '%s' "$_att_content" | base64)
-            att_label="(example)"
-        else
-            att_name=$(basename -- "$attach_file")
-            att_mime=$(file --mime-type -b "$attach_file" 2>/dev/null || printf 'application/octet-stream')
-            att_b64=$(base64 -w 76 "$attach_file" 2>/dev/null || base64 "$attach_file")
-            att_label="$attach_file"
-        fi
+        row A    "$domain"
+        row AAAA "$domain"
+        row A    "openpgpkey.$domain"
+        row AAAA "openpgpkey.$domain"
+        row A    "mta-sts.$domain"
+        row AAAA "mta-sts.$domain"
+        row MX   "$domain"                            "10 $domain."
+        row TXT  "$domain"                            "v=spf1 a -all"
+        row TXT  "rookery-ed25519._domainkey.$domain" "$dkim_ed"
+        row TXT  "rookery-rsa._domainkey.$domain"     "$dkim_rsa"
+        row TXT  "_dmarc.$domain"                     "v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain}"
+        row TXT  "_mta-sts.$domain"                   "v=STSv1;id=$mtasts_id"
+        row TXT  "_smtp._tls.$domain"                 "v=TLSRPTv1; rua=mailto:postmaster@${domain}"
+    } | column -t -s $'\t'
+fi
+
+if [ "$1" == "user" ]; then
+    if [ "$2" = "suspend" ]; then
+        psql_c "
+            UPDATE users
+            SET suspended_at = now()
+            FROM addresses
+            WHERE users.id = addresses.user_id
+                AND lower(addresses.local_part) = lower('$3')
+        "
     fi
 
-    # ---- Plaintext path -----------------------------------------------------
-    if [ "$encrypted" -eq 0 ]; then
-        if [ "$spam" -eq 1 ]; then
-            subject="[SPAM TEST] ${subject}"
-            # GTUBE: standard rspamd/SpamAssassin test string that always triggers a reject.
-            body="XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X"
-        fi
-
-        local plain_date plain_msgid
-        plain_date="$(date -R 2>/dev/null || date '+%a, %d %b %Y %H:%M:%S %z')"
-        plain_msgid="rookery-$(date '+%s')@rookery.test"
-
-        if [ -n "$att_name" ]; then
-            local att_boundary
-            att_boundary="rookery_plain_$(date '+%s')_boundary"
-            {
-                printf '%s' "From: ${from}
-To: ${to}
-Subject: ${subject}
-Date: ${plain_date}
-Message-ID: <${plain_msgid}>
-MIME-Version: 1.0
-Content-Type: multipart/mixed; boundary=\"${att_boundary}\"
-
---${att_boundary}
-Content-Type: text/plain; charset=utf-8
-
-${body}
-
---${att_boundary}
-Content-Type: ${att_mime}
-Content-Disposition: attachment; filename=\"${att_name}\"
-Content-Transfer-Encoding: base64
-
-${att_b64}
-
---${att_boundary}--
-"
-            } | curl -s \
-                --url "${ROOKERY_SMTP}" \
-                --mail-from "${from}" \
-                --mail-rcpt "${to}" \
-                --upload-file -
-            printf 'sent (plaintext+attachment): %s\n  from: %s\n  to:   %s\n  attachment: %s %s\n' \
-                "$subject" "$from" "$to" "$att_name" "$att_label"
-        else
-            printf '%s' "From: ${from}
-To: ${to}
-Subject: ${subject}
-Date: ${plain_date}
-Message-ID: <${plain_msgid}>
-MIME-Version: 1.0
-Content-Type: text/plain; charset=utf-8
-
-${body}
-" | curl -s \
-                --url "${ROOKERY_SMTP}" \
-                --mail-from "${from}" \
-                --mail-rcpt "${to}" \
-                --upload-file -
-            printf 'sent (plaintext): %s\n  from: %s\n  to:   %s\n' "$subject" "$from" "$to"
-        fi
-        return 0
+    if [ "$2" = "unsuspend" ]; then
+        psql_c "
+            UPDATE users
+            SET suspended_at = NULL
+            FROM addresses
+            WHERE users.id = addresses.user_id
+                AND lower(addresses.local_part) = lower('$3')
+        "
     fi
 
-    # ---- Encrypted path — requires gpg --------------------------------------
-    command -v gpg >/dev/null 2>&1 \
-        || die "gpg is required for --encrypted (install gnupg2)"
-
-    _SEND_MAIL_TMPDIR="$(mktemp -d)"
-    trap '_send_mail_cleanup' EXIT INT TERM
-
-    if [ "$fetch_key" -eq 1 ]; then
-        command -v python3 >/dev/null 2>&1 \
-            || die "python3 is required for --fetch-key (WKD hash computation)"
-
-        local local_part domain_part wkd_hash http_status
-        local_part="${to%%@*}"
-        domain_part="${to##*@}"
-
-        wkd_hash=$(python3 - "$local_part" <<'PYEOF'
-import sys, hashlib
-ALPHA = "ybndrfg8ejkmcpqxot1uwisza345h769"
-local = sys.argv[1].lower().encode()
-digest = hashlib.sha1(local).digest()
-bits = int.from_bytes(digest, 'big')
-chars = []
-for _ in range(32):
-    chars.append(ALPHA[bits & 0x1f])
-    bits >>= 5
-print(''.join(reversed(chars)))
-PYEOF
-)
-        local wkd_url="${ROOKERY_HTTP}/.well-known/openpgpkey/${domain_part}/hu/${wkd_hash}"
-        pubkey_file="${_SEND_MAIL_TMPDIR}/recipient.pgp"
-        info "fetching public key via WKD: ${wkd_url}"
-        http_status=$(curl -s -o "$pubkey_file" -w "%{http_code}" "$wkd_url")
-        [ "$http_status" = "200" ] \
-            || die "WKD key fetch returned HTTP ${http_status} — ${wkd_url}"
-        _send_mail_gpg --import "$pubkey_file" 2>/dev/null
-    else
-        [ -f "$pubkey_file" ] || die "public key file not found: ${pubkey_file}"
-        _send_mail_gpg --import "$pubkey_file" 2>/dev/null
+    if [ "$2" = "delete" ]; then
+        exec_rookery delete-user "$3"
     fi
+fi
 
-    local fingerprint
-    fingerprint=$(_send_mail_gpg --with-colons --list-keys 2>/dev/null \
-        | awk -F: '/^fpr/{print $10; exit}')
-    [ -n "$fingerprint" ] || die "could not read fingerprint from the imported key"
-    printf '%s:6:\n' "$fingerprint" | _send_mail_gpg --import-ownertrust 2>/dev/null
+if [ "$1" == "master-key" ]; then
+    if [ "$2" = "rotate" ]; then
+        new_key="$(openssl rand -hex 32)"
 
-    local cipher_file="${_SEND_MAIL_TMPDIR}/body.pgp"
-    local plaintext_file="${_SEND_MAIL_TMPDIR}/plaintext.mime"
+        exec_rookery rotate-master-key --old-key="$(env_get ROOKERY_MASTER_KEY)" --new-key="$new_key"
 
-    if [ -n "$att_name" ]; then
-        local inner_boundary
-        inner_boundary="rookery_inner_$(date '+%s')_boundary"
-        printf '%s' "Content-Type: multipart/mixed; boundary=\"${inner_boundary}\"
-
---${inner_boundary}
-Content-Type: text/plain; charset=utf-8
-
-${body}
-
---${inner_boundary}
-Content-Type: ${att_mime}
-Content-Disposition: attachment; filename=\"${att_name}\"
-Content-Transfer-Encoding: base64
-
-${att_b64}
-
---${inner_boundary}--
-" > "$plaintext_file"
-    else
-        printf '%s\n' "$body" > "$plaintext_file"
+        sed -i "s|^ROOKERY_MASTER_KEY=.*|ROOKERY_MASTER_KEY=$new_key|" config/rookery/.env
     fi
+fi
 
-    _send_mail_gpg --armor \
-        --recipient "$fingerprint" \
-        --output "$cipher_file" \
-        --encrypt "$plaintext_file" 2>/dev/null
-
-    local encrypted_body
-    encrypted_body=$(cat "$cipher_file")
-
-    local boundary="rookery_pgp_$(date '+%s')_boundary"
-    local date_hdr message_id
-    date_hdr="$(date -R 2>/dev/null || date '+%a, %d %b %Y %H:%M:%S %z')"
-    message_id="rookery-$(date '+%s')@rookery.test"
-
-    printf '%s' "From: ${from}
-To: ${to}
-Subject: ${subject}
-Date: ${date_hdr}
-Message-ID: <${message_id}>
-MIME-Version: 1.0
-Content-Type: multipart/encrypted; protocol=\"application/pgp-encrypted\"; boundary=\"${boundary}\"
-
---${boundary}
-Content-Type: application/pgp-encrypted
-
-Version: 1
-
---${boundary}
-Content-Type: application/octet-stream; name=\"encrypted.asc\"
-Content-Disposition: inline; filename=\"encrypted.asc\"
-
-${encrypted_body}
-
---${boundary}--
-" | curl -s \
-        --url "${ROOKERY_SMTP}" \
-        --mail-from "${from}" \
-        --mail-rcpt "${to}" \
-        --upload-file -
-
-    if [ -n "$att_name" ]; then
-        printf 'sent (pgp-encrypted+attachment): %s\n  from: %s\n  to:   %s\n  key:  %s\n  attachment: %s %s\n' \
-            "$subject" "$from" "$to" "$fingerprint" "$att_name" "$att_label"
-    else
-        printf 'sent (pgp-encrypted): %s\n  from: %s\n  to:   %s\n  key:  %s\n' \
-            "$subject" "$from" "$to" "$fingerprint"
-    fi
-
-    _send_mail_cleanup
-    trap - EXIT INT TERM
-}
-
-# ---------------------------------------------------------------------------
-# check-dns [--resolver <addr>]
-# ---------------------------------------------------------------------------
-cmd_check_dns() {
-    need_init
-
-    local domain resolver=""
-    domain=$(toml_get domain)
-    [ -n "$domain" ] || die "could not read domain from rookery.toml"
-
-    # Defence against SQL string interpolation below: domains contain only
-    # letters, digits, hyphens, and dots — anything else is operator error.
-    case "$domain" in
-        ''|*[!a-zA-Z0-9.-]*|.*|*.|*..*) die "invalid domain '$domain' in rookery.toml" ;;
-    esac
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --resolver)
-                [ $# -ge 2 ] || die "--resolver requires a value (e.g. --resolver 9.9.9.9)"
-                case "$2" in -*|'') die "--resolver value missing or looks like a flag: '$2'" ;; esac
-                resolver="$2"; shift 2 ;;
-            --) shift; break ;;
-            -*) die "unknown flag: $1" ;;
-            *)  break ;;
-        esac
-    done
-
-    command -v dig >/dev/null 2>&1 || command -v host >/dev/null 2>&1 \
-        || die "check-dns requires 'dig' (dnsutils) or 'host'"
-    local use_dig=0
-    command -v dig >/dev/null 2>&1 && use_dig=1
-    local dig_resolver=""
-    [ -n "$resolver" ] && dig_resolver="@${resolver}"
-
-    # --- DNS lookup helpers ---------------------------------------------------
-    # These functions reference $use_dig and $dig_resolver via dynamic scoping.
-
-    # $1 = host, $2 = "A" or "AAAA". Returns the first matching address, or empty.
-    _dnscheck_addr() {
-        local host="$1" rrtype="$2"
-        if [ "$use_dig" -eq 1 ]; then
-            dig +short +time=5 $dig_resolver "$host" "$rrtype" 2>/dev/null \
-                | grep -v '^;;' | grep -v '^$' | head -1
-        else
-            local pattern
-            case "$rrtype" in
-                AAAA) pattern="has IPv6 address" ;;
-                *)    pattern="has address" ;;
-            esac
-            host -t "$rrtype" "$host" 2>/dev/null \
-                | grep "$pattern" | awk '{print $NF}' | head -1
-        fi
-    }
-
-    _dnscheck_mx() {
-        # Lowest-priority MX answer for $1 (e.g. "10 example.com."), or empty string.
-        if [ "$use_dig" -eq 1 ]; then
-            dig +short +time=5 $dig_resolver "$1" MX 2>/dev/null \
-                | grep -v '^;;' | grep -v '^$' | sort -n | head -1
-        else
-            host -t MX "$1" 2>/dev/null \
-                | grep "mail is handled" | head -1 | sed 's/.*handled by //'
-        fi
-    }
-
-    # First TXT for $1 whose value begins with literal $2 (case-insensitive),
-    # or empty. $2 is matched as a literal string, not a regex.
-    # The `|| true` on each command-substitution guards `set -e`: grep exits 1
-    # when nothing matches (NXDOMAIN, no propagation), which would otherwise
-    # abort the whole check-dns run mid-section.
-    _dnscheck_txt() {
-        local lookup="$1" prefix="$2"
-        local raw=""
-        if [ "$use_dig" -eq 1 ]; then
-            raw=$(dig +short +time=5 $dig_resolver "$lookup" TXT 2>/dev/null \
-                | tr -d '"' | grep -v '^;;' | grep -v '^$' || true)
-        else
-            raw=$(host -t TXT "$lookup" 2>/dev/null \
-                | grep "descriptive text" \
-                | sed 's/.*descriptive text //' | tr -d '"' || true)
-        fi
-        [ -n "$raw" ] || return 0
-        printf '%s\n' "$raw" \
-            | awk -v p="$prefix" 'tolower(substr($0,1,length(p)))==tolower(p){print; exit}'
-    }
-
-    # $1=ok|miss|hint  $2=record-name  $3=note (optional)
-    _dnscheck_row() {
-        local tag
-        case "$1" in
-            ok)   tag="[  ok  ]" ;;
-            miss) tag="[MISSING]" ;;
-            hint) tag="[ hint ]" ;;
-            *)    tag="[  ??  ]" ;;
-        esac
-        printf '  %s  %-50s  %s\n' "$tag" "$2" "${3:-}"
-    }
-
-    # Continuation line showing what to add when a record is missing.
-    _dnscheck_add() {
-        printf '             add: "%s"\n' "$1"
-    }
-
-    # --- Query database for values that only the server knows ----------------
-    local db_pass dkim_ed="" dkim_rsa="" mtasts_id=""
-    db_pass=$(env_get POSTGRES_PASSWORD)
-    if [ -n "$db_pass" ]; then
-        # $domain is validated above; trim leading/trailing whitespace from psql -t output
-        # but preserve interior spaces so the suggested DKIM TXT matches what the server logs.
-        dkim_ed=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
-            psql -h localhost -U rookery -d rookery -t -q -A \
-            -c "SELECT 'v=DKIM1; k=ed25519; p='
-                    || replace(encode(public_key_der,'base64'),chr(10),'')
-                FROM dkim_keys dk JOIN domains d ON d.id = dk.domain_id
-                WHERE d.domain='${domain}'
-                  AND dk.selector='rookery-ed25519'
-                  AND dk.is_active=TRUE LIMIT 1;" \
-            2>/dev/null | tr -d '\n')
-        dkim_rsa=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
-            psql -h localhost -U rookery -d rookery -t -q -A \
-            -c "SELECT 'v=DKIM1; k=rsa; p='
-                    || replace(encode(public_key_der,'base64'),chr(10),'')
-                FROM dkim_keys dk JOIN domains d ON d.id = dk.domain_id
-                WHERE d.domain='${domain}'
-                  AND dk.selector='rookery-rsa'
-                  AND dk.is_active=TRUE LIMIT 1;" \
-            2>/dev/null | tr -d '\n')
-        mtasts_id=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
-            psql -h localhost -U rookery -d rookery -t -q -A \
-            -c "SELECT mta_sts_id FROM domains
-                WHERE domain='${domain}' AND is_primary=TRUE LIMIT 1;" \
-            2>/dev/null | tr -d '\n')
-    fi
-
-    # --- Output ---------------------------------------------------------------
-    local sep="=============================================================="
-    printf '\nDNS records for %s\n' "$domain"
-    printf '%s\n' "$sep"
-
-    # A / AAAA  (every host needs at least one; both is fine)
-    printf '\nA / AAAA  (each host needs at least one address record)\n'
-    local h v4 v6
-    for h in "$domain" "openpgpkey.${domain}" "mta-sts.${domain}"; do
-        v4=$(_dnscheck_addr "$h" A)
-        v6=$(_dnscheck_addr "$h" AAAA)
-        if [ -n "$v4" ]; then
-            _dnscheck_row ok   "${h} (A)" "$v4"
-        else
-            _dnscheck_row miss "${h} (A)" "(needs A pointing to your server)"
-        fi
-        if [ -n "$v6" ]; then
-            _dnscheck_row ok   "${h} (AAAA)" "$v6"
-        else
-            _dnscheck_row miss "${h} (AAAA)" "(needs AAAA pointing to your server)"
-        fi
-    done
-
-    # MX (must point to the bare primary, not a mail.* subdomain)
-    printf '\nMX\n'
-    local mx mx_host want_host
-    mx=$(_dnscheck_mx "$domain")
-    want_host=$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')
-    if [ -z "$mx" ]; then
-        _dnscheck_row miss "$domain" "(e.g.  10 ${domain}.)"
-    else
-        mx_host=$(printf '%s\n' "$mx" \
-            | awk '{ h=$NF; sub(/\.$/,"",h); print tolower(h) }')
-        if [ "$mx_host" = "$want_host" ]; then
-            _dnscheck_row ok "$domain" "$mx"
-        else
-            _dnscheck_row miss "$domain" "(found '$mx' — expected target '${domain}.')"
-        fi
-    fi
-
-    # SPF
-    printf '\nSPF TXT\n'
-    local spf
-    spf=$(_dnscheck_txt "$domain" "v=spf1")
-    if [ -n "$spf" ]; then
-        _dnscheck_row ok "$domain" "$spf"
-    else
-        _dnscheck_row miss "$domain"
-        _dnscheck_add "v=spf1 a -all"
-    fi
-
-    # DKIM  (key values come from the database; start the server first)
-    printf '\nDKIM TXT\n'
-    local dkim_ed_name="rookery-ed25519._domainkey.${domain}"
-    local dkim_rsa_name="rookery-rsa._domainkey.${domain}"
-    local dkim_ed_dns dkim_rsa_dns
-    dkim_ed_dns=$(_dnscheck_txt "$dkim_ed_name" "v=DKIM1")
-    dkim_rsa_dns=$(_dnscheck_txt "$dkim_rsa_name" "v=DKIM1")
-
-    if [ -n "$dkim_ed_dns" ]; then
-        _dnscheck_row ok "$dkim_ed_name"
-    elif [ -n "$dkim_ed" ]; then
-        _dnscheck_row miss "$dkim_ed_name"
-        _dnscheck_add "$dkim_ed"
-    else
-        _dnscheck_row miss "$dkim_ed_name" "(start the server first to generate keys)"
-    fi
-
-    if [ -n "$dkim_rsa_dns" ]; then
-        _dnscheck_row ok "$dkim_rsa_name"
-    elif [ -n "$dkim_rsa" ]; then
-        _dnscheck_row miss "$dkim_rsa_name"
-        _dnscheck_add "$dkim_rsa"
-    else
-        _dnscheck_row miss "$dkim_rsa_name" "(start the server first to generate keys)"
-    fi
-
-    # DMARC
-    printf '\nDMARC TXT\n'
-    local dmarc
-    dmarc=$(_dnscheck_txt "_dmarc.${domain}" "v=DMARC1")
-    if [ -n "$dmarc" ]; then
-        _dnscheck_row ok "_dmarc.${domain}" "$dmarc"
-    else
-        _dnscheck_row miss "_dmarc.${domain}"
-        _dnscheck_add "v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain}"
-    fi
-
-    # MTA-STS TXT
-    printf '\nMTA-STS TXT\n'
-    local mtasts_txt
-    mtasts_txt=$(_dnscheck_txt "_mta-sts.${domain}" "v=STSv1")
-    if [ -n "$mtasts_txt" ]; then
-        _dnscheck_row ok "_mta-sts.${domain}" "$mtasts_txt"
-    elif [ -n "$mtasts_id" ]; then
-        _dnscheck_row miss "_mta-sts.${domain}"
-        _dnscheck_add "v=STSv1; id=${mtasts_id}"
-    else
-        _dnscheck_row miss "_mta-sts.${domain}" "(start server to get the id value)"
-    fi
-
-    # TLS-RPT (optional but recommended)
-    printf '\nTLS-RPT TXT  (recommended)\n'
-    local tlsrpt
-    tlsrpt=$(_dnscheck_txt "_smtp._tls.${domain}" "v=TLSRPTv1")
-    if [ -n "$tlsrpt" ]; then
-        _dnscheck_row ok "_smtp._tls.${domain}" "$tlsrpt"
-    else
-        _dnscheck_row hint "_smtp._tls.${domain}"
-        _dnscheck_add "v=TLSRPTv1; rua=mailto:postmaster@${domain}"
-    fi
-
-    printf '\n%s\n\n' "$sep"
-}
-
-# ---------------------------------------------------------------------------
-# user <verb> <address>
-# ---------------------------------------------------------------------------
-
-# Internal helper: run a psql one-liner and return the output.
-# Usage: _psql_c "<SQL>"
-_psql_c() {
-    local db_pass
-    db_pass=$(env_get POSTGRES_PASSWORD)
-    dc exec -T -e PGPASSWORD="$db_pass" postgres \
-        psql -h localhost -U rookery -d rookery -tAc "$1" 2>/dev/null
-}
-
-# Validate that $1 looks like an email address (contains @, non-empty parts).
-# Die with a usage message if not. Shell-level only; psql still enforces schema.
-# Resolve a user address argument: accepts either "alice" or "alice@example.com".
-# A bare local part is expanded to "<localpart>@<primary domain>" from rookery.toml.
-# Prints the full address on success; dies with $msg on invalid input.
-_resolve_address() {
-    local addr="$1" msg="${2:-usage: rookery user <suspend|unsuspend|delete> <address>}"
-    case "$addr" in
-        *@?*) printf '%s' "$addr" ;;
-        ?*)   printf '%s@%s' "$addr" "$(toml_get domain)" ;;
-        *)    die "$msg" ;;
-    esac
-}
-
-cmd_user() {
-    local verb="${1:-}"
-    [ -n "$verb" ] || die "usage: rookery user <suspend|unsuspend|delete> <address>"
+if [ "$1" == "relay-client" ]; then
     shift
-    case "$verb" in
-        suspend)   cmd_user_suspend   "$@" ;;
-        unsuspend) cmd_user_unsuspend "$@" ;;
-        delete)    cmd_user_delete    "$@" ;;
-        *) die "unknown: rookery user $verb — try suspend, unsuspend, or delete" ;;
-    esac
-}
 
-cmd_user_suspend() {
-    need_init
-    local addr
-    addr=$(_resolve_address "${1:-}" "usage: rookery user suspend <address>") || exit 1
+    exec_rookery relay-client "$@"
+fi
 
-    local rows
-    rows=$(_psql_c "
-        UPDATE users SET suspended_at = now()
-        FROM   addresses
-        WHERE  users.id = addresses.user_id
-          AND  lower(addresses.address) = lower('${addr}')
-          AND  users.suspended_at IS NULL
-        RETURNING users.id
-    " | wc -l | tr -d ' ')
+if [ "$1" == "backup" ]; then
+    tmp_dir="$(mktemp -d)"
+    out_file="./rookery-backup-$(date +%Y%m%d-%H%M%S).tar.gz.enc"
 
-    [ "${rows:-0}" -ge 1 ] || die "no active (unsuspended) user found for '${addr}'"
-    info "suspended $addr"
-}
+    echo -n "password: "
+    read -rs pass
+    echo -n "confirm: "
+    read -rs confirm
 
-cmd_user_unsuspend() {
-    need_init
-    local addr
-    addr=$(_resolve_address "${1:-}" "usage: rookery user unsuspend <address>") || exit 1
+    if [ "$pass" != "$confirm" ]; then
+        echo "passwords not matching."
 
-    local rows
-    rows=$(_psql_c "
-        UPDATE users SET suspended_at = NULL
-        FROM   addresses
-        WHERE  users.id = addresses.user_id
-          AND  lower(addresses.address) = lower('${addr}')
-          AND  users.suspended_at IS NOT NULL
-        RETURNING users.id
-    " | wc -l | tr -d ' ')
-
-    [ "${rows:-0}" -ge 1 ] || die "no suspended user found for '${addr}'"
-    info "unsuspended $addr"
-}
-
-cmd_user_delete() {
-    need_init
-    local addr reason="${2:-}"
-    addr=$(_resolve_address "${1:-}" "usage: rookery user delete <address> [reason]") || exit 1
-
-    printf 'rookery: WARNING: Permanently deletes the user and ALL their mail.\n' >&2
-    printf 'rookery: Type "%s" to confirm: ' "$addr" >&2
-    local confirm
-    read -r confirm
-    [ "$confirm" = "$addr" ] || die "aborted — address did not match"
-
-    dc exec -T rookery /usr/local/bin/rookery delete-user "$addr" \
-        || die "deletion failed — check rookery logs"
-    info "deleted user $addr${reason:+ (reason: $reason)}"
-}
-
-# ---------------------------------------------------------------------------
-# stats <verb>
-# ---------------------------------------------------------------------------
-
-cmd_stats() {
-    local verb="${1:-}"
-    [ -n "$verb" ] || die "usage: rookery stats print"
-    shift
-    case "$verb" in
-        print) cmd_stats_print "$@" ;;
-        *) die "unknown: rookery stats $verb — try print" ;;
-    esac
-}
-
-cmd_stats_print() {
-    need_init
-
-    printf '\nInstance stats\n'
-    printf '==========================================\n'
-    printf '  %-28s %s\n' "Active users:"           "$(_psql_c "SELECT count(*) FROM users WHERE suspended_at IS NULL")"
-    printf '  %-28s %s\n' "Suspended users:"        "$(_psql_c "SELECT count(*) FROM users WHERE suspended_at IS NOT NULL")"
-    printf '  %-28s %s\n' "Messages received (24h):" "$(_psql_c "SELECT count(*) FROM messages WHERE folder = 'inbox' AND received_at > now() - interval '24 hours'")"
-    printf '  %-28s %s\n' "Outbound pending:"       "$(_psql_c "SELECT count(*) FROM outbound_queue WHERE status = 'pending'")"
-    printf '  %-28s %s\n' "Outbound failed:"        "$(_psql_c "SELECT count(*) FROM outbound_queue WHERE status = 'failed'")"
-    printf '  %-28s %s\n' "Delivered (24h):"        "$(_psql_c "SELECT count(*) FROM outbound_queue WHERE status = 'delivered' AND delivered_at > now() - interval '24 hours'")"
-    printf '  %-28s %s\n' "Bounced (24h):"          "$(_psql_c "SELECT count(*) FROM outbound_queue WHERE status = 'bounced' AND created_at > now() - interval '24 hours'")"
-    printf '\n'
-}
-
-# ---------------------------------------------------------------------------
-# master-key rotate
-# ---------------------------------------------------------------------------
-
-cmd_master_key() {
-    local verb="${1:-}"
-    [ -n "$verb" ] || die "usage: rookery master-key rotate"
-    shift
-    case "$verb" in
-        rotate) cmd_master_key_rotate "$@" ;;
-        *) die "unknown: rookery master-key $verb — try rotate" ;;
-    esac
-}
-
-cmd_master_key_rotate() {
-    need_init
-
-    printf '\n' >&2
-    info "master-key rotation re-encrypts all DKIM private keys in the database."
-    info "The stack must be running. Make a database backup before proceeding:"
-    info "  ./rookery backup ~/backups/"
-    printf '\n' >&2
-    printf 'rookery: Continue? [y/N] ' >&2
-    local ans
-    read -r ans
-    case "$ans" in [Yy]*) ;; *) die "aborted" ;; esac
-
-    local old_key new_key
-    old_key=$(env_get ROOKERY_MASTER_KEY)
-    [ -n "$old_key" ] || die "ROOKERY_MASTER_KEY not found in .env"
-
-    new_key=$(openssl rand -hex 32)
-    info "new master key generated"
-
-    # Re-encrypt all DKIM keys inside the rookery container (has DB access + code).
-    dc exec -T rookery /usr/local/bin/rookery rotate-master-key \
-        --old-key="$old_key" --new-key="$new_key" \
-        || die "rotate-master-key failed — DKIM keys are unchanged; .env is NOT updated"
-
-    # Atomically replace the master key in .env.
-    grep -v '^ROOKERY_MASTER_KEY=' "$SCRIPT_DIR/.env" > "$SCRIPT_DIR/.env.tmp"
-    printf 'ROOKERY_MASTER_KEY=%s\n' "$new_key" >> "$SCRIPT_DIR/.env.tmp"
-    mv "$SCRIPT_DIR/.env.tmp" "$SCRIPT_DIR/.env"
-
-    info "ROOKERY_MASTER_KEY updated in .env"
-    info "Restart to apply: sudo systemctl restart rookery"
-    info "Then make a backup:  ./rookery backup ~/backups/"
-}
-
-# ---------------------------------------------------------------------------
-# relay-client <create|list|revoke>
-#
-# Manages the whitelist of downstream operators allowed to use this instance as
-# a relay rookery (ADR-0030, Phase B). Requires the stack to be running. The
-# actual work (secret generation, bcrypt hashing, DB writes) is done by the
-# `rookery relay-client` binary subcommand inside the container.
-# ---------------------------------------------------------------------------
-cmd_relay_client() {
-    need_init
-    local verb="${1:-}"
-    case "$verb" in
-        create|list|revoke) ;;
-        "") die "usage: rookery relay-client <create [--label \"name\"]|list|revoke <username>>" ;;
-        *)  die "unknown relay-client subcommand '${verb}' — try: create, list, revoke" ;;
-    esac
-    dc exec -T rookery /usr/local/bin/rookery relay-client "$@" \
-        || die "relay-client: command failed — is the stack running? (./rookery start)"
-}
-
-# ---------------------------------------------------------------------------
-# backup [path]
-#
-# Creates an encrypted backup of the instance: postgres database, Caddy TLS
-# certificates, config files (rookery.toml, .env, Caddyfile), and the raw
-# message blob tree. The archive is AES-256-CBC encrypted with a passphrase.
-#
-# Ordering rule: pg_dump runs BEFORE the tar of the message blobs so that a
-# message arriving mid-backup becomes at worst an orphan blob on restore
-# (no matching DB row — harmless garbage) rather than a dangling DB row
-# (row with no blob — a broken UI entry).
-#
-# The encrypted output streams through the pipeline and never spools the
-# full archive to disk; only the intermediate files (db.dump, caddy-data.tar,
-# and messages-data.tar) are buffered in a temp directory on the server.
-# ---------------------------------------------------------------------------
-cmd_backup() {
-    need_init
-    local output="" passphrase_file="" ROOKERY_BACKUP_PASS="" out_file="" ts
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --passphrase-file)
-                [ "${2:+set}" = set ] || die "backup: --passphrase-file requires a path"
-                passphrase_file="$2"; shift 2 ;;
-            --passphrase-file=*)
-                passphrase_file="${1#*=}"; shift ;;
-            -*)
-                die "backup: unknown flag: $1 — try: ./rookery help backup" ;;
-            *)
-                [ -z "$output" ] || die "backup: unexpected argument: $1"
-                output="$1"; shift ;;
-        esac
-    done
-
-    # Verify postgres is running and healthy before we start.
-    dc exec -T postgres pg_isready -U rookery -d rookery >/dev/null 2>&1 \
-        || die "postgres is not healthy — is the stack running? Try: ./rookery start"
-
-    # Verify the files that will be included in the archive exist.
-    for _f in rookery.toml .env Caddyfile; do
-        [ -f "$SCRIPT_DIR/$_f" ] || die "backup: $_f not found — run './rookery init' first"
-    done
-
-    # Determine where the archive goes.
-    if [ -z "$output" ]; then
-        out_file=""          # stream to stdout; operator redirects as needed
-    elif [ -d "$output" ]; then
-        ts=$(date +%Y%m%d-%H%M%S)
-        out_file="${output%/}/rookery-backup-${ts}.tar.gz.enc"
-    else
-        out_file="$output"
-    fi
-
-    # Read the passphrase. Never accept it as a flag argument (shell history).
-    if [ -n "$passphrase_file" ]; then
-        [ -f "$passphrase_file" ] || die "backup: passphrase file not found: $passphrase_file"
-        ROOKERY_BACKUP_PASS=$(head -1 "$passphrase_file" | sed 's/[[:space:]]*$//')
-        [ -n "$ROOKERY_BACKUP_PASS" ] || die "backup: passphrase file is empty"
-    else
-        ROOKERY_BACKUP_PASS=$(_read_passphrase "Backup passphrase: ")
-        local pass2
-        pass2=$(_read_passphrase "Confirm passphrase: ")
-        [ "$ROOKERY_BACKUP_PASS" = "$pass2" ] \
-            || die "backup: passphrases do not match"
-    fi
-
-    # Derive the compose project name for named-volume references.
-    local project
-    project=$(dc config 2>/dev/null | grep '^name:' | head -1 | awk '{print $2}')
-    [ -n "$project" ] || die "backup: could not determine compose project name"
-
-    # Staging dir for intermediate files. The final encrypted output streams
-    # and never spools the whole archive to disk.
-    local stagedir tmp_out
-    stagedir=$(mktemp -d) || die "backup: failed to create staging dir"
-    tmp_out=""
-    trap 'rm -rf "$stagedir"; [ -z "${tmp_out:-}" ] || rm -f "${tmp_out:-}"' EXIT INT TERM
-
-    # Step 1: dump the database into the staging dir.
-    # Must run BEFORE the tar of data/messages/ — see ordering rule above.
-    info "backup: dumping database..."
-    local db_pass
-    db_pass=$(env_get POSTGRES_PASSWORD)
-    dc exec -T -e PGPASSWORD="$db_pass" postgres \
-        pg_dump -U rookery -d rookery --format=custom \
-        > "$stagedir/db.dump" \
-        || die "backup: pg_dump failed"
-
-    # Step 2: archive the caddy-data named volume (TLS certificates and state).
-    info "backup: archiving Caddy data..."
-    docker run --rm \
-        -v "${project}_caddy-data:/v:ro" \
-        docker.io/library/alpine:latest \
-        tar -C /v -c . \
-        > "$stagedir/caddy-data.tar" \
-        || die "backup: caddy-data archive failed"
-
-    # Step 3: archive the messages-data named volume (raw .eml blob tree).
-    # The exports/ subdirectory holds expiring archives, not user data, so it
-    # is excluded — matching the old host-side `--exclude data/messages/exports`.
-    info "backup: archiving message blobs..."
-    docker run --rm \
-        -v "${project}_messages-data:/v:ro" \
-        docker.io/library/alpine:latest \
-        tar -C /v --exclude=./exports -c . \
-        > "$stagedir/messages-data.tar" \
-        || die "backup: messages-data archive failed"
-
-    info "backup: encrypting archive..."
-
-    # Step 4: stream the full archive — tar | gzip | openssl.
-    # ROOKERY_BACKUP_PASS is passed only into the openssl subprocess (inline
-    # env assignment); it is never written to disk or exported to the shell.
-    if [ -z "$out_file" ]; then
-        tar -c \
-            -C "$stagedir"   db.dump caddy-data.tar messages-data.tar \
-            -C "$SCRIPT_DIR" rookery.toml .env Caddyfile \
-          | gzip \
-          | ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
-              openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ROOKERY_BACKUP_PASS \
-          || die "backup: pipeline failed"
-    else
-        tmp_out="${out_file}.tmp.$$"
-        tar -c \
-            -C "$stagedir"   db.dump caddy-data.tar messages-data.tar \
-            -C "$SCRIPT_DIR" rookery.toml .env Caddyfile \
-          | gzip \
-          | ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
-              openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ROOKERY_BACKUP_PASS \
-              > "$tmp_out" \
-          && mv "$tmp_out" "$out_file" \
-          || die "backup: pipeline failed"
-        info "backup: written to $out_file"
-    fi
-
-    unset ROOKERY_BACKUP_PASS
-    trap - EXIT INT TERM
-}
-
-# ---------------------------------------------------------------------------
-# restore <archive>
-#
-# Restores from an encrypted backup archive produced by `rookery backup`.
-# Refuses to run unless the working directory is a fresh checkout with no
-# existing .env or rookery.toml. Restoring over a live instance is out of
-# scope; start from a clean git clone.
-# ---------------------------------------------------------------------------
-cmd_restore() {
-    local file="" passphrase_file="" ROOKERY_BACKUP_PASS="" project
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --passphrase-file)
-                [ "${2:+set}" = set ] || die "restore: --passphrase-file requires a path"
-                passphrase_file="$2"; shift 2 ;;
-            --passphrase-file=*)
-                passphrase_file="${1#*=}"; shift ;;
-            -*)
-                die "restore: unknown flag: $1 — try: ./rookery help restore" ;;
-            *)
-                [ -z "$file" ] || die "restore: unexpected argument: $1"
-                file="$1"; shift ;;
-        esac
-    done
-
-    [ -n "$file" ] || die "usage: rookery restore <archive>"
-    [ -f "$file" ] || die "restore: archive not found: $file"
-
-    # Safety: refuse to restore into a non-fresh instance.
-    if [ -f "$SCRIPT_DIR/.env" ] || [ -f "$SCRIPT_DIR/rookery.toml" ]; then
-        printf 'rookery: error: .env or rookery.toml already exists.\n' >&2
-        printf '  Restoring over an existing instance is not supported.\n' >&2
-        printf '  To restore into a fresh checkout:\n' >&2
-        printf '    git clone <url> <dir> && cd <dir> && ./rookery restore %s\n' "$file" >&2
         exit 1
     fi
-    # Read the passphrase.
-    if [ -n "$passphrase_file" ]; then
-        [ -f "$passphrase_file" ] || die "restore: passphrase file not found: $passphrase_file"
-        ROOKERY_BACKUP_PASS=$(head -1 "$passphrase_file" | sed 's/[[:space:]]*$//')
-        [ -n "$ROOKERY_BACKUP_PASS" ] || die "restore: passphrase file is empty"
-    else
-        ROOKERY_BACKUP_PASS=$(_read_passphrase "Backup passphrase: ")
-    fi
 
-    info "restore: decrypting and extracting archive..."
-    ROOKERY_BACKUP_PASS="$ROOKERY_BACKUP_PASS" \
-        openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ROOKERY_BACKUP_PASS \
-        < "$file" \
-      | gunzip \
-      | tar -x -C "$SCRIPT_DIR" \
-      || die "restore: decryption or extraction failed — wrong passphrase or corrupt archive"
-    unset ROOKERY_BACKUP_PASS
+    exec_postgres pg_dump -U rookery -d rookery --format=custom > "$tmp_dir/db.dump"
+    docker run --rm -v "rookery_caddy-data:/caddy:ro" docker.io/library/alpine:latest tar -C /caddy -c . > "$tmp_dir/caddy-data.tar"
+    docker run --rm -v "rookery_messages-data:/messages:ro" docker.io/library/alpine:latest tar -C /messages --exclude=./exports -c . > "$tmp_dir/messages-data.tar"
 
-    [ -f "$SCRIPT_DIR/db.dump" ] \
-        || die "restore: archive did not contain db.dump — is this a rookery backup archive?"
-    [ -f "$SCRIPT_DIR/caddy-data.tar" ] \
-        || die "restore: archive did not contain caddy-data.tar"
-    [ -f "$SCRIPT_DIR/messages-data.tar" ] \
-        || die "restore: archive did not contain messages-data.tar"
+    tar -c -C "$tmp_dir" db.dump caddy-data.tar messages-data.tar -C "$(pwd)" config/rookery/rookery.toml config/rookery/.env config/caddy/Caddyfile | gzip | pass="$pass" openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:pass > "$out_file"
+fi
 
-    # Derive the compose project name for named-volume references.
-    project=$(dc config 2>/dev/null | grep '^name:' | head -1 | awk '{print $2}')
-    [ -n "$project" ] || die "restore: could not determine compose project name"
+if [ "$1" == "restore" ]; then
+    tmp_dir="$(mktemp -d)"
+    in_file="$2"
 
-    # Start postgres (the restored .env is now in place, so secrets are available).
-    info "restore: starting postgres..."
-    dc up -d postgres || die "restore: failed to start postgres"
+    echo -n "password: "
+    read -rs pass
 
-    # Wait for postgres to accept connections (up to 60 s).
-    info "restore: waiting for postgres to be ready..."
-    local i=0
-    while ! dc exec -T postgres pg_isready -U rookery -d rookery >/dev/null 2>&1; do
-        i=$((i + 1))
-        [ $i -le 30 ] || die "restore: postgres did not become healthy within 60 s"
-        sleep 2
-    done
+    pass="$pass" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:pass < "$in_file" | gunzip | tar -x -C "$tmp_dir/"
 
-    local db_pass
-    db_pass=$(env_get POSTGRES_PASSWORD)
+    exec_postgres pg_restore -U rookery -d rookery --clean --if-exists < "$tmp_dir/db.dump"
+    docker run --rm -v "rookery_caddy-data:/caddy" -i docker.io/library/alpine:latest sh -c 'cd /caddy && tar x' < "$tmp_dir/caddy-data.tar"
+    docker run --rm -v "rookery_messages-data:/messages" -i docker.io/library/alpine:latest sh -c 'cd /messages && tar x' < "$tmp_dir/messages-data.tar"
 
-    # Restore the database from the custom-format pg_dump.
-    info "restore: restoring database..."
-    dc exec -T -e PGPASSWORD="$db_pass" postgres \
-        pg_restore -U rookery -d rookery --clean --if-exists \
-        < "$SCRIPT_DIR/db.dump" \
-        || die "restore: pg_restore failed"
+    cp "$tmp_dir/config/rookery/rookery.toml" "./config/rookery/rookery.toml"
+    cp "$tmp_dir/config/rookery/.env" "./config/rookery/.env"
+    cp "$tmp_dir/config/caddy/Caddyfile" "./config/caddy/Caddyfile"
+fi
 
-    # Restore the caddy-data volume (TLS certificates and state).
-    info "restore: restoring Caddy data..."
-    docker run --rm \
-        -v "${project}_caddy-data:/v" \
-        -i docker.io/library/alpine:latest \
-        sh -c 'cd /v && tar x' \
-        < "$SCRIPT_DIR/caddy-data.tar" \
-        || die "restore: caddy-data restore failed"
+if [ "$1" == "test" ]; then
+    docker compose --profile test run --rm test
+fi
 
-    # Restore the messages-data volume (raw .eml blob tree).
-    info "restore: restoring message blobs..."
-    docker run --rm \
-        -v "${project}_messages-data:/v" \
-        -i docker.io/library/alpine:latest \
-        sh -c 'cd /v && tar x' \
-        < "$SCRIPT_DIR/messages-data.tar" \
-        || die "restore: messages-data restore failed"
-
-    # Clean up the intermediate files that were extracted at the repo root.
-    rm -f "$SCRIPT_DIR/db.dump" "$SCRIPT_DIR/caddy-data.tar" "$SCRIPT_DIR/messages-data.tar"
-
-    # Print a brief summary.
-    local users msgs blobs
-    users=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
-        psql -U rookery -d rookery -tA -c "SELECT count(*) FROM users" 2>/dev/null \
-        || printf '?')
-    msgs=$(dc exec -T -e PGPASSWORD="$db_pass" postgres \
-        psql -U rookery -d rookery -tA -c "SELECT count(*) FROM messages" 2>/dev/null \
-        || printf '?')
-    blobs=$(docker run --rm -v "${project}_messages-data:/v:ro" \
-        docker.io/library/alpine:latest \
-        sh -c 'find /v -name "*.eml" 2>/dev/null | wc -l' | tr -d ' ' \
-        || printf '?')
-
-    printf '\n' >&2
-    info "Restore complete."
-    info "  users:    $users"
-    info "  messages: $msgs  (blobs on disk: $blobs)"
-    printf '\n' >&2
-    info "NOTE: User PGP private keys are NOT in this backup — the server"
-    info "      has never held them. Users need their own recovery files"
-    info "      to decrypt past mail. See PLAN.md §11.1."
-    printf '\n' >&2
-    info "Run './rookery start' (or 'sudo systemctl start rookery') to bring the instance up."
-}
-
-# ---------------------------------------------------------------------------
-# psql
-# ---------------------------------------------------------------------------
-cmd_psql() {
-    need_init
-    local db_pass
-    db_pass=$(env_get POSTGRES_PASSWORD)
-    dc exec -e PGPASSWORD="$db_pass" postgres psql -h localhost -U rookery -d rookery
-}
-
-# ---------------------------------------------------------------------------
-# test
-# ---------------------------------------------------------------------------
-cmd_test() {
-    need_init
-    dc --profile test run --rm test
-}
-
-# ---------------------------------------------------------------------------
-# vet
-# ---------------------------------------------------------------------------
-cmd_vet() {
-    dc --profile lint run --rm lint
-}
-
-# ---------------------------------------------------------------------------
-# exec <service> [cmd...]
-# ---------------------------------------------------------------------------
-cmd_exec() {
-    [ $# -ge 1 ] || die "usage: rookery exec <service> [cmd...]"
-    dc exec "$@"
-}
-
-# ---------------------------------------------------------------------------
-# compose <args...>
-# ---------------------------------------------------------------------------
-cmd_compose() {
-    docker compose -f "$SCRIPT_DIR/compose.yaml" "$@"
-}
-
-# ---------------------------------------------------------------------------
-# help [subcommand]
-# ---------------------------------------------------------------------------
-cmd_help() {
-    case "${1:-}" in
-        init) cat >&2 <<'EOF'
-rookery init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt] [--clamav]
-
-  Bootstrap a checkout. User-local; never needs sudo. Idempotent — safe
-  to re-run after a git pull. Never overwrites existing files, except that
-  --clamav regenerates rookery.service with the ClamAV compose profile.
-
-  Creates (if absent):
-    rookery.toml    from example; flags or prompts fill domain/email/name
-    .env            random secrets: ROOKERY_DB_PASSWORD, POSTGRES_PASSWORD,
-                    ROOKERY_MASTER_KEY, ROOKERY_SESSION_KEY
-    Caddyfile       generated from rookery.toml (inert in dev)
-    rookery.service staged systemd unit with User= filled in (inert in dev)
-
-  Flags:
-    --domain X      Primary mail domain
-    --email Y       Let's Encrypt contact email
-    --name N        Instance display name
-    --user U        Unix user for the systemd unit (default: whoami)
-    --no-prompt     Skip interactive prompts; use flag values or defaults
-    --clamav        Enable ClamAV virus scanning (adds ~1 GB RAM); adds
-                    --profile clamav to ExecStart in rookery.service.
-                    Always regenerates rookery.service, even if it exists.
-                    After running: sudo ./rookery install && sudo systemctl restart rookery
-
-  After starting the service, make an initial encrypted backup:
-    ./rookery backup ~/backups/
-EOF
-            ;;
-        install) cat >&2 <<'EOF'
-sudo rookery install
-
-  Promote the staged ./rookery.service into a systemd unit:
-    install -m644 ./rookery.service /etc/systemd/system/rookery.service
-    systemctl daemon-reload
-
-  Must be run as root. Does NOT enable or start the unit — that is the
-  operator's deliberate next step:
-    sudo systemctl enable --now rookery
-EOF
-            ;;
-        start) cat >&2 <<'EOF'
-rookery start [--prod] [docker compose up flags]
-
-  Bring the stack up. Errors if rookery init has not been run.
-
-  Without --prod (dev):  rookery + postgres + mailpit on :8025. Web UI at
-                         http://localhost:8080. No Caddy, no TLS.
-  With --prod:           rookery + postgres + caddy (TLS on 80/443).
-                         The systemd unit always passes --prod.
-
-  Extra flags are forwarded to docker compose up.
-  Example: ./rookery start --prod -d    (detached; used by the systemd unit)
-EOF
-            ;;
-        stop)
-            printf 'rookery stop\n\n  Stop and remove running containers (docker compose down).\n' >&2 ;;
-        restart)
-            printf 'rookery restart [--prod]\n\n  Stop then start. Same --prod semantics as rookery start.\n' >&2 ;;
-        update) cat >&2 <<'EOF'
-rookery update
-
-  git fetch && git pull --ff-only && docker compose build.
-  Fails loudly on a divergent branch. Does NOT restart.
-  After updating: sudo systemctl restart rookery  (or ./rookery restart)
-EOF
-            ;;
-        logs)
-            printf 'rookery logs [service]\n\n  Tail logs (default: rookery). Service names: rookery, postgres, mailpit, caddy.\n' >&2 ;;
-        ps)
-            printf 'rookery ps\n\n  Show running services (docker compose ps).\n' >&2 ;;
-        invite) cat >&2 <<'EOF'
-rookery invite create [validity_days]
-
-  Generate a new invite URL and print it to stdout.
-
-  validity_days   Optional. Days before the invite expires.
-                  Omit for a non-expiring invite.
-
-  Examples:
-    ./rookery invite create        # no expiry
-    ./rookery invite create 7      # expires in 7 days
-EOF
-            ;;
-        send-mail) cat >&2 <<'EOF'
-rookery send-mail [flags] <to> [from] [subject] [body]
-
-  Inject a message into the dev stack's inbound SMTP (port 25).
-
-  Flags:  --encrypted  --pubkey <file>  --fetch-key  --spam  --attachment <file>
-
-  Examples:
-    ./rookery send-mail alice@localhost
-    ./rookery send-mail --encrypted --fetch-key alice@localhost
-    ./rookery send-mail --encrypted --pubkey /tmp/alice.asc alice@localhost
-    ./rookery send-mail --spam alice@localhost
-    ./rookery send-mail --attachment alice@localhost
-    ./rookery send-mail --attachment /tmp/photo.png alice@localhost
-    ./rookery send-mail --encrypted --fetch-key --attachment alice@localhost
-    ./rookery send-mail --encrypted --fetch-key --attachment /tmp/photo.png alice@localhost
-
-  --spam sends a GTUBE payload that rspamd always rejects (plaintext only).
-  --attachment attaches a file to the message (plaintext or encrypted).
-    If no path is given (or the next arg is not an existing file), a small
-    example text file is generated automatically.
-
-  Env: ROOKERY_SMTP (default smtp://localhost:25)  ROOKERY_HTTP (default http://localhost:8080)
-  Requires: curl, file (mime-type detection). Encrypted mode additionally requires: gpg, python3.
-EOF
-            ;;
-        check-dns) cat >&2 <<'EOF'
-rookery check-dns [--resolver <addr>]
-
-  Check all required DNS records for the primary domain and print their
-  current status. Reads the domain from rookery.toml. Requires 'dig'
-  (dnsutils / bind-utils) or 'host'.
-
-  When the stack is running the DKIM public key values and MTA-STS ID
-  are read directly from the database so the full required TXT values
-  are shown next to any missing record.
-
-  Records checked:
-    A / AAAA    domain, openpgpkey.*, mta-sts.*
-    MX          inbound mail delivery (target must be the bare primary)
-    SPF TXT     outbound sender policy
-    DKIM TXT    rookery-ed25519 and rookery-rsa selectors
-    DMARC TXT   email authentication policy
-    MTA-STS TXT strict TLS enforcement signal
-    TLS-RPT TXT (recommended) TLS failure reporting
-
-  Flags:
-    --resolver <addr>   Query this resolver instead of the system default.
-                        Useful to bypass local cache: --resolver 9.9.9.9
-EOF
-            ;;
-        user) cat >&2 <<'EOF'
-rookery user suspend <address>    Mark a user suspended (blocks inbound + outbound)
-rookery user unsuspend <address>  Reverse a suspension
-rookery user delete <address>     Hard-delete a user and all their mail (irreversible)
-
-  Suspending blocks the account without destroying data. Deletion is permanent
-  and cascades to all messages, addresses, sessions, and DKIM keys. Message
-  blobs on disk are orphaned after deletion (a future blob-gc will clean them).
-EOF
-            ;;
-        stats)
-            printf 'rookery stats print\n\n  Print a quick summary of users, message volume, and queue state.\n' >&2 ;;
-        master-key) cat >&2 <<'EOF'
-rookery master-key rotate
-
-  Re-encrypt all DKIM private keys in the database under a freshly generated
-  master key, then update ROOKERY_MASTER_KEY in .env. The stack must be running.
-  Take a database snapshot before rotating.
-
-  After rotation, restart the stack to pick up the new key:
-    sudo systemctl restart rookery
-
-  Make a backup immediately after rotation:
-    ./rookery backup ~/backups/
-EOF
-            ;;
-        relay-client) cat >&2 <<'EOF'
-rookery relay-client <create|list|revoke>
-
-  Manage the whitelist of downstream operators allowed to use this instance as
-  a relay rookery (ADR-0030). Requires the stack to be running, and the
-  submission listener enabled (smtp.submission_enabled = true in rookery.toml).
-
-  create [--label "alice's instance"]   Issue a username + secret (shown ONCE)
-                                        and print a ready-to-paste [smtp.smarthost]
-                                        block for the downstream operator.
-  list                                  List clients: username, enabled, rate, label.
-  revoke <username>                     Disable a client (the v1 abuse remedy).
-
-  Relay trust is bilateral and out-of-band — there is no auto-discovery. You
-  inherit your downstreams' outbound reputation, so relay only for operators you
-  know. See docs/ops/spam-runbook.md.
-EOF
-            ;;
-        backup) cat >&2 <<'EOF'
-rookery backup [path] [--passphrase-file <file>]
-
-  Create an encrypted backup of the instance. The archive contains:
-    db.dump            pg_dump (custom format) of the rookery database
-    caddy-data.tar     Caddy TLS certificates and ACME state
-    messages-data.tar  raw message blob tree (the messages-data volume)
-    rookery.toml       instance configuration
-    .env               secrets (DB password, master key, session key)
-    Caddyfile          reverse-proxy configuration
-
-  The archive is AES-256-CBC encrypted with a passphrase (prompted on the
-  terminal, or read from --passphrase-file). The passphrase is the single
-  secret required to decrypt the backup.
-
-  NOTE: User PGP private keys are NOT in the backup — the server never held
-  them. Users need their own recovery files to decrypt past mail.
-
-  Output:
-    No path arg     stream the encrypted archive to stdout (pipe or redirect)
-    Directory arg   write to <dir>/rookery-backup-YYYYMMDD-HHMMSS.tar.gz.enc
-    File path arg   write atomically (tmp + rename) to the given path
-
-  Flags:
-    --passphrase-file <file>   Read passphrase from the first line of <file>.
-                               Useful for cron. The file reduces the protection
-                               of encryption against a server-compromise attacker
-                               (the passphrase is on-server); it still protects
-                               off-site backup copies. Never pass the passphrase
-                               as a flag argument (shell history leak).
-
-  Examples:
-    ./rookery backup ~/backups/
-    ./rookery backup | ssh backup-host "cat > /backups/rookery-$(date +%F).enc"
-    ./rookery backup --passphrase-file /etc/rookery/backup.key ~/backups/
-EOF
-            ;;
-        restore) cat >&2 <<'EOF'
-rookery restore <archive> [--passphrase-file <file>]
-
-  Restore from an encrypted backup archive created by `rookery backup`.
-  Only works on a fresh checkout — refuses to run if .env or rookery.toml
-  already exists.
-
-  To restore into a fresh checkout:
-    git clone <url> <dir> && cd <dir> && ./rookery restore <archive>
-
-  Steps performed:
-    1. Decrypt and extract the archive (config files, blobs, intermediate files)
-    2. Start postgres only (using the restored .env for credentials)
-    3. pg_restore the database dump
-    4. Restore the caddy-data volume (TLS certificates)
-    5. Restore the messages-data volume (raw .eml blob tree)
-    6. Print a brief summary (users, messages, blobs)
-
-  After restore, start the full stack:
-    ./rookery start  (or: sudo systemctl start rookery)
-
-  NOTE: User PGP private keys are NOT restored — they were never on the server.
-  Users need their recovery files to decrypt past mail. See PLAN.md §11.1.
-EOF
-            ;;
-        psql)
-            printf 'rookery psql\n\n  Drop into an interactive psql shell inside the postgres container.\n' >&2 ;;
-        test)
-            printf 'rookery test\n\n  Run the Go test suite (docker compose --profile test run --rm test).\n' >&2 ;;
-        vet)
-            printf 'rookery vet\n\n  Run go vet (docker compose --profile lint run --rm lint).\n' >&2 ;;
-        exec)
-            printf 'rookery exec <service> [cmd...]\n\n  Escape hatch: docker compose exec against any service.\n' >&2 ;;
-        compose)
-            printf 'rookery compose <args...>\n\n  Escape hatch: arbitrary docker compose invocation.\n' >&2 ;;
-        ""|help) cat >&2 <<'EOF'
-rookery — operator and developer dispatcher for a rookery instance
-
-Usage: ./rookery <subcommand> [flags] [args]
-       ./rookery help <subcommand>
-
-Bootstrap (run once per checkout / host):
-  init [--domain X] [--email Y] [--name N] [--user U] [--no-prompt] [--clamav]
-  sudo install
-
-Stack management:
-  start [--prod]         Bring the stack up (dev by default, --prod for TLS)
-  stop                   Stop and remove containers
-  restart [--prod]       stop then start
-  update                 git pull --ff-only && docker compose build (no restart)
-  logs [service]         Tail logs (default: rookery)
-  ps                     Show running services
-
-Operations:
-  invite create [days]                  Generate an invite URL (stdout)
-  send-mail [flags] <to> [from] [...]   Inject a message into inbound SMTP
-  check-dns [--resolver <addr>]         Check and display all required DNS records
-  user suspend <address>                Suspend a user account
-  user unsuspend <address>              Reverse a suspension
-  user delete <address>                 Hard-delete a user and all their mail
-  stats print                           Quick summary of users and queue state
-  master-key rotate                     Rotate the server master key
-  relay-client create|list|revoke       Manage relay-rookery downstream clients
-  backup [path]                         Create an encrypted backup archive
-  restore <archive>                     Restore from a backup archive
-  psql                                  psql shell in the postgres container
-  test                                  Run the Go test suite
-  vet                                   Run go vet
-
-Escape hatches:
-  exec <service> [cmd...]   docker compose exec
-  compose <args...>         raw docker compose
-  help [subcommand]         this message, or per-subcommand usage
-EOF
-            ;;
-        *) die "unknown subcommand '${1}' — run './rookery help' for the list" ;;
-    esac
-}
-
-# ---------------------------------------------------------------------------
-# Dispatch
-# ---------------------------------------------------------------------------
-case "${1:-}" in
-    init)      shift; cmd_init      "$@" ;;
-    install)   shift; cmd_install   "$@" ;;
-    start)     shift; cmd_start     "$@" ;;
-    stop)      shift; cmd_stop      "$@" ;;
-    restart)   shift; cmd_restart   "$@" ;;
-    update)    shift; cmd_update       ;;
-    logs)      shift; cmd_logs      "$@" ;;
-    ps)        shift; cmd_ps        "$@" ;;
-    invite)      shift; cmd_invite      "$@" ;;
-    send-mail)   shift; cmd_send_mail   "$@" ;;
-    check-dns)   shift; cmd_check_dns   "$@" ;;
-    user)        shift; cmd_user        "$@" ;;
-    stats)       shift; cmd_stats       "$@" ;;
-    master-key)  shift; cmd_master_key  "$@" ;;
-    relay-client) shift; cmd_relay_client "$@" ;;
-    backup)      shift; cmd_backup      "$@" ;;
-    restore)     shift; cmd_restore     "$@" ;;
-    psql)        shift; cmd_psql            ;;
-    test)        shift; cmd_test            ;;
-    vet)         shift; cmd_vet             ;;
-    exec)        shift; cmd_exec        "$@" ;;
-    compose)     shift; cmd_compose     "$@" ;;
-    help)        shift; cmd_help        "$@" ;;
-    "")                 cmd_help;  exit 1 ;;
-    *)           die "unknown subcommand '${1}' — run './rookery help' for the list" ;;
-esac
+if [ "$1" == "vet" ]; then
+    docker compose --profile lint run --rm lint
+fi
