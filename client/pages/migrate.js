@@ -30,6 +30,8 @@
  * and the button becomes "retry import" so the user can finish without
  * re-registering (there is no settings-based import to fall back on).
  */
+import { unlockPrivateKey, decryptArchive, publicKeyArmoredFromPrivate, storeSessionKey } from '../crypto.js';
+
 (function () {
   'use strict';
 
@@ -43,9 +45,7 @@
 
   ready(function () {
     const form = document.getElementById('migrate-form');
-    if (!form || !window.RookeryCrypto) return;
-
-    const { unlockPrivateKey, decryptArchive, publicKeyArmoredFromPrivate, storeSessionKey } = window.RookeryCrypto;
+    if (!form) return;
 
     const section  = form.closest('section');
     const errorEl  = section.querySelector('.error[role="alert"]');

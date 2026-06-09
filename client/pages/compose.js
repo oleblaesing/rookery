@@ -19,11 +19,13 @@
  *   data-references    — References header value (reply flow)
  *
  * Depends on:
- *   window.RookeryCrypto  — crypto module, published by client/expose.js
- *   window.partials       — partials.js
+ *   ../crypto.js     — PGP crypto module (imported directly)
+ *   window.partials  — partials.js (global; also used by inline template scripts)
  *
  * Bundled into static/app.js by esbuild (see client/index.js).
  */
+
+import { loadSessionKey, encryptMessage } from "../crypto.js";
 
 (function () {
   "use strict";
@@ -431,7 +433,6 @@
               : "encrypting…";
           const recipientKeyArmored = atob(recipientKeyB64);
 
-          const { loadSessionKey, encryptMessage } = window.RookeryCrypto;
           const privateKey = await loadSessionKey();
 
           const pgpBlock = await encryptMessage(

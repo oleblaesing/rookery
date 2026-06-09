@@ -17,6 +17,8 @@
  * to prevent XSS).
  */
 
+import { loadSessionKey, loadSessionFingerprint, decryptMessage } from '../crypto.js';
+
 (function () {
   'use strict';
 
@@ -120,8 +122,6 @@
         noticeEl.className = 'error-notice';
       }
     }
-
-    const { loadSessionKey, loadSessionFingerprint, decryptMessage } = window.RookeryCrypto;
 
     // --- Plaintext: fetch and render directly, no key needed ---
     // Attachments for plaintext messages are pre-rendered by the server.

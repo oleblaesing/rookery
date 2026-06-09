@@ -117,8 +117,8 @@
 
     // Logout link: clear localStorage key material, POST to the logout API,
     // then redirect to /login. The localStorage clear is inlined here rather
-    // than delegated to window.RookeryCrypto so it runs even if crypto.js
-    // failed to load.
+    // than delegated to the crypto module so it still runs even if the crypto
+    // code threw during load.
     document.querySelectorAll('[data-action="logout"]').forEach(function (el) {
       el.addEventListener('click', async function (e) {
         e.preventDefault();

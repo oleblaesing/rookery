@@ -13,6 +13,8 @@
  * archive in one step.
  */
 
+import { exportSessionKey, unlockPrivateKey, signChallenge } from '../crypto.js';
+
 (function () {
   'use strict';
 
@@ -59,7 +61,6 @@
       btn.textContent = 'exporting…';
 
       try {
-        const { exportSessionKey } = window.RookeryCrypto;
         const { armoredKey, fingerprint } = await exportSessionKey(passphrase);
 
         const blob   = new Blob([armoredKey], { type: 'application/pgp-keys' });
@@ -114,9 +115,7 @@
     const btn     = document.getElementById('delete-account-btn');
     const errorEl = document.getElementById('delete-account-error');
 
-    if (!form || !window.RookeryCrypto) return;
-
-    const { unlockPrivateKey, signChallenge } = window.RookeryCrypto;
+    if (!form) return;
 
     function showError(msg) {
       errorEl.textContent = msg;

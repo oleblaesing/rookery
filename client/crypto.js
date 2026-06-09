@@ -1,76 +1,22 @@
-/**
- * rookery browser crypto module — Phase 1.
- *
- * Responsibilities:
- *   - In-browser PGP keypair generation (Curve25519 / ed25519+cv25519).
- *   - Mandatory recovery file export (encrypted private key as .asc).
- *   - PGP/MIME decryption + signature verification on the read page.
- *
- * This module is bundled by esbuild inside the Containerfile build (Stage 2).
- * It is never run directly by Node in production.
- *
- * Security properties (§11.1 / ADR-0010):
- *   - The PGP passphrase NEVER leaves this module.
- *   - The private key NEVER leaves this module in plaintext.
- *   - Only the public key (armored) is sent to the server.
- *   - At signup the private key is generated without a passphrase and stored
- *     in the session cache; the user sets a passphrase and exports the
- *     recovery file on the settings page immediately afterwards.
- *   - The server never receives or stores the private key.
- *
- * Dependencies:
- *   - openpgp (OpenPGP.js v6) — pinned in package.json; the only dependency.
- *
- * KDF note:
- *   OpenPGP.js encrypts the private key using its own string-to-key (s2k)
- *   function when a passphrase is supplied to generateKey / decryptKey.
- *   We do not need a separate KDF library; the protection is already
- *   applied by OpenPGP.js before the key is returned to us.
- *
- * Session key caching (auto-decrypt across all tabs, lifetime = until logout):
- *   After the first successful passphrase unlock, the unlocked private key
- *   bytes are wrapped with an AES-256-GCM key and stored in localStorage.
- *   All tabs on the same origin share the cache, so opening a new tab or
- *   window after login auto-decrypts without a passphrase prompt. The cache
- *   persists across page navigations and browser restarts; it is cleared on
- *   logout, and other tabs observe the removal via the "storage" event so
- *   they stop using the key immediately.
- *   The wrapping key is stored alongside the wrapped blob (same security
- *   boundary), so this does not add cryptographic protection against a
- *   same-origin XSS attack — the protection is ergonomic: the key is never
- *   stored in plaintext and is cleared on logout.
- *   localStorage keys: "rookery_swk" (hex AES key), "rookery_swb" (JSON
- *   {iv: hex, data: hex} wrapped key blob).
- */
+import * as openpgp from "openpgp";
 
-import * as openpgp from 'openpgp';
-
-export const ROOKERY_CRYPTO_VERSION = "0.1.0-phase4";
-
-// --------------------------------------------------------------------------
-// Key generation
-// --------------------------------------------------------------------------
-
-/**
- * generateKeypair(address, pgpPassphrase)
- *   → { privateKeyArmored, publicKeyArmored, fingerprint }
- *
- * Generates a Curve25519 keypair for the given address. OpenPGP.js encrypts
- * the private key with pgpPassphrase using its built-in s2k before returning
- * the armored string. The passphrase never leaves this function; the server
- * only receives publicKeyArmored.
- */
 export async function generateKeypair(address, pgpPassphrase) {
   const { privateKey, publicKey } = await openpgp.generateKey({
-    type: 'ecc',
-    curve: 'curve25519',
+    type: "ecc",
+    curve: "curve25519",
     userIDs: [{ email: address }],
     passphrase: pgpPassphrase,
-    format: 'armored',
+    format: "armored",
   });
+
   const pk = await openpgp.readKey({ armoredKey: publicKey });
   const fingerprint = pk.getFingerprint().toUpperCase();
-  return { privateKeyArmored: privateKey, publicKeyArmored: publicKey, fingerprint };
+
+  return {
+    privateKeyArmored: privateKey,
+    publicKeyArmored: publicKey,
+    fingerprint,
+  };
 }
 
 // --------------------------------------------------------------------------
@@ -87,8 +33,13 @@ export async function generateKeypair(address, pgpPassphrase) {
  *
  * Used during login (recovery file + passphrase → session key).
  */
-export async function unlockPrivateKey(encryptedPrivateKeyArmored, pgpPassphrase) {
-  const privateKey = await openpgp.readPrivateKey({ armoredKey: encryptedPrivateKeyArmored });
+export async function unlockPrivateKey(
+  encryptedPrivateKeyArmored,
+  pgpPassphrase,
+) {
+  const privateKey = await openpgp.readPrivateKey({
+    armoredKey: encryptedPrivateKeyArmored,
+  });
   return openpgp.decryptKey({ privateKey, passphrase: pgpPassphrase });
 }
 
@@ -128,7 +79,7 @@ export function publicKeyArmoredFromPrivate(privateKey) {
  * as a .asc file. The content is the raw armored string — importable by gpg.
  */
 export function buildRecoveryBlob(encryptedPrivateKeyArmored) {
-  return new Blob([encryptedPrivateKeyArmored], { type: 'text/plain' });
+  return new Blob([encryptedPrivateKeyArmored], { type: "text/plain" });
 }
 
 // --------------------------------------------------------------------------
@@ -152,12 +103,16 @@ export function buildRecoveryBlob(encryptedPrivateKeyArmored) {
  *                     from parseMIMEAttachments; empty for plaintext messages
  *                     (server renders those via the attachment download endpoint)
  */
-export async function decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmored = null) {
+export async function decryptMessage(
+  rawRFC5322,
+  privateKey,
+  senderPublicKeyArmored = null,
+) {
   const pgpBlock = extractPGPBlock(rawRFC5322);
 
   if (!pgpBlock || !privateKey) {
     const body = extractTextBody(rawRFC5322);
-    return { body, signatureStatus: 'none', attachments: [] };
+    return { body, signatureStatus: "none", attachments: [] };
   }
 
   try {
@@ -169,19 +124,21 @@ export async function decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmo
       expectSigned: false,
     });
 
-    const body        = extractDecryptedBody(data);
+    const body = extractDecryptedBody(data);
     const attachments = parseMIMEAttachments(data);
 
     if (!signatures || signatures.length === 0) {
-      return { body, signatureStatus: 'none', attachments };
+      return { body, signatureStatus: "none", attachments };
     }
 
     if (!senderPublicKeyArmored) {
-      return { body, signatureStatus: 'unknown_key', attachments };
+      return { body, signatureStatus: "unknown_key", attachments };
     }
 
     try {
-      const senderKey = await openpgp.readKey({ armoredKey: senderPublicKeyArmored });
+      const senderKey = await openpgp.readKey({
+        armoredKey: senderPublicKeyArmored,
+      });
       const message2 = await openpgp.readMessage({ armoredMessage: pgpBlock });
       const { signatures: sigs2 } = await openpgp.decrypt({
         message: message2,
@@ -190,12 +147,12 @@ export async function decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmo
         expectSigned: false,
       });
       await sigs2[0].verified;
-      return { body, signatureStatus: 'verified', attachments };
+      return { body, signatureStatus: "verified", attachments };
     } catch {
-      return { body, signatureStatus: 'invalid', attachments };
+      return { body, signatureStatus: "invalid", attachments };
     }
   } catch (err) {
-    throw new Error('Decryption failed: ' + err.message);
+    throw new Error("Decryption failed: " + err.message);
   }
 }
 
@@ -203,13 +160,14 @@ export async function decryptMessage(rawRFC5322, privateKey, senderPublicKeyArmo
 // Session key caching (auto-decrypt across all tabs, lifetime = login session)
 // --------------------------------------------------------------------------
 
-const SS_WRAP_KEY = 'rookery_swk';   // hex-encoded AES-256-GCM raw key
-const SS_WRAP_BLOB = 'rookery_swb';  // JSON { iv: hex, data: hex }
-const SS_FINGERPRINT = 'rookery_sfp'; // uppercase hex fingerprint of the session key
+const SS_WRAP_KEY = "rookery_swk"; // hex-encoded AES-256-GCM raw key
+const SS_WRAP_BLOB = "rookery_swb"; // JSON { iv: hex, data: hex }
+const SS_FINGERPRINT = "rookery_sfp"; // uppercase hex fingerprint of the session key
 
 function hexEncode(buf) {
   return Array.from(new Uint8Array(buf))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function hexDecode(hex) {
@@ -241,28 +199,34 @@ export async function storeSessionKey(privateKey) {
 
     // Generate a fresh random AES-256-GCM wrapping key.
     const wrapKey = await subtle.generateKey(
-      { name: 'AES-GCM', length: 256 },
-      true,   // extractable so we can store it
-      ['encrypt', 'decrypt']
+      { name: "AES-GCM", length: 256 },
+      true, // extractable so we can store it
+      ["encrypt", "decrypt"],
     );
 
     // Encrypt the key bytes.
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const wrapped = await subtle.encrypt(
-      { name: 'AES-GCM', iv },
+      { name: "AES-GCM", iv },
       wrapKey,
-      keyBytes
+      keyBytes,
     );
 
     // Export wrapping key to raw bytes for storage.
-    const rawWrapKey = await subtle.exportKey('raw', wrapKey);
+    const rawWrapKey = await subtle.exportKey("raw", wrapKey);
 
     localStorage.setItem(SS_WRAP_KEY, hexEncode(rawWrapKey));
-    localStorage.setItem(SS_WRAP_BLOB, JSON.stringify({
-      iv:   hexEncode(iv),
-      data: hexEncode(wrapped),
-    }));
-    localStorage.setItem(SS_FINGERPRINT, privateKey.getFingerprint().toUpperCase());
+    localStorage.setItem(
+      SS_WRAP_BLOB,
+      JSON.stringify({
+        iv: hexEncode(iv),
+        data: hexEncode(wrapped),
+      }),
+    );
+    localStorage.setItem(
+      SS_FINGERPRINT,
+      privateKey.getFingerprint().toUpperCase(),
+    );
   } catch {
     // localStorage unavailable (private browsing restriction) or SubtleCrypto
     // missing — silently skip; the passphrase prompt will be shown next time.
@@ -279,24 +243,24 @@ export async function storeSessionKey(privateKey) {
 export async function loadSessionKey() {
   try {
     const rawWrapKeyHex = localStorage.getItem(SS_WRAP_KEY);
-    const blobJSON      = localStorage.getItem(SS_WRAP_BLOB);
+    const blobJSON = localStorage.getItem(SS_WRAP_BLOB);
     if (!rawWrapKeyHex || !blobJSON) return null;
 
     const { iv: ivHex, data: dataHex } = JSON.parse(blobJSON);
 
     const subtle = crypto.subtle;
     const wrapKey = await subtle.importKey(
-      'raw',
+      "raw",
       hexDecode(rawWrapKeyHex),
-      { name: 'AES-GCM' },
+      { name: "AES-GCM" },
       false,
-      ['decrypt']
+      ["decrypt"],
     );
 
     const keyBytes = await subtle.decrypt(
-      { name: 'AES-GCM', iv: hexDecode(ivHex) },
+      { name: "AES-GCM", iv: hexDecode(ivHex) },
       wrapKey,
-      hexDecode(dataHex)
+      hexDecode(dataHex),
     );
 
     return openpgp.readPrivateKey({ binaryKey: new Uint8Array(keyBytes) });
@@ -332,7 +296,9 @@ export function clearSessionKey() {
     localStorage.removeItem(SS_WRAP_KEY);
     localStorage.removeItem(SS_WRAP_BLOB);
     localStorage.removeItem(SS_FINGERPRINT);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -348,11 +314,15 @@ export function clearSessionKey() {
 export async function exportSessionKey(pgpPassphrase) {
   // Empty passphrase is allowed — the private key never leaves the user's
   // machine, analogous to an unprotected SSH key. The user's choice.
-  pgpPassphrase = pgpPassphrase ?? '';
+  pgpPassphrase = pgpPassphrase ?? "";
   const privateKey = await loadSessionKey();
-  if (!privateKey) throw new Error('no session key found — please log out and log in again');
+  if (!privateKey)
+    throw new Error("no session key found — please log out and log in again");
   const fingerprint = privateKey.getFingerprint().toUpperCase();
-  const encryptedKey = await openpgp.encryptKey({ privateKey, passphrase: pgpPassphrase });
+  const encryptedKey = await openpgp.encryptKey({
+    privateKey,
+    passphrase: pgpPassphrase,
+  });
   const armoredKey = encryptedKey.armor();
   return { armoredKey, fingerprint };
 }
@@ -379,7 +349,7 @@ export async function signChallenge(privateKey, nonce) {
     message,
     signingKeys: privateKey,
     detached: true,
-    format: 'armored',
+    format: "armored",
   });
 }
 
@@ -404,9 +374,14 @@ export async function signChallenge(privateKey, nonce) {
  * senderPublicKeyArmored: string | null
  * signingKey: openpgp.PrivateKey | null
  */
-export async function encryptMessage(bodyText, recipientArmoredKeys, senderPublicKeyArmored, signingKey) {
+export async function encryptMessage(
+  bodyText,
+  recipientArmoredKeys,
+  senderPublicKeyArmored,
+  signingKey,
+) {
   const encryptionKeys = await Promise.all(
-    recipientArmoredKeys.map(k => openpgp.readKey({ armoredKey: k }))
+    recipientArmoredKeys.map((k) => openpgp.readKey({ armoredKey: k })),
   );
 
   // Always encrypt to the sender for self-decryption.  Using the public key
@@ -416,9 +391,11 @@ export async function encryptMessage(bodyText, recipientArmoredKeys, senderPubli
   // in the encryption set, preventing OpenPGP.js from upgrading to SEIPDv2
   // solely because the recipient's key (e.g. ProtonMail) advertises it.
   if (senderPublicKeyArmored) {
-    const senderKey = await openpgp.readKey({ armoredKey: senderPublicKeyArmored });
+    const senderKey = await openpgp.readKey({
+      armoredKey: senderPublicKeyArmored,
+    });
     const senderFp = senderKey.getFingerprint();
-    if (!encryptionKeys.some(k => k.getFingerprint() === senderFp)) {
+    if (!encryptionKeys.some((k) => k.getFingerprint() === senderFp)) {
       encryptionKeys.push(senderKey);
     }
   } else if (signingKey) {
@@ -430,7 +407,7 @@ export async function encryptMessage(bodyText, recipientArmoredKeys, senderPubli
     message,
     encryptionKeys,
     signingKeys: signingKey || undefined,
-    format: 'armored',
+    format: "armored",
   });
 }
 
@@ -459,7 +436,7 @@ export async function decryptArchive(privateKey, encryptedBytes) {
   const { data } = await openpgp.decrypt({
     message,
     decryptionKeys: privateKey,
-    format: 'binary',
+    format: "binary",
     expectSigned: false,
   });
   // data may be a Uint8Array or a ReadableStream depending on the input size
@@ -488,7 +465,8 @@ export async function decryptArchive(privateKey, encryptedBytes) {
 
 function _randomHex(n) {
   return Array.from(crypto.getRandomValues(new Uint8Array(n)))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 // --------------------------------------------------------------------------
@@ -512,7 +490,7 @@ function extractDecryptedBody(decrypted) {
   // If the payload has MIME headers (Content-Type present before the first
   // blank line), parse it as a full MIME message.
   const { headers, body } = mimeSplit(decrypted);
-  if (headers && mimeHeader(headers, 'Content-Type')) {
+  if (headers && mimeHeader(headers, "Content-Type")) {
     const result = mimeExtractText(headers, body);
     if (result !== null) return result;
   }
@@ -527,9 +505,11 @@ function stripMimeHeadersIfPresent(text) {
   const sepMatch = text.match(/\r?\n\r?\n/);
   if (!sepMatch) return text;
   const headerBlock = text.slice(0, sepMatch.index);
-  const looksLikeHeaders = headerBlock.split(/\r?\n/).every(line =>
-    /^[A-Za-z][A-Za-z0-9-]*:/.test(line) || /^[ \t]/.test(line)
-  );
+  const looksLikeHeaders = headerBlock
+    .split(/\r?\n/)
+    .every(
+      (line) => /^[A-Za-z][A-Za-z0-9-]*:/.test(line) || /^[ \t]/.test(line),
+    );
   if (!looksLikeHeaders) return text;
   return text.slice(sepMatch.index + sepMatch[0].length);
 }
@@ -542,11 +522,11 @@ function stripMimeHeadersIfPresent(text) {
  * application/octet-stream MIME part whose body is a PGP message block.
  */
 function extractPGPBlock(raw) {
-  const start = raw.indexOf('-----BEGIN PGP MESSAGE-----');
+  const start = raw.indexOf("-----BEGIN PGP MESSAGE-----");
   if (start === -1) return null;
-  const end = raw.indexOf('-----END PGP MESSAGE-----', start);
+  const end = raw.indexOf("-----END PGP MESSAGE-----", start);
   if (end === -1) return null;
-  return raw.slice(start, end + '-----END PGP MESSAGE-----'.length);
+  return raw.slice(start, end + "-----END PGP MESSAGE-----".length);
 }
 
 /**
@@ -563,44 +543,47 @@ function extractTextBody(raw) {
 }
 
 function mimeSplit(text) {
-  const crlf = text.indexOf('\r\n\r\n');
-  if (crlf !== -1) return { headers: text.slice(0, crlf), body: text.slice(crlf + 4) };
-  const lf = text.indexOf('\n\n');
-  if (lf !== -1) return { headers: text.slice(0, lf), body: text.slice(lf + 2) };
-  return { headers: '', body: text };
+  const crlf = text.indexOf("\r\n\r\n");
+  if (crlf !== -1)
+    return { headers: text.slice(0, crlf), body: text.slice(crlf + 4) };
+  const lf = text.indexOf("\n\n");
+  if (lf !== -1)
+    return { headers: text.slice(0, lf), body: text.slice(lf + 2) };
+  return { headers: "", body: text };
 }
 
 function mimeHeader(headers, name) {
-  const unfolded = headers.replace(/\r?\n[ \t]+/g, ' ');
+  const unfolded = headers.replace(/\r?\n[ \t]+/g, " ");
   const lines = unfolded.split(/\r?\n/);
   const lower = name.toLowerCase();
   for (const line of lines) {
-    const colon = line.indexOf(':');
+    const colon = line.indexOf(":");
     if (colon === -1) continue;
     if (line.slice(0, colon).trim().toLowerCase() === lower) {
       return line.slice(colon + 1).trim();
     }
   }
-  return '';
+  return "";
 }
 
 function mimeBoundary(ct) {
-  const m = ct.match(/;\s*boundary="([^"]+)"/i) || ct.match(/;\s*boundary=([^\s;]+)/i);
+  const m =
+    ct.match(/;\s*boundary="([^"]+)"/i) || ct.match(/;\s*boundary=([^\s;]+)/i);
   return m ? m[1] : null;
 }
 
 function mimeMultipartParts(body, boundary) {
-  const delim = '--' + boundary;
+  const delim = "--" + boundary;
   const parts = [];
   const lines = body.split(/\r?\n/);
   let inPart = false;
   let partLines = [];
 
   for (const line of lines) {
-    if (line === delim + '--' || line === delim + '-- ') break;
-    if (line === delim || line === delim + ' ') {
+    if (line === delim + "--" || line === delim + "-- ") break;
+    if (line === delim || line === delim + " ") {
       if (inPart && partLines.length > 0) {
-        parts.push(partLines.join('\n'));
+        parts.push(partLines.join("\n"));
         partLines = [];
       }
       inPart = true;
@@ -608,27 +591,33 @@ function mimeMultipartParts(body, boundary) {
     }
     if (inPart) partLines.push(line);
   }
-  if (inPart && partLines.length > 0) parts.push(partLines.join('\n'));
+  if (inPart && partLines.length > 0) parts.push(partLines.join("\n"));
   return parts;
 }
 
 function mimeExtractText(headers, body) {
-  const ct = mimeHeader(headers, 'Content-Type') || 'text/plain';
-  const mediaType = ct.split(';')[0].trim().toLowerCase();
+  const ct = mimeHeader(headers, "Content-Type") || "text/plain";
+  const mediaType = ct.split(";")[0].trim().toLowerCase();
 
-  if (mediaType === 'text/plain') {
-    const enc = mimeHeader(headers, 'Content-Transfer-Encoding').toLowerCase().trim();
-    return mimeDecodeBody(body.replace(/\r?\n$/, ''), enc);
+  if (mediaType === "text/plain") {
+    const enc = mimeHeader(headers, "Content-Transfer-Encoding")
+      .toLowerCase()
+      .trim();
+    return mimeDecodeBody(body.replace(/\r?\n$/, ""), enc);
   }
 
-  if (mediaType.startsWith('multipart/')) {
+  if (mediaType.startsWith("multipart/")) {
     const boundary = mimeBoundary(ct);
     if (!boundary) return null;
     for (const part of mimeMultipartParts(body, boundary)) {
       const { headers: ph, body: pb } = mimeSplit(part);
-      const pct = mimeHeader(ph, 'Content-Type') || 'text/plain';
-      const pMedia = pct.split(';')[0].trim().toLowerCase();
-      if (pMedia === 'application/pgp-signature' || pMedia === 'application/pgp-keys') continue;
+      const pct = mimeHeader(ph, "Content-Type") || "text/plain";
+      const pMedia = pct.split(";")[0].trim().toLowerCase();
+      if (
+        pMedia === "application/pgp-signature" ||
+        pMedia === "application/pgp-keys"
+      )
+        continue;
       const result = mimeExtractText(ph, pb);
       if (result !== null) return result;
     }
@@ -668,26 +657,28 @@ export function parseMIMEAttachments(mimeText) {
 }
 
 function _collectMIMEAttachments(headers, body, result) {
-  const ct        = mimeHeader(headers, 'Content-Type') || 'text/plain';
-  const mediaType = ct.split(';')[0].trim().toLowerCase();
-  const disp      = mimeHeader(headers, 'Content-Disposition').trim();
-  const dispType  = disp.split(';')[0].trim().toLowerCase();
+  const ct = mimeHeader(headers, "Content-Type") || "text/plain";
+  const mediaType = ct.split(";")[0].trim().toLowerCase();
+  const disp = mimeHeader(headers, "Content-Disposition").trim();
+  const dispType = disp.split(";")[0].trim().toLowerCase();
 
   // Skip PGP wrappers unconditionally.
-  if (mediaType === 'application/pgp-signature' ||
-      mediaType === 'application/pgp-keys'      ||
-      mediaType === 'application/pgp-encrypted') {
+  if (
+    mediaType === "application/pgp-signature" ||
+    mediaType === "application/pgp-keys" ||
+    mediaType === "application/pgp-encrypted"
+  ) {
     return;
   }
 
   // Skip text/plain unless it is explicitly marked as an attachment
   // (Content-Disposition: attachment). Without the explicit disposition a
   // text/plain part is the message body, not a user attachment.
-  if (mediaType === 'text/plain' && dispType !== 'attachment') {
+  if (mediaType === "text/plain" && dispType !== "attachment") {
     return;
   }
 
-  if (mediaType.startsWith('multipart/')) {
+  if (mediaType.startsWith("multipart/")) {
     const boundary = mimeBoundary(ct);
     if (!boundary) return;
     for (const part of mimeMultipartParts(body, boundary)) {
@@ -698,73 +689,86 @@ function _collectMIMEAttachments(headers, body, result) {
   }
 
   // Leaf part: this is an attachment.
-  const dispHeader = mimeHeader(headers, 'Content-Disposition');
-  const enc        = mimeHeader(headers, 'Content-Transfer-Encoding').toLowerCase().trim();
+  const dispHeader = mimeHeader(headers, "Content-Disposition");
+  const enc = mimeHeader(headers, "Content-Transfer-Encoding")
+    .toLowerCase()
+    .trim();
 
   const filename = _mimeDecodeWord(
-    _mimeParamValue(dispHeader, 'filename') || _mimeParamValue(ct, 'name') || ''
+    _mimeParamValue(dispHeader, "filename") ||
+      _mimeParamValue(ct, "name") ||
+      "",
   );
 
-  const bytes = _mimeDecodeBodyBytes(body.replace(/\r?\n$/, ''), enc);
+  const bytes = _mimeDecodeBodyBytes(body.replace(/\r?\n$/, ""), enc);
   result.push({ filename, contentType: mediaType, bytes });
 }
 
 // Extract a named parameter value from a MIME header field value.
 // Handles RFC 2231 (filename*=utf-8''...) and plain quoted/unquoted forms.
 function _mimeParamValue(header, param) {
-  if (!header) return '';
+  if (!header) return "";
   const lower = param.toLowerCase();
 
   // RFC 2231 / RFC 5987: param*=charset''pct-encoded
-  const rfc2231 = new RegExp(lower + '\\*=([^;\\s]+)', 'i');
-  const m2231   = header.match(rfc2231);
+  const rfc2231 = new RegExp(lower + "\\*=([^;\\s]+)", "i");
+  const m2231 = header.match(rfc2231);
   if (m2231) {
     try {
-      const v     = m2231[1];
-      const apos  = v.indexOf("''");
+      const v = m2231[1];
+      const apos = v.indexOf("''");
       if (apos !== -1) return decodeURIComponent(v.slice(apos + 2));
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // Plain quoted: param="value"
-  const mQuoted = header.match(new RegExp(lower + '="([^"]*)"', 'i'));
+  const mQuoted = header.match(new RegExp(lower + '="([^"]*)"', "i"));
   if (mQuoted) return mQuoted[1];
 
   // Unquoted: param=value
-  const mUnquoted = header.match(new RegExp(lower + '=([^;\\s]+)', 'i'));
+  const mUnquoted = header.match(new RegExp(lower + "=([^;\\s]+)", "i"));
   if (mUnquoted) return mUnquoted[1];
 
-  return '';
+  return "";
 }
 
 // Decode RFC 2047 encoded words (=?charset?B|Q?text?=) in header values.
 function _mimeDecodeWord(str) {
-  return str.replace(/=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g, function (_, charset, enc, text) {
-    try {
-      let bytes;
-      if (enc.toUpperCase() === 'B') {
-        const b = atob(text);
-        bytes = new Uint8Array(b.length);
-        for (let i = 0; i < b.length; i++) bytes[i] = b.charCodeAt(i);
-      } else {
-        // Quoted-printable variant for headers (RFC 2047 Q encoding).
-        const decoded = text.replace(/_/g, ' ').replace(/=([0-9A-Fa-f]{2})/g,
-          function (_, h) { return String.fromCharCode(parseInt(h, 16)); });
-        bytes = new Uint8Array(decoded.length);
-        for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+  return str.replace(
+    /=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g,
+    function (_, charset, enc, text) {
+      try {
+        let bytes;
+        if (enc.toUpperCase() === "B") {
+          const b = atob(text);
+          bytes = new Uint8Array(b.length);
+          for (let i = 0; i < b.length; i++) bytes[i] = b.charCodeAt(i);
+        } else {
+          // Quoted-printable variant for headers (RFC 2047 Q encoding).
+          const decoded = text
+            .replace(/_/g, " ")
+            .replace(/=([0-9A-Fa-f]{2})/g, function (_, h) {
+              return String.fromCharCode(parseInt(h, 16));
+            });
+          bytes = new Uint8Array(decoded.length);
+          for (let i = 0; i < decoded.length; i++)
+            bytes[i] = decoded.charCodeAt(i);
+        }
+        return new TextDecoder(charset).decode(bytes);
+      } catch {
+        return str;
       }
-      return new TextDecoder(charset).decode(bytes);
-    } catch {
-      return str;
-    }
-  });
+    },
+  );
 }
 
 // Decode an attachment body part into raw bytes.
 function _mimeDecodeBodyBytes(body, encoding) {
-  if (encoding === 'base64') {
+  if (encoding === "base64") {
     try {
-      const b   = atob(body.replace(/\s+/g, ''));
+      const b = atob(body.replace(/\s+/g, ""));
       const arr = new Uint8Array(b.length);
       for (let i = 0; i < b.length; i++) arr[i] = b.charCodeAt(i);
       return arr;
@@ -772,9 +776,9 @@ function _mimeDecodeBodyBytes(body, encoding) {
       return new Uint8Array(0);
     }
   }
-  if (encoding === 'quoted-printable') {
+  if (encoding === "quoted-printable") {
     // Decode QP to text then re-encode to bytes.
-    const text = mimeDecodeBody(body, 'quoted-printable');
+    const text = mimeDecodeBody(body, "quoted-printable");
     return new TextEncoder().encode(text);
   }
   // 7bit / 8bit / binary: raw bytes via UTF-8.
@@ -782,12 +786,16 @@ function _mimeDecodeBodyBytes(body, encoding) {
 }
 
 function mimeDecodeBody(body, encoding) {
-  if (encoding === 'quoted-printable') {
-    const unfolded = body.replace(/=\r?\n/g, '');
+  if (encoding === "quoted-printable") {
+    const unfolded = body.replace(/=\r?\n/g, "");
     const bytes = [];
     let i = 0;
     while (i < unfolded.length) {
-      if (unfolded[i] === '=' && i + 2 < unfolded.length && /[0-9A-Fa-f]{2}/.test(unfolded.slice(i + 1, i + 3))) {
+      if (
+        unfolded[i] === "=" &&
+        i + 2 < unfolded.length &&
+        /[0-9A-Fa-f]{2}/.test(unfolded.slice(i + 1, i + 3))
+      ) {
         bytes.push(parseInt(unfolded.slice(i + 1, i + 3), 16));
         i += 3;
       } else {
@@ -795,15 +803,17 @@ function mimeDecodeBody(body, encoding) {
         i++;
       }
     }
-    return new TextDecoder('utf-8').decode(new Uint8Array(bytes));
+    return new TextDecoder("utf-8").decode(new Uint8Array(bytes));
   }
-  if (encoding === 'base64') {
+  if (encoding === "base64") {
     try {
-      const b = atob(body.replace(/\s+/g, ''));
+      const b = atob(body.replace(/\s+/g, ""));
       const arr = new Uint8Array(b.length);
       for (let i = 0; i < b.length; i++) arr[i] = b.charCodeAt(i);
-      return new TextDecoder('utf-8').decode(arr);
-    } catch { return body; }
+      return new TextDecoder("utf-8").decode(arr);
+    } catch {
+      return body;
+    }
   }
   return body;
 }

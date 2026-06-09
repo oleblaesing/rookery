@@ -4,7 +4,7 @@
  * Flow (single "create account" button):
  *   1. User fills in username.
  *   2. On submit:
- *      a. Generates an unencrypted Curve25519 keypair via RookeryCrypto.
+ *      a. Generates an unencrypted Curve25519 keypair via the crypto module.
  *      b. POSTs to /api/v1/users/register with the public key only.
  *      c. On success: stores the private key in localStorage via
  *         storeSessionKey() so the freshly-authenticated session can
@@ -20,6 +20,8 @@
  * storeSessionKey() caches the unlocked key (AES-GCM wrapped) in localStorage
  * for the duration of the login session only.
  */
+
+import { generateKeypair, readPrivateKey, storeSessionKey } from '../crypto.js';
 
 (function () {
   'use strict';
@@ -66,7 +68,6 @@
       setStatus('generating keypair…', '');
 
       try {
-        const { generateKeypair, readPrivateKey, storeSessionKey } = window.RookeryCrypto;
         const address = localPart + '@' + domain();
 
         // Generate an unencrypted keypair — the user will set a passphrase and

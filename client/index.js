@@ -14,16 +14,14 @@
  *   Every page module is a self-contained IIFE that begins with a path guard
  *   (e.g. `if (location.pathname !== '/login') return;`). Importing them all
  *   here runs every guard; only the module whose guard matches the current URL
- *   wires up its behaviour. This keeps the existing "ship as IIFE" style — the
- *   only change to each page module is the guard at the top.
+ *   wires up its behaviour. Each page module imports the crypto functions it
+ *   needs directly from ../crypto.js — esbuild dedupes openpgp into one copy.
  *
- * Evaluation order matters and is deliberate:
- *   1. expose.js   — sets window.RookeryCrypto before any page module runs.
- *   2. partials.js — sets window.partials and the shell-wide listeners.
- *   3. pages/*     — each guards on location.pathname.
+ * partials.js is imported before the pages because it publishes window.partials
+ * (a global, since inline template scripts also call it) and the page modules
+ * read that global synchronously under `defer`.
  */
 
-import './expose.js';
 import './partials.js';
 
 import './pages/register.js';

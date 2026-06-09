@@ -17,6 +17,8 @@
  * On network failure or a bad response the error is shown inline and the
  * form is re-enabled for retry.
  */
+import { unlockPrivateKey, storeSessionKey, signChallenge } from '../crypto.js';
+
 (function () {
   'use strict';
 
@@ -30,9 +32,7 @@
 
   ready(function () {
     const form = document.getElementById('login-form');
-    if (!form || !window.RookeryCrypto) return;
-
-    const { unlockPrivateKey, storeSessionKey, signChallenge } = window.RookeryCrypto;
+    if (!form) return;
 
     const section     = form.closest('section');
     const errorEl     = section.querySelector('.error[role="alert"]');
