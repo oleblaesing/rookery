@@ -1,10 +1,10 @@
 {
-  "name": "rookery-crypto",
+  "name": "rookery-frontend",
   "version": "0.1.0",
-  "description": "Browser-side PGP crypto module for rookery. Bundled by esbuild inside the Containerfile build; never run with npm in production.",
+  "description": "Browser-side frontend for rookery (PGP crypto + per-page logic), bundled into a single asset by esbuild inside the Containerfile build; never run with npm in production.",
   "private": true,
   "scripts": {
-    "build": "esbuild --bundle --minify --format=iife --global-name=RookeryCrypto --outfile=./static/crypto.js ./client/index.js"
+    "build": "esbuild --bundle --minify --format=iife --outfile=./static/app.js ./client/index.js"
   },
   "devDependencies": {
     "esbuild": "0.25.5"

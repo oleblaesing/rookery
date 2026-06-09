@@ -30,7 +30,7 @@ FROM gcr.io/distroless/static-debian12 AS final
 
 COPY --from=go-build /out/rookery /usr/local/bin/rookery
 COPY static/ /opt/rookery/web/static/
-COPY --from=js-build /src/static/crypto.js /opt/rookery/web/static/crypto.js
+COPY --from=js-build /src/static/app.js /opt/rookery/web/static/app.js
 
 EXPOSE 8080 25
 

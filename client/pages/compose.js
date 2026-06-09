@@ -19,14 +19,17 @@
  *   data-references    — References header value (reply flow)
  *
  * Depends on:
- *   window.RookeryCrypto  — bundled from client/index.js
+ *   window.RookeryCrypto  — crypto module, published by client/expose.js
  *   window.partials       — partials.js
  *
- * No build step; shipped as-is alongside partials.js.
+ * Bundled into static/app.js by esbuild (see client/index.js).
  */
 
 (function () {
   "use strict";
+
+  // Single-asset bundle: only run on this page (see client/index.js).
+  if (location.pathname !== "/compose") return;
 
   function ready(fn) {
     if (document.readyState !== "loading") {

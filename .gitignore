@@ -4,5 +4,5 @@ config/caddy
 rookery-server
 *.out
 *.test
-static/crypto.js
+static/app.js
 *.tar.gz.enc

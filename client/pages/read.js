@@ -20,6 +20,9 @@
 (function () {
   'use strict';
 
+  // Single-asset bundle: only run on this page (see client/index.js).
+  if (!/^\/messages\/[^/]+$/.test(location.pathname)) return;
+
   function ready(fn) {
     if (document.readyState !== 'loading') { fn(); return; }
     document.addEventListener('DOMContentLoaded', fn);

@@ -16,6 +16,9 @@
 (function () {
   'use strict';
 
+  // Single-asset bundle: only run on this page (see client/index.js).
+  if (location.pathname !== '/settings') return;
+
   function ready(fn) {
     if (document.readyState !== 'loading') { fn(); return; }
     document.addEventListener('DOMContentLoaded', fn);
@@ -97,6 +100,9 @@
  */
 (function () {
   'use strict';
+
+  // Single-asset bundle: only run on this page (see client/index.js).
+  if (location.pathname !== '/settings') return;
 
   function ready(fn) {
     if (document.readyState !== 'loading') { fn(); return; }
@@ -252,6 +258,9 @@
  */
 (function () {
   'use strict';
+
+  // Single-asset bundle: only run on this page (see client/index.js).
+  if (location.pathname !== '/settings') return;
 
   function ready(fn) {
     if (document.readyState !== 'loading') { fn(); return; }
