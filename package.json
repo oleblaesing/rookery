@@ -1,15 +1,14 @@
 {
+  "private": true,
   "name": "rookery-frontend",
   "version": "0.1.0",
-  "description": "Browser-side frontend for rookery (PGP crypto + per-page logic), bundled into a single asset by esbuild inside the Containerfile build; never run with npm in production.",
-  "private": true,
   "scripts": {
     "build": "esbuild --bundle --minify --format=iife --outfile=./static/app.js ./client/index.js"
   },
-  "devDependencies": {
-    "esbuild": "0.25.5"
-  },
   "dependencies": {
     "openpgp": "6.1.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5"
   }
 }
