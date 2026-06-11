@@ -1,165 +1,202 @@
-/**
- * read.js — decryption and signature verification for the message read page.
- *
- * On page load:
- *   1. Reads the message ID and security_state from the data attributes on
- *      #message-body.
- *   2. If security_state is "plaintext": fetches /api/v1/messages/{id}/raw
- *      and renders the text body directly.
- *   3. If security_state is "pgp_encrypted" or "pgp_signed_plaintext":
- *      a. Checks the session key fingerprint in localStorage against the
- *         expected fingerprint for this account (data-key-fingerprint).
- *      b. If missing or mismatched: redirect to /logout for a clean re-login.
- *      c. Loads the session key and decrypts/verifies.
- *      d. Updates the security badge with the actual signature status.
- *
- * The decrypted body is rendered into #message-body as text (not innerHTML,
- * to prevent XSS).
- */
-
-import { loadSessionKey, loadSessionFingerprint, decryptMessage } from '../crypto.js';
+import {
+  loadSessionKey,
+  loadSessionFingerprint,
+  decryptMessage,
+} from "../crypto.js";
 
 (function () {
-  'use strict';
+  "use strict";
 
-  // Single-asset bundle: only run on this page (see client/index.js).
-  if (!/^\/messages\/[^/]+$/.test(location.pathname)) return;
+  if (!/^\/messages\/[^/]+$/.test(location.pathname)) {
+    return;
+  }
 
   function ready(fn) {
-    if (document.readyState !== 'loading') { fn(); return; }
-    document.addEventListener('DOMContentLoaded', fn);
+    if (document.readyState !== "loading") {
+      fn();
+      return;
+    }
+
+    document.addEventListener("DOMContentLoaded", fn);
   }
 
   ready(async function () {
-    const bodyDiv  = document.getElementById('message-body');
-    const badgeEl  = document.getElementById('security-badge');
-    const noticeEl = document.getElementById('decrypting-notice');
+    const bodyDiv = document.getElementById("message-body");
+    const badgeEl = document.getElementById("security-badge");
+    const noticeEl = document.getElementById("decrypting-notice");
 
-    if (!bodyDiv) return;
+    if (!bodyDiv) {
+      return;
+    }
 
-    const msgID          = bodyDiv.dataset.messageId;
-    const secState       = bodyDiv.dataset.securityState;
+    const msgID = bodyDiv.dataset.messageId;
+    const secState = bodyDiv.dataset.securityState;
     const keyFingerprint = bodyDiv.dataset.keyFingerprint;
-    const senderKeyB64   = bodyDiv.dataset.senderKeyB64 || '';
-    const senderKey      = senderKeyB64 ? atob(senderKeyB64) : null;
-    const csrfToken      = document.querySelector('meta[name="csrf-token"]')?.content || '';
+    const senderKeyB64 = bodyDiv.dataset.senderKeyB64 || "";
+    const senderKey = senderKeyB64 ? atob(senderKeyB64) : null;
+    const csrfToken =
+      document.querySelector('meta[name="csrf-token"]')?.content || "";
 
     async function fetchRaw() {
-      const resp = await fetch('/api/v1/messages/' + msgID + '/raw', {
-        headers: { 'X-CSRF-Token': csrfToken },
-        credentials: 'same-origin',
+      const resp = await fetch("/api/v1/messages/" + msgID + "/raw", {
+        headers: { "X-CSRF-Token": csrfToken },
+        credentials: "same-origin",
       });
-      if (!resp.ok) throw new Error('Failed to fetch message: ' + resp.status);
+
+      if (!resp.ok) {
+        throw new Error("Failed to fetch message: " + resp.status);
+      }
+
       return resp.text();
     }
 
     function renderBody(text) {
-      const pre = document.createElement('pre');
-      pre.className = 'message-body-text';
+      const pre = document.createElement("pre");
+      pre.className = "message-body-text";
       pre.textContent = text;
       bodyDiv.replaceChildren(pre);
     }
 
-    // Track Blob URLs so they can be revoked when the page unloads.
-    const _blobURLs = [];
-    window.addEventListener('beforeunload', function () {
-      _blobURLs.forEach(function (u) { URL.revokeObjectURL(u); });
+    // Revoke the object URLs we mint for attachment downloads when the page unloads.
+    const blobURLs = [];
+    window.addEventListener("beforeunload", function () {
+      blobURLs.forEach(function (u) {
+        URL.revokeObjectURL(u);
+      });
     });
 
-    // Render attachment list for encrypted messages after client-side decryption.
-    // For plaintext messages the server pre-renders download links, so this is a
-    // no-op (the template section is already populated).
+    // Only encrypted messages need client-side attachment rendering; plaintext
+    // messages already have server-rendered download links, so an empty list
+    // here leaves that section untouched.
     function renderAttachments(attachments) {
-      const section = document.getElementById('attachment-list');
-      if (!section) return;
-      if (!attachments || attachments.length === 0) return; // keep hidden
-      const ul = section.querySelector('#attachment-items') || section.querySelector('ul');
-      if (!ul) return;
-      ul.innerHTML = '';
+      const section = document.getElementById("attachment-list");
+
+      if (!section) {
+        return;
+      }
+
+      if (!attachments || attachments.length === 0) {
+        return;
+      }
+
+      const ul =
+        section.querySelector("#attachment-items") ||
+        section.querySelector("ul");
+
+      if (!ul) {
+        return;
+      }
+
+      ul.innerHTML = "";
       attachments.forEach(function (att) {
-        const blob = new Blob([att.bytes], { type: att.contentType || 'application/octet-stream' });
-        const url  = URL.createObjectURL(blob);
-        _blobURLs.push(url);
-        const a  = document.createElement('a');
-        a.href   = url;
-        a.download = att.filename || 'attachment';
-        a.textContent = att.filename || 'attachment';
-        a.className = 'attachment-link';
-        const li = document.createElement('li');
-        li.className = 'attachment-item';
+        const blob = new Blob([att.bytes], {
+          type: att.contentType || "application/octet-stream",
+        });
+        const url = URL.createObjectURL(blob);
+        blobURLs.push(url);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = att.filename || "attachment";
+        a.textContent = att.filename || "attachment";
+        a.className = "attachment-link";
+
+        const li = document.createElement("li");
+        li.className = "attachment-item";
         li.appendChild(a);
         ul.appendChild(li);
       });
+
       section.hidden = false;
     }
 
     function updateBadge(status, securityState) {
-      if (!badgeEl) return;
-      if (securityState === 'pgp_encrypted') {
+      if (!badgeEl) {
+        return;
+      }
+
+      if (securityState === "pgp_encrypted") {
         const labels = {
-          verified:    '🔒 PGP encrypted — signature verified',
-          unknown_key: '🔒 PGP encrypted — signature unverified (key not known)',
-          invalid:     '🔒 PGP encrypted — signature INVALID',
-          none:        '🔒 PGP encrypted — unsigned',
+          verified: "🔒 PGP encrypted — signature verified",
+          unknown_key:
+            "🔒 PGP encrypted — signature unverified (key not known)",
+          invalid: "🔒 PGP encrypted — signature INVALID",
+          none: "🔒 PGP encrypted — unsigned",
         };
-        badgeEl.textContent = labels[status] || '🔒 PGP encrypted';
-        badgeEl.className = 'badge badge-encrypted';
-      } else if (securityState === 'pgp_signed_plaintext') {
+        badgeEl.textContent = labels[status] || "🔒 PGP encrypted";
+        badgeEl.className = "badge badge-encrypted";
+      } else if (securityState === "pgp_signed_plaintext") {
         const labels = {
-          verified:    '🖋️ signed plaintext — signature verified',
-          unknown_key: '🖋️ signed plaintext — signature unverified (key not known)',
-          invalid:     '⚠️ signed plaintext — signature INVALID',
-          none:        '⚠️ plaintext',
+          verified: "🖋️ signed plaintext — signature verified",
+          unknown_key:
+            "🖋️ signed plaintext — signature unverified (key not known)",
+          invalid: "⚠️ signed plaintext — signature INVALID",
+          none: "⚠️ plaintext",
         };
-        badgeEl.textContent = labels[status] || '🖋️ signed plaintext';
-        badgeEl.className = 'badge badge-signed';
+        badgeEl.textContent = labels[status] || "🖋️ signed plaintext";
+        badgeEl.className = "badge badge-signed";
       }
     }
 
     function showError(msg) {
       if (noticeEl) {
         noticeEl.textContent = msg;
-        noticeEl.className = 'error-notice';
+        noticeEl.className = "error-notice";
       }
     }
 
-    // --- Plaintext: fetch and render directly, no key needed ---
-    // Attachments for plaintext messages are pre-rendered by the server.
-    if (secState === 'plaintext') {
+    // Plaintext needs no key; attachments are already server-rendered.
+    if (secState === "plaintext") {
       try {
         const raw = await fetchRaw();
         const { body } = await decryptMessage(raw, null);
         renderBody(body);
       } catch (err) {
-        showError('Could not load message: ' + err.message);
+        showError("Could not load message: " + err.message);
       }
+
       return;
     }
 
-    // --- PGP: verify the session key belongs to this account ---
+    // No session key, or it belongs to a different account: force a clean re-login.
     const sessionFP = loadSessionFingerprint();
-    if (!sessionFP || (keyFingerprint && sessionFP.toUpperCase() !== keyFingerprint.toUpperCase())) {
-      // No session key, or it belongs to a different account.
-      // Force a clean re-login.
-      window.location.replace('/logout');
+
+    if (
+      !sessionFP ||
+      (keyFingerprint &&
+        sessionFP.toUpperCase() !== keyFingerprint.toUpperCase())
+    ) {
+      window.location.replace("/logout");
+
       return;
     }
 
     const privateKey = await loadSessionKey();
+
     if (!privateKey) {
-      window.location.replace('/logout');
+      window.location.replace("/logout");
+
       return;
     }
 
     try {
-      if (noticeEl) noticeEl.textContent = 'decrypting…';
+      if (noticeEl) {
+        noticeEl.textContent = "decrypting…";
+      }
+
       const raw = await fetchRaw();
-      const { body, signatureStatus, attachments } = await decryptMessage(raw, privateKey, senderKey);
+
+      const { body, signatureStatus, attachments } = await decryptMessage(
+        raw,
+        privateKey,
+        senderKey,
+      );
+
       renderBody(body);
       updateBadge(signatureStatus, secState);
       renderAttachments(attachments);
     } catch (err) {
-      showError('Decryption failed: ' + err.message);
+      showError("Decryption failed: " + err.message);
     }
   });
 })();
