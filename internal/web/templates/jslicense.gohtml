@@ -1,0 +1,37 @@
+{{define "title"}}javascript licenses — {{.InstanceName}}{{end}}
+
+{{define "content"}}
+<section class="form-page jslicense">
+  <h1>javascript license information</h1>
+  <p class="field-hint">
+    This page lists the JavaScript served by {{.InstanceName}} in the
+    <a href="https://www.gnu.org/licenses/javascript-labels.html">JavaScript License Web Labels</a>
+    format, so that <a href="https://www.gnu.org/software/librejs/">GNU LibreJS</a>
+    and similar tools can verify it is free software.
+  </p>
+
+  <table id="jslicense-labels1" class="jslicense-table">
+    <thead>
+      <tr><th>script</th><th>license</th><th>source</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><a href="{{assetURL "/static/app.js"}}">app.js</a></td>
+        <td><a href="https://www.gnu.org/licenses/agpl-3.0.html">GNU-AGPL-3.0-or-later</a></td>
+        <td><a href="https://github.com/oleblaesing/rookery/tree/main/client">rookery client source</a></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p class="field-hint">
+    <code>app.js</code> is a single bundle of rookery's own client code, built
+    from <a href="https://github.com/oleblaesing/rookery/tree/main/client"><code>client/</code></a>
+    with esbuild (see <code>package.json</code>). The combined work is conveyed
+    under the GNU AGPL v3 (or later). It bundles
+    <a href="https://github.com/openpgpjs/openpgpjs">OpenPGP.js</a>, which is
+    licensed under the
+    <a href="https://www.gnu.org/licenses/lgpl-3.0.html">GNU LGPL v3 (or later)</a>
+    — a license compatible with, and re-conveyable under, the AGPL.
+  </p>
+</section>
+{{end}}

@@ -42,6 +42,11 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 	// with the archive's own key and ingests the data. See ADR-0039.
 	r.Get("/migrate", handleMigratePage(ss, cfg))
 
+	// JavaScript License Web Labels (GNU LibreJS). Linked from every page's
+	// footer via rel="jslicense"; unauthenticated because app.js loads on
+	// logged-out pages too.
+	r.Get("/jslicense", handleJSLicensePage(cfg))
+
 	// ---- API v1 — invite validation (unauthenticated) ----
 	r.Get("/api/v1/invites/{token}", handleAPIGetInvite(db, cfg))
 

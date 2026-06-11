@@ -801,6 +801,36 @@ details > .info-block { margin-top: 0.5rem; }
 .site-footer a:hover {
   color: #8b949e;
 }
+.footer-sep {
+  margin: 0 0.5rem;
+  color: #21262d;
+}
+
+/* -------------------------------------------------------------------------
+   JavaScript License Web Labels page (/jslicense)
+   ------------------------------------------------------------------------- */
+
+.jslicense-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.25rem 0;
+  font-size: 0.8125rem;
+}
+.jslicense-table th,
+.jslicense-table td {
+  text-align: left;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid #161b22;
+  vertical-align: top;
+}
+.jslicense-table th {
+  color: #484f58;
+  font-weight: 600;
+}
+.jslicense-table th:first-child,
+.jslicense-table td:first-child { padding-left: 0; }
+.jslicense-table th:last-child,
+.jslicense-table td:last-child { padding-right: 0; }
 
 /* -------------------------------------------------------------------------
    Custom domain list

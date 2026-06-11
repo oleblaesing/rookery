@@ -204,6 +204,28 @@ func handleMigratePage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFu
 }
 
 // -------------------------------------------------------------------------
+// GET /jslicense — JavaScript License Web Labels (GNU LibreJS)
+// -------------------------------------------------------------------------
+
+// handleJSLicensePage renders the JavaScript License Web Labels page declaring
+// the licensing of the bundled client script (static/app.js). Every page links
+// to it from the footer via rel="jslicense" so the GNU LibreJS browser
+// extension can confirm the JavaScript is free software. Unauthenticated: the
+// script loads on logged-out pages too, so the labels must be reachable there.
+// See https://www.gnu.org/licenses/javascript-labels.html.
+func handleJSLicensePage(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		renderTemplate(w, "jslicense.gohtml", struct {
+			InstanceName string
+			User         *userProfile // nil — unauthenticated page; required by base template
+			CSRFToken    string       // empty — base template references it; no form on this page
+		}{
+			InstanceName: cfg.InstanceName,
+		})
+	}
+}
+
+// -------------------------------------------------------------------------
 // GET /settings — account settings page
 // -------------------------------------------------------------------------
 
