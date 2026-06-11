@@ -151,6 +151,54 @@ func TestSubmissionDefaults(t *testing.T) {
 	}
 }
 
+func TestOnionAddressValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "unset is ok and empty",
+			body: `domain = "rookery.example"`,
+			want: "",
+		},
+		{
+			name: "bare onion host is ok",
+			body: "domain = \"rookery.example\"\nonion_address = \"abcd1234.onion\"\n",
+			want: "abcd1234.onion",
+		},
+		{
+			name:    "URL form is rejected",
+			body:    "domain = \"rookery.example\"\nonion_address = \"http://abcd1234.onion\"\n",
+			wantErr: true,
+		},
+		{
+			name:    "non-onion host is rejected",
+			body:    "domain = \"rookery.example\"\nonion_address = \"example.com\"\n",
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setBaseSecrets(t)
+			cfg, err := Load(writeConfig(t, tc.body))
+			if tc.wantErr {
+				if err == nil {
+					t.Error("expected validation error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.OnionAddress != tc.want {
+				t.Errorf("OnionAddress = %q, want %q", cfg.OnionAddress, tc.want)
+			}
+		})
+	}
+}
+
 func TestSubmissionValidation(t *testing.T) {
 	tests := []struct {
 		name    string

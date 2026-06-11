@@ -32,7 +32,7 @@ if [ "$1" == "init" ]; then
     opt_name=""
 
     shift
-    
+
     while [ $# -gt 0 ]; do
         case "$1" in
             --domain)    shift; opt_domain="$1";    shift ;;

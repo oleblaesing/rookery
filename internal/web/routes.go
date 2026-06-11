@@ -26,6 +26,11 @@ import (
 func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, domMgr *domains.Manager) {
 	ss := auth.NewSessionStore(db, cfg)
 
+	// Advertise the Tor hidden service (if configured) on every response.
+	if cfg.OnionAddress != "" {
+		r.Use(onionLocation(cfg.OnionAddress))
+	}
+
 	// ---- Unauthenticated public endpoints ----
 	r.Get("/healthz", handleHealthz(cfg))
 	r.Get("/api/v1/status", handleAPIStatus(cfg))
@@ -182,6 +187,27 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		staticDir = "static"
 	}
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
+}
+
+// onionLocation advertises the instance's Tor hidden service to clients on the
+// clearnet site. When an onion address is configured, every response carries an
+// Onion-Location header pointing at the same path on the onion, so Tor Browser
+// offers (or auto-redirects to) it. Requests that already arrive over the onion
+// are left untouched so we don't advertise the onion to itself.
+//
+// Tor Browser only acts on the header for HTTPS document loads, so it is inert
+// in development (plain-HTTP localhost) and harmless on API/asset responses.
+// Onion services carry no TLS of their own — Tor provides the transport
+// encryption — hence the http:// scheme.
+func onionLocation(onion string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Host != onion {
+				w.Header().Set("Onion-Location", "http://"+onion+r.URL.RequestURI())
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // -------------------------------------------------------------------------

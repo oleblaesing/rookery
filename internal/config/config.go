@@ -34,6 +34,18 @@ type Config struct {
 	// later config change.
 	ContactEmail string `toml:"contact_email"`
 
+	// OnionAddress is the instance's Tor hidden-service hostname (e.g.
+	// "abcd…xyz.onion"), used to advertise the onion to clearnet visitors via
+	// the Onion-Location response header — Tor Browser then offers (or
+	// auto-redirects to) the onion. Optional; empty disables the header.
+	//
+	// rookery does not run the Tor daemon itself: the operator publishes the
+	// hidden service separately and points it at the web port. This setting
+	// only controls advertising. The web UI is the only thing reachable over
+	// the onion; mail delivery (MX/SMTP) stays on the clearnet domain. Must be
+	// a bare hostname with no scheme or path.
+	OnionAddress string `toml:"onion_address"`
+
 	HTTP    HTTPConfig    `toml:"http"`
 	Log     LogConfig     `toml:"log"`
 	Storage StorageConfig `toml:"storage"`
@@ -316,6 +328,9 @@ func Load(path string) (*Config, error) {
 	if cfg.Domain == "" {
 		return nil, fmt.Errorf("config: domain is required (set in rookery.toml)")
 	}
+	if err := validateOnionAddress(&cfg); err != nil {
+		return nil, err
+	}
 	if cfg.Secrets.DBPassword == "" {
 		return nil, fmt.Errorf("env: ROOKERY_DB_PASSWORD is required")
 	}
@@ -334,6 +349,24 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// validateOnionAddress checks that a configured onion_address is a bare
+// hostname (no scheme, no path) ending in ".onion". It is a no-op when unset.
+// The bare-host requirement keeps the Onion-Location header construction in the
+// web layer trivial (scheme + host + request path).
+func validateOnionAddress(cfg *Config) error {
+	a := cfg.OnionAddress
+	if a == "" {
+		return nil
+	}
+	if strings.Contains(a, "/") || strings.Contains(a, "://") {
+		return fmt.Errorf("config: onion_address must be a bare hostname, not a URL (got %q)", a)
+	}
+	if !strings.HasSuffix(a, ".onion") {
+		return fmt.Errorf("config: onion_address must end in .onion (got %q)", a)
+	}
+	return nil
 }
 
 // validateSubmission checks the relay-rookery submission settings when the

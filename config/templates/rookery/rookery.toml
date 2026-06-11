@@ -1,6 +1,7 @@
 domain = "rookery.example.com"
 contact_email = "me@example.com"
 instance_name = "My Rookery Instance"
+onion_address = ""
 
 [log]
 level = "info"
