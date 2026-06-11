@@ -107,7 +107,7 @@ Upgrading it later:
 
 ```sh
 cd /opt/rookery
-./rookery backup . # Will ask you for a password. You can restore the encrypted back on any instance via ./rookery restore backup.tar.gz.enc
+./rookery backup # Will ask you for a password. You can restore the encrypted back on any instance via ./rookery restore backup.tar.gz.enc
 ./rookery update
 sudo systemctl restart rookery
 ```
