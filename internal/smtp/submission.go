@@ -1,17 +1,3 @@
-// Submission listener — the relay-rookery ingress (ADR-0030 §3, Phase B).
-//
-// This is rookery's only *authenticated* SMTP listener, distinct from the
-// inbound MX listener on port 25 (which never offers AUTH). It accepts mail from
-// whitelisted downstream operators (rows in relay_clients) over an authenticated
-// TLS session and relays it to the internet on their behalf, absorbing the
-// IP-reputation cost.
-//
-// Two deliberate properties:
-//   - AUTH is offered only over TLS (AllowInsecureAuth = false); an
-//     unauthenticated session can never relay. This listener is never an open relay.
-//   - Relayed mail is opaque transport: it is enqueued into the existing
-//     outbound_queue WITHOUT re-signing DKIM. The downstream already signed it,
-//     and that signature is what receivers verify (ADR-0030 invariant).
 package smtp
 
 import (
@@ -35,12 +21,8 @@ import (
 	"rookery/internal/store"
 )
 
-// ErrNoSuchRelayClient is returned by RelayClientStore.LookupRelayClient when no
-// row matches the SASL username.
 var ErrNoSuchRelayClient = errors.New("no such relay client")
 
-// RelayClient is the subset of a relay_clients row needed to authenticate and
-// rate-limit a submission session.
 type RelayClient struct {
 	ID          string
 	SecretHash  string
@@ -48,49 +30,35 @@ type RelayClient struct {
 	RatePerHour int
 }
 
-// RelayClientStore is the database surface the submission backend needs. It is
-// an interface so the listener can be tested without a live Postgres.
+// An interface so the listener can be tested without Postgres.
 type RelayClientStore interface {
-	// LookupRelayClient returns the relay client for a SASL username, or
-	// ErrNoSuchRelayClient if none exists.
 	LookupRelayClient(ctx context.Context, username string) (RelayClient, error)
-	// TouchRelayClient records that the client authenticated successfully.
 	TouchRelayClient(ctx context.Context, id string) error
-	// CountRelayQueuedSince counts queue rows enqueued for a client since t,
-	// for per-client rate limiting.
 	CountRelayQueuedSince(ctx context.Context, id string, t time.Time) (int, error)
-	// EnqueueRelayed inserts one outbound_queue row per recipient for an
-	// already-signed relayed message stored at blobSHA.
 	EnqueueRelayed(ctx context.Context, relayClientID, mailFrom, blobSHA string, recipients []string) error
 }
 
-// blobWriter is the blob-store surface the submission backend needs.
-// *store.Store satisfies it.
 type blobWriter interface {
 	WriteBlob(data []byte) (string, error)
 }
 
-// SubmissionServer runs the authenticated submission listeners (587 STARTTLS and
-// 465 implicit TLS) that share one backend.
 type SubmissionServer struct {
 	listeners []submissionListener
 }
 
-// submissionListener pairs a go-smtp server with its TLS mode (587 STARTTLS vs
-// 465 implicit TLS), since that choice selects ListenAndServe vs ListenAndServeTLS.
+// Carries the TLS mode because it selects ListenAndServe vs ListenAndServeTLS
+// (587 STARTTLS vs 465 implicit TLS).
 type submissionListener struct {
 	srv         *smtp.Server
 	implicitTLS bool
 }
 
-// NewSubmissionServer constructs (but does not start) the submission listeners.
-// tlsCfg must be non-nil — the submission listener never runs without TLS.
+// tlsCfg must be non-nil — submission never runs without TLS.
 func NewSubmissionServer(cfg *config.Config, db *pgxpool.Pool, st *store.Store, tlsCfg *tls.Config) *SubmissionServer {
 	return newSubmissionServer(cfg, &pgRelayStore{db: db}, st, tlsCfg)
 }
 
-// newSubmissionServer is the testable constructor: it takes the store
-// interfaces directly so tests can supply fakes.
+// Takes the store interfaces directly so tests can fake them.
 func newSubmissionServer(cfg *config.Config, rs RelayClientStore, bw blobWriter, tlsCfg *tls.Config) *SubmissionServer {
 	be := &submissionBackend{cfg: cfg, relays: rs, blobs: bw}
 
@@ -103,9 +71,7 @@ func newSubmissionServer(cfg *config.Config, rs RelayClientStore, bw blobWriter,
 		srv.MaxMessageBytes = cfg.SMTP.MaxMessageBytes
 		srv.MaxRecipients = 100
 		srv.TLSConfig = tlsCfg
-		// AUTH is offered only over TLS. On 587 that means after STARTTLS; on
-		// 465 the whole session is already TLS.
-		srv.AllowInsecureAuth = false
+		srv.AllowInsecureAuth = false // AUTH only after STARTTLS (587) or inside TLS (465)
 		return submissionListener{srv: srv, implicitTLS: implicitTLS}
 	}
 
@@ -115,8 +81,6 @@ func newSubmissionServer(cfg *config.Config, rs RelayClientStore, bw blobWriter,
 	}}
 }
 
-// ListenAndServe starts every submission listener and blocks until ctx is
-// cancelled or a listener fails.
 func (s *SubmissionServer) ListenAndServe(ctx context.Context) error {
 	errCh := make(chan error, len(s.listeners))
 	for _, l := range s.listeners {
@@ -151,10 +115,6 @@ func (s *SubmissionServer) ListenAndServe(ctx context.Context) error {
 	}
 }
 
-// -------------------------------------------------------------------------
-// go-smtp backend
-// -------------------------------------------------------------------------
-
 type submissionBackend struct {
 	cfg    *config.Config
 	relays RelayClientStore
@@ -175,20 +135,17 @@ type submissionSession struct {
 	backend    *submissionBackend
 	remoteAddr string
 
-	client     *RelayClient // set once authenticated
+	client     *RelayClient
 	from       string
 	recipients []string
 }
 
-// AuthMechanisms advertises only PLAIN. go-smtp offers AUTH solely over TLS
-// (AllowInsecureAuth = false), so credentials never cross an unencrypted link.
 func (s *submissionSession) AuthMechanisms() []string {
 	return []string{sasl.Plain}
 }
 
-// Auth verifies a relay client's SASL credentials against the relay_clients
-// whitelist. All failure modes return the same opaque error so an attacker
-// cannot distinguish "unknown username" from "wrong secret" or "disabled".
+// Returns the same opaque error for every failure mode so an attacker can't
+// tell unknown-username from wrong-secret from disabled.
 func (s *submissionSession) Auth(mech string) (sasl.Server, error) {
 	return sasl.NewPlainServer(func(_, username, password string) error {
 		ctx := context.Background()
@@ -245,8 +202,8 @@ func (s *submissionSession) Data(r io.Reader) error {
 
 	ctx := context.Background()
 
-	// Per-client hourly rate limit. Over-limit returns 4xx so the downstream's
-	// queue retries later rather than dropping the mail (ADR-0030 §3).
+	// Over-limit returns 4xx so the downstream's queue retries rather than
+	// dropping the mail.
 	if cap := s.client.RatePerHour; cap > 0 {
 		n, err := s.backend.relays.CountRelayQueuedSince(ctx, s.client.ID, time.Now().Add(-time.Hour))
 		if err != nil {
@@ -263,7 +220,7 @@ func (s *submissionSession) Data(r io.Reader) error {
 		return fmt.Errorf("submission: read data: %w", err)
 	}
 
-	// Store the already-signed message once; all recipients share the blob.
+	// One blob shared by every recipient.
 	blobSHA, err := s.backend.blobs.WriteBlob(rawMsg)
 	if err != nil {
 		slog.Error("submission: write blob", "err", err)
@@ -271,7 +228,7 @@ func (s *submissionSession) Data(r io.Reader) error {
 			Message: "Temporary storage error"}
 	}
 
-	// Enqueue into the shared outbound queue. No DKIM re-signing: opaque transport.
+	// Opaque transport: no DKIM re-signing.
 	if err := s.backend.relays.EnqueueRelayed(ctx, s.client.ID, s.from, blobSHA, s.recipients); err != nil {
 		slog.Error("submission: enqueue relayed message", "err", err)
 		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 0, 0},
@@ -287,10 +244,6 @@ func (s *submissionSession) Reset() {
 }
 
 func (s *submissionSession) Logout() error { return nil }
-
-// -------------------------------------------------------------------------
-// Postgres-backed RelayClientStore
-// -------------------------------------------------------------------------
 
 type pgRelayStore struct{ db *pgxpool.Pool }
 

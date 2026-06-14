@@ -1,15 +1,3 @@
-// Package discovery performs server-side PGP public-key lookup for a given
-// email address.
-//
-// Lookup order (§8 Phase 2):
-//   1. Local user directory (user_keys table) — own-domain users.
-//   2. Per-user known_keys cache (keys previously seen from this correspondent).
-//   3. WKD (Web Key Directory) advanced method fetch.
-//
-// WKD results are cached into known_keys with source="wkd" so subsequent
-// lookups for the same address hit the cache instead of the network.
-//
-// The keyserver path is deferred to Phase 7.
 package discovery
 
 import (
@@ -30,39 +18,31 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Result is the outcome of a key discovery attempt.
 type Result struct {
 	ArmoredPublicKey string
 	Fingerprint      string
-	// Source is one of: "local", "known_keys", "wkd".
-	Source      string
-	FirstSeenAt *time.Time // non-nil when source == "known_keys"
+	Source           string
+	FirstSeenAt      *time.Time
 }
 
-// Discover looks up the OpenPGP public key for address.
-// userID is the authenticated user performing the lookup (for known_keys scoping).
-// Returns (nil, nil) when no key is found.
 func Discover(ctx context.Context, db *pgxpool.Pool, userID, address string) (*Result, error) {
 	address = strings.ToLower(strings.TrimSpace(address))
 
-	// 1. Local user directory.
 	if r, err := lookupLocal(ctx, db, address); err != nil {
 		return nil, err
 	} else if r != nil {
 		return r, nil
 	}
 
-	// 2. Known-keys cache (scoped to this user's observed correspondents).
 	if r, err := lookupKnownKeys(ctx, db, userID, address); err != nil {
 		return nil, err
 	} else if r != nil {
 		return r, nil
 	}
 
-	// 3. WKD fetch.
 	r, err := lookupWKD(ctx, address)
 	if err != nil {
-		// WKD failures are non-fatal — the address may simply not publish via WKD.
+		// Non-fatal: the address may simply not publish via WKD.
 		slog.Debug("discovery: WKD lookup failed", "address", address, "err", err)
 		return nil, nil //nolint:nilerr
 	}
@@ -70,16 +50,12 @@ func Discover(ctx context.Context, db *pgxpool.Pool, userID, address string) (*R
 		return nil, nil
 	}
 
-	// Cache the WKD result.
 	if err := cacheKey(ctx, db, userID, address, r.ArmoredPublicKey, r.Fingerprint, "wkd"); err != nil {
 		slog.Warn("discovery: failed to cache WKD result", "address", address, "err", err)
-		// Non-fatal.
 	}
 	return r, nil
 }
 
-// HarvestKey upserts a public key into the user's known_keys cache.
-// source should be "auto_attach", "wkd", or "manual".
 func HarvestKey(ctx context.Context, db *pgxpool.Pool, userID, address, armoredKey, source string) error {
 	fp, err := fingerprint(armoredKey)
 	if err != nil {
@@ -87,10 +63,6 @@ func HarvestKey(ctx context.Context, db *pgxpool.Pool, userID, address, armoredK
 	}
 	return cacheKey(ctx, db, userID, address, armoredKey, fp, source)
 }
-
-// -------------------------------------------------------------------------
-// Internal helpers
-// -------------------------------------------------------------------------
 
 func lookupLocal(ctx context.Context, db *pgxpool.Pool, address string) (*Result, error) {
 	var fp, armored string
@@ -126,9 +98,8 @@ func lookupKnownKeys(ctx context.Context, db *pgxpool.Pool, userID, address stri
 	if err != nil {
 		return nil, fmt.Errorf("discovery: known_keys lookup: %w", err)
 	}
-	// WKD-sourced and auto-attached keys are re-validated after 7 days so that
-	// key rotations (e.g. ProtonMail key refresh) are picked up automatically.
-	// Manually-added keys are kept indefinitely.
+	// Expire cached WKD/auto-attach keys after 7 days so rotations get picked up;
+	// manually-added keys are kept indefinitely.
 	if source != "manual" && time.Since(lastSeen) > 7*24*time.Hour {
 		return nil, nil
 	}
@@ -136,8 +107,6 @@ func lookupKnownKeys(ctx context.Context, db *pgxpool.Pool, userID, address stri
 	return &Result{ArmoredPublicKey: armored, Fingerprint: fp, Source: "known_keys", FirstSeenAt: &t}, nil
 }
 
-// lookupWKD tries the WKD advanced method first, then falls back to the direct
-// method (RFC 9145 §3.1) when the advanced endpoint is unreachable or returns 404.
 func lookupWKD(ctx context.Context, address string) (*Result, error) {
 	parts := strings.SplitN(address, "@", 2)
 	if len(parts) != 2 {
@@ -146,7 +115,6 @@ func lookupWKD(ctx context.Context, address string) (*Result, error) {
 	localPart, domain := parts[0], parts[1]
 	hash := wkdHash(localPart)
 
-	// Advanced method: https://openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<hash>
 	advURL := fmt.Sprintf("https://openpgpkey.%s/.well-known/openpgpkey/%s/hu/%s", domain, domain, hash)
 	r, fallback, err := fetchWKDKey(ctx, advURL)
 	if err != nil {
@@ -159,15 +127,11 @@ func lookupWKD(ctx context.Context, address string) (*Result, error) {
 		return nil, nil
 	}
 
-	// Direct method fallback: https://<domain>/.well-known/openpgpkey/hu/<hash>
 	dirURL := fmt.Sprintf("https://%s/.well-known/openpgpkey/hu/%s", domain, hash)
 	r, _, err = fetchWKDKey(ctx, dirURL)
 	return r, err
 }
 
-// fetchWKDKey fetches a binary WKD key from url and returns it re-armored.
-// fallback=true signals the caller that the next method should be tried
-// (network/DNS error or 404). A non-404 HTTP error is returned as err.
 func fetchWKDKey(ctx context.Context, url string) (r *Result, fallback bool, err error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -179,8 +143,7 @@ func fetchWKDKey(ctx context.Context, url string) (r *Result, fallback bool, err
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		// Network/DNS failure: signal to try the fallback method.
-		return nil, true, nil
+		return nil, true, nil // network/DNS failure: try the fallback method
 	}
 	defer resp.Body.Close()
 
@@ -246,22 +209,13 @@ func fingerprint(armoredKey string) (string, error) {
 	return fmt.Sprintf("%X", entities[0].PrimaryKey.Fingerprint), nil
 }
 
-// wkdHash computes the z-base-32 encoded SHA-1 hash of the lower-cased
-// local-part as required by the WKD spec. This mirrors keydir.WKDHash but is
-// inlined here to avoid an import cycle.
+// Duplicates keydir.WKDHash to avoid an import cycle.
 func wkdHash(localPart string) string {
-	// SHA-1 of lower-cased local part.
 	h := sha1Sum([]byte(strings.ToLower(localPart)))
 	return zBase32Encode(h[:])
 }
 
-// sha1Sum computes a SHA-1 hash without importing crypto/sha1 directly
-// (avoiding the nolint comment we'd need). We use encoding/binary and a
-// hand-rolled compression to stay dependency-free here.
-// Actually, we need crypto/sha1 for correctness. This is WKD-mandated usage.
 func sha1Sum(data []byte) [20]byte {
-	// We cannot avoid importing crypto/sha1 for a correct SHA-1 implementation.
-	// Use a local import via a helper to keep the nolint annotation contained.
 	return sha1Digest(data)
 }
 

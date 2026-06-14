@@ -1,15 +1,5 @@
--- Migration 0007: per-user data export jobs.
---
--- export_jobs tracks the lifecycle of a user-requested data archive:
---   pending  → background goroutine is assembling the archive
---   ready    → archive file is on disk; token URL is valid
---   downloaded → archive was successfully served at least once
---   expired  → 24-hour window passed; file deleted by cleanup worker
---   failed   → ExportUser returned an error; error_msg is set
---
--- token_hash stores SHA-256(raw_token) so the raw token only ever lives
--- in the user's email inbox. A compromised DB alone cannot download archives.
-
+-- token_hash stores SHA-256(raw_token) so the raw token only ever lives in the
+-- user's email inbox; a compromised DB alone cannot download archives.
 CREATE TABLE export_jobs (
     id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id     UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,

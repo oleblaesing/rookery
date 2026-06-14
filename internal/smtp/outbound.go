@@ -15,14 +15,6 @@ import (
 	"time"
 )
 
-// Deliver delivers a single RFC 5322 message to one recipient via direct MX
-// delivery. It performs MX lookup, tries each MX host in preference order, and
-// uses opportunistic STARTTLS (not enforced; MTA-STS enforcement is Phase 4).
-//
-// fromDomain is used in the EHLO greeting.
-// from is the envelope MAIL FROM address.
-// to is the envelope RCPT TO address (single recipient).
-// message is the complete signed RFC 5322 message bytes.
 func Deliver(ctx context.Context, fromDomain, from, to string, message []byte) error {
 	parts := strings.SplitN(to, "@", 2)
 	if len(parts) != 2 {
@@ -35,7 +27,7 @@ func Deliver(ctx context.Context, fromDomain, from, to string, message []byte) e
 		return fmt.Errorf("outbound: MX lookup for %s failed: %w", recipientDomain, err)
 	}
 
-	// Sort by preference (LookupMX returns them sorted, but be defensive).
+	// LookupMX sorts already, but be defensive.
 	sort.Slice(mxs, func(i, j int) bool { return mxs[i].Pref < mxs[j].Pref })
 
 	var lastErr error
@@ -52,13 +44,9 @@ func Deliver(ctx context.Context, fromDomain, from, to string, message []byte) e
 	return fmt.Errorf("outbound: all MX hosts for %s failed: %w", recipientDomain, lastErr)
 }
 
-// smarthostRootCAs overrides the trusted roots for the smarthost TLS handshake.
-// nil (the production value) means the system root pool. Tests set it to trust a
-// throwaway server certificate.
+// nil means the system pool; tests set it to trust a throwaway certificate.
 var smarthostRootCAs *x509.CertPool
 
-// Smarthost carries the resolved [smtp.smarthost] settings for one delivery.
-// See config.SmarthostConfig and ADR-0030.
 type Smarthost struct {
 	Host       string
 	Port       int
@@ -68,17 +56,6 @@ type Smarthost struct {
 	Auth       bool
 }
 
-// DeliverViaSmarthost sends a message through the configured smarthost — a
-// trusted upstream SMTP submission endpoint (commercial relay, relay rookery,
-// or dev mailpit) — instead of doing direct MX lookup. The message has already
-// been DKIM-signed by the caller; the smarthost is opaque transport (ADR-0030).
-//
-// Unlike MX delivery, TLS is enforced when sh.RequireTLS: a smarthost session
-// carries AUTH credentials, so if TLS cannot be established the attempt fails
-// rather than falling back to plaintext.
-//
-// Port 465 uses implicit TLS; any other port (587 by default) dials plaintext
-// and upgrades via STARTTLS.
 func DeliverViaSmarthost(ctx context.Context, fromDomain string, sh Smarthost, from, to string, message []byte) error {
 	port := sh.Port
 	if port <= 0 {
@@ -113,8 +90,7 @@ func DeliverViaSmarthost(ctx context.Context, fromDomain string, sh Smarthost, f
 		return fmt.Errorf("EHLO: %w", err)
 	}
 
-	// STARTTLS for non-implicit-TLS ports. Mandatory when RequireTLS: a missing
-	// STARTTLS offer is a hard failure, never a plaintext fallback.
+	// On RequireTLS, a missing STARTTLS offer is a hard failure, not a fallback.
 	if !implicitTLS {
 		if ok, _ := c.Extension("STARTTLS"); ok {
 			if err := c.StartTLS(tlsCfg); err != nil {
@@ -125,7 +101,7 @@ func DeliverViaSmarthost(ctx context.Context, fromDomain string, sh Smarthost, f
 		}
 	}
 
-	// Never send credentials or mail in the clear when TLS is required.
+	// Guard against sending credentials or mail in the clear.
 	if sh.RequireTLS {
 		if _, ok := c.TLSConnectionState(); !ok {
 			return fmt.Errorf("smarthost %s: TLS required but not established", sh.Host)
@@ -145,8 +121,6 @@ func DeliverViaSmarthost(ctx context.Context, fromDomain string, sh Smarthost, f
 	return sendMessage(c, from, to, message)
 }
 
-// smarthostAuth picks an AUTH mechanism the server advertises, preferring PLAIN
-// and falling back to the widely-supported (non-standard) LOGIN.
 func smarthostAuth(c *smtp.Client, host, username, password string) (smtp.Auth, error) {
 	ok, mechs := c.Extension("AUTH")
 	if !ok {
@@ -162,9 +136,7 @@ func smarthostAuth(c *smtp.Client, host, username, password string) (smtp.Auth, 
 	}
 }
 
-// loginAuth implements the non-standard but widely deployed SMTP AUTH LOGIN
-// mechanism. stdlib net/smtp ships only PLAIN and CRAM-MD5. Like PlainAuth, it
-// refuses to transmit credentials over an unencrypted connection.
+// Implements SMTP AUTH LOGIN, which stdlib net/smtp omits.
 type loginAuth struct {
 	username, password string
 }
@@ -190,7 +162,6 @@ func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	}
 }
 
-// tryDeliver attempts delivery to a single MX host with opportunistic STARTTLS.
 func tryDeliver(ctx context.Context, fromDomain, addr, serverName, from, to string, message []byte) error {
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
@@ -205,19 +176,17 @@ func tryDeliver(ctx context.Context, fromDomain, addr, serverName, from, to stri
 	}
 	defer c.Quit() //nolint:errcheck
 
-	// EHLO.
 	if err := c.Hello(fromDomain); err != nil {
 		return fmt.Errorf("EHLO: %w", err)
 	}
 
-	// Opportunistic STARTTLS.
 	if ok, _ := c.Extension("STARTTLS"); ok {
 		tlsCfg := &tls.Config{
 			ServerName: serverName,
 			MinVersion: tls.VersionTLS12,
 		}
 		if err := c.StartTLS(tlsCfg); err != nil {
-			// Non-fatal: continue unencrypted. MTA-STS enforcement is Phase 4.
+			// Opportunistic only: continue unencrypted.
 			slog.Debug("outbound: STARTTLS failed, continuing plaintext", "mx", serverName, "err", err)
 		}
 	}
@@ -225,9 +194,6 @@ func tryDeliver(ctx context.Context, fromDomain, addr, serverName, from, to stri
 	return sendMessage(c, from, to, message)
 }
 
-// sendMessage runs the MAIL FROM / RCPT TO / DATA exchange on an established
-// (and, where applicable, authenticated) SMTP client. Shared by direct MX
-// delivery and smarthost delivery.
 func sendMessage(c *smtp.Client, from, to string, message []byte) error {
 	if err := c.Mail(from); err != nil {
 		return fmt.Errorf("MAIL FROM: %w", err)

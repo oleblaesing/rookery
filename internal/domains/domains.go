@@ -1,12 +1,3 @@
-// Package domains manages custom-domain registration, DNS verification,
-// reserved-address auto-creation, and MTA-STS lifecycle for a rookery instance.
-//
-// Design constraints (Phase 4, ADR-0034 through ADR-0038):
-//   - Domain verification requires challenge TXT + correct MX (ADR-0034).
-//   - MTA-STS transitions from testing to enforce 48h after verification (ADR-0037).
-//   - Reserved local-parts (postmaster/abuse/hostmaster/webmaster) are auto-created
-//     as alias rows on every newly verified domain (ADR-0018).
-//   - DNS drift detection runs in a background worker once per hour (ADR-0038).
 package domains
 
 import (
@@ -25,75 +16,58 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ErrNotFound is returned when a domain row does not exist.
-var ErrNotFound = errors.New("domains: not found")
+var (
+	ErrNotFound       = errors.New("domains: not found")
+	ErrConflict       = errors.New("domains: already registered")
+	ErrForbidden      = errors.New("domains: forbidden")
+	ErrAddressesExist = errors.New("domains: non-reserved addresses still exist on this domain")
+)
 
-// ErrConflict is returned when a domain is already registered.
-var ErrConflict = errors.New("domains: already registered")
-
-// ErrForbidden is returned when the caller does not own the domain.
-var ErrForbidden = errors.New("domains: forbidden")
-
-// ErrAddressesExist is returned when attempting to delete a domain that still
-// has non-reserved addresses associated with it.
-var ErrAddressesExist = errors.New("domains: non-reserved addresses still exist on this domain")
-
-// reservedLocalParts are auto-created as aliases on every verified domain.
 var reservedLocalParts = []string{"postmaster", "abuse", "hostmaster", "webmaster"}
 
-// tokenTTL is how long a verification token remains valid.
 const tokenTTL = 7 * 24 * time.Hour
 
-// Domain holds the data model for a managed domain.
 type Domain struct {
-	ID              string
-	Domain          string
-	IsPrimary       bool
-	OwnerUserID     *string
-	VerifiedAt      *time.Time
-	WKDActive       bool
-	CreatedAt       time.Time
+	ID          string
+	Domain      string
+	IsPrimary   bool
+	OwnerUserID *string
+	VerifiedAt  *time.Time
+	WKDActive   bool
+	CreatedAt   time.Time
 
-	// Verification
-	VerificationToken      *string
-	VerificationExpiresAt  *time.Time
-	VerificationCheckedAt  *time.Time
+	VerificationToken     *string
+	VerificationExpiresAt *time.Time
+	VerificationCheckedAt *time.Time
 
-	// MTA-STS
 	MTASTSMode          *string // nil = auto (testing 48h → enforce)
 	MTASTSID            *string
 	MTASTSModeChangedAt *time.Time
 
-	// Catch-all
 	CatchAllEnabled   bool
 	CatchAllAddressID *string
 
-	// DNS drift
 	DNSLastCheckedAt *time.Time
-	DNSStatus        map[string]string // record key → "ok" | "drifted" | "missing" | "unknown"
+	DNSStatus        map[string]string
 }
 
-// RecordStatus holds a per-DNS-record verification/drift result.
 type RecordStatus struct {
-	Name     string // DNS record name, e.g. "rookery-ed25519._domainkey.example.com"
-	Type     string // DNS RR type: "A", "AAAA", "TXT", "MX", "CNAME"
-	Key      string // internal identifier, e.g. "MX", "DKIM_ED25519_CNAME"
+	Name     string
+	Type     string
+	Key      string
 	Expected string
 	Actual   string // empty = not found
-	Status   string // "" (unchecked) | "ok" | "drifted" | "unknown" | "missing"
+	Status   string
 }
 
-// VerificationResult is returned by CheckVerification.
 type VerificationResult struct {
 	Verified bool
 	Records  []RecordStatus
 }
 
-// LocalDeliveryFn delivers a raw RFC 5322 message to a local address without
-// going through external SMTP. Wired from main.go to avoid an import cycle.
+// Wired from main.go to avoid an import cycle.
 type LocalDeliveryFn func(ctx context.Context, from, to string, rawMsg []byte) error
 
-// Manager handles domain lifecycle for an instance.
 type Manager struct {
 	db            *pgxpool.Pool
 	primaryDomain string
@@ -101,8 +75,7 @@ type Manager struct {
 	deliverFn     LocalDeliveryFn
 }
 
-// NewManager creates a Manager. resolverAddr is the DNS resolver to use for
-// checks (e.g. "9.9.9.9:53"); an empty string uses the system default.
+// An empty resolverAddr uses the system resolver.
 func NewManager(db *pgxpool.Pool, primaryDomain, resolverAddr string) *Manager {
 	m := &Manager{db: db, primaryDomain: primaryDomain}
 	if resolverAddr != "" {
@@ -116,15 +89,10 @@ func NewManager(db *pgxpool.Pool, primaryDomain, resolverAddr string) *Manager {
 	return m
 }
 
-// SetLocalDelivery wires the delivery function used to send notification emails
-// (e.g. the MTA-STS enforce notice). Call once after NewManager, before serving.
 func (m *Manager) SetLocalDelivery(fn LocalDeliveryFn) { m.deliverFn = fn }
 
-// PrimaryDomain returns the primary domain name for this instance.
 func (m *Manager) PrimaryDomain() string { return m.primaryDomain }
 
-// Register creates a pending domain row for the given user. Returns ErrConflict
-// if the domain is already registered (by anyone).
 func (m *Manager) Register(ctx context.Context, userID, domainName string) (*Domain, error) {
 	domainName = strings.ToLower(strings.TrimSpace(domainName))
 	if domainName == "" {
@@ -137,13 +105,12 @@ func (m *Manager) Register(ctx context.Context, userID, domainName string) (*Dom
 	}
 	expires := time.Now().UTC().Add(tokenTTL)
 
-	// Generate an MTA-STS ID at registration time so the DNS record set we
-	// show to the user immediately has the right id= value.
+	// Generate the MTA-STS id up front so the record set shown to the user has
+	// the right id= value immediately. Conventionally alphanumeric, so trim to 16.
 	mtsID, err := generateToken()
 	if err != nil {
 		return nil, fmt.Errorf("domains: generate mta-sts id: %w", err)
 	}
-	// MTA-STS IDs are conventionally alphanumeric; use hex-like base64url (16 chars).
 	mtsID = mtsID[:16]
 
 	var id string
@@ -165,7 +132,6 @@ func (m *Manager) Register(ctx context.Context, userID, domainName string) (*Dom
 	return m.Get(ctx, id)
 }
 
-// Get returns a domain by ID.
 func (m *Manager) Get(ctx context.Context, id string) (*Domain, error) {
 	return m.scanOne(ctx, `
 		SELECT id, domain, is_primary, owner_user_id, verified_at, wkd_active, created_at,
@@ -177,7 +143,6 @@ func (m *Manager) Get(ctx context.Context, id string) (*Domain, error) {
 	`, id)
 }
 
-// GetByName returns a domain by its domain name.
 func (m *Manager) GetByName(ctx context.Context, name string) (*Domain, error) {
 	return m.scanOne(ctx, `
 		SELECT id, domain, is_primary, owner_user_id, verified_at, wkd_active, created_at,
@@ -189,7 +154,6 @@ func (m *Manager) GetByName(ctx context.Context, name string) (*Domain, error) {
 	`, name)
 }
 
-// ListForUser returns all non-primary domains owned by the user.
 func (m *Manager) ListForUser(ctx context.Context, userID string) ([]Domain, error) {
 	rows, err := m.db.Query(ctx, `
 		SELECT id, domain, is_primary, owner_user_id, verified_at, wkd_active, created_at,
@@ -216,8 +180,6 @@ func (m *Manager) ListForUser(ctx context.Context, userID string) ([]Domain, err
 	return out, rows.Err()
 }
 
-// Delete removes a custom domain. Returns ErrForbidden if the caller does not
-// own it, ErrAddressesExist if non-reserved addresses still use it.
 func (m *Manager) Delete(ctx context.Context, id, userID string) error {
 	d, err := m.Get(ctx, id)
 	if err != nil {
@@ -230,7 +192,6 @@ func (m *Manager) Delete(ctx context.Context, id, userID string) error {
 		return ErrForbidden
 	}
 
-	// Check for non-reserved addresses.
 	var count int
 	if err := m.db.QueryRow(ctx, `
 		SELECT count(*) FROM addresses
@@ -246,9 +207,6 @@ func (m *Manager) Delete(ctx context.Context, id, userID string) error {
 	return err
 }
 
-// CheckVerification performs a DNS check for the domain and updates the
-// domains row. Returns the per-record result. If all required records are
-// present the domain is marked verified and reserved addresses are created.
 func (m *Manager) CheckVerification(ctx context.Context, id string) (*VerificationResult, error) {
 	d, err := m.Get(ctx, id)
 	if err != nil {
@@ -258,7 +216,6 @@ func (m *Manager) CheckVerification(ctx context.Context, id string) (*Verificati
 		return nil, fmt.Errorf("domains: no verification token for %s", id)
 	}
 
-	// Refresh token if expired.
 	if d.VerificationExpiresAt != nil && time.Now().After(*d.VerificationExpiresAt) {
 		newToken, err := generateToken()
 		if err != nil {
@@ -278,7 +235,6 @@ func (m *Manager) CheckVerification(ctx context.Context, id string) (*Verificati
 	result := &VerificationResult{}
 	result.Records = m.checkDNSRecords(ctx, d, *d.VerificationToken)
 
-	// All required records must be present before the domain is considered verified.
 	allOK := len(result.Records) > 0
 	for _, r := range result.Records {
 		if r.Status != "ok" {
@@ -290,7 +246,6 @@ func (m *Manager) CheckVerification(ctx context.Context, id string) (*Verificati
 
 	now := time.Now().UTC()
 	if result.Verified && d.VerifiedAt == nil {
-		// Mark verified, activate WKD.
 		if _, err := m.db.Exec(ctx, `
 			UPDATE domains
 			SET verified_at = $1, wkd_active = TRUE, verification_checked_at = $1
@@ -298,7 +253,6 @@ func (m *Manager) CheckVerification(ctx context.Context, id string) (*Verificati
 		`, now, id); err != nil {
 			return nil, fmt.Errorf("domains: mark verified: %w", err)
 		}
-		// Auto-create reserved addresses.
 		if d.OwnerUserID != nil {
 			if err := m.EnsureReservedAddresses(ctx, id, *d.OwnerUserID); err != nil {
 				slog.Error("domains: create reserved addresses failed", "domain_id", id, "err", err)
@@ -318,11 +272,7 @@ func (m *Manager) CheckVerification(ctx context.Context, id string) (*Verificati
 	return result, nil
 }
 
-// EnsureReservedAddresses creates postmaster/abuse/hostmaster/webmaster alias
-// rows for the domain, pointing to the owner's primary address, and ensures
-// the owner's own local-part has a direct address on the domain. Idempotent.
 func (m *Manager) EnsureReservedAddresses(ctx context.Context, domainID, ownerUserID string) error {
-	// Fetch owner's primary_address_id and local_part.
 	var primaryAddrID, primaryLocalPart string
 	err := m.db.QueryRow(ctx, `
 		SELECT a.id, a.local_part
@@ -334,7 +284,6 @@ func (m *Manager) EnsureReservedAddresses(ctx context.Context, domainID, ownerUs
 		return fmt.Errorf("domains: reserved: fetch owner primary address: %w", err)
 	}
 
-	// Fetch the domain name.
 	var domainName string
 	if err := m.db.QueryRow(ctx,
 		`SELECT domain FROM domains WHERE id = $1`, domainID,
@@ -342,7 +291,6 @@ func (m *Manager) EnsureReservedAddresses(ctx context.Context, domainID, ownerUs
 		return err
 	}
 
-	// Ensure the owner's own address exists on this domain as a direct address.
 	ownerAddr := primaryLocalPart + "@" + domainName
 	if _, err := m.db.Exec(ctx, `
 		INSERT INTO addresses
@@ -370,8 +318,6 @@ func (m *Manager) EnsureReservedAddresses(ctx context.Context, domainID, ownerUs
 	return nil
 }
 
-// BackfillOwnerAddresses ensures every verified custom domain has a direct
-// address row for its owner's local-part. Safe to call at startup; idempotent.
 func (m *Manager) BackfillOwnerAddresses(ctx context.Context) error {
 	rows, err := m.db.Query(ctx, `
 		SELECT id, owner_user_id FROM domains
@@ -402,8 +348,6 @@ func (m *Manager) BackfillOwnerAddresses(ctx context.Context) error {
 	return nil
 }
 
-// SetCatchAll enables or disables catch-all on a domain. When enabling,
-// targetAddressID must be an address owned by the user on this domain.
 func (m *Manager) SetCatchAll(ctx context.Context, domainID, userID string, enabled bool, targetAddressID string) error {
 	d, err := m.Get(ctx, domainID)
 	if err != nil {
@@ -418,7 +362,6 @@ func (m *Manager) SetCatchAll(ctx context.Context, domainID, userID string, enab
 			domainID)
 		return err
 	}
-	// Validate targetAddressID belongs to the user and is on this domain.
 	var count int
 	if err := m.db.QueryRow(ctx, `
 		SELECT count(*) FROM addresses
@@ -435,8 +378,6 @@ func (m *Manager) SetCatchAll(ctx context.Context, domainID, userID string, enab
 	return err
 }
 
-// SetMTASTSMode sets a manual override for the MTA-STS mode. Pass an empty
-// string to clear the override and return to auto-schedule.
 func (m *Manager) SetMTASTSMode(ctx context.Context, domainID, userID, mode string) error {
 	d, err := m.Get(ctx, domainID)
 	if err != nil {
@@ -458,10 +399,6 @@ func (m *Manager) SetMTASTSMode(ctx context.Context, domainID, userID, mode stri
 	return err
 }
 
-// EffectiveMTASTSMode returns the MTA-STS mode that should be served to
-// external senders. Applies the auto-schedule: if mta_sts_mode is NULL and
-// the domain has been in "testing" for ≥48h, returns "enforce"; otherwise
-// returns "testing".
 func (m *Manager) EffectiveMTASTSMode(d *Domain) string {
 	if d.MTASTSMode != nil {
 		return *d.MTASTSMode
@@ -475,8 +412,6 @@ func (m *Manager) EffectiveMTASTSMode(d *Domain) string {
 	return "testing"
 }
 
-// UpgradeMTASTSModes scans for domains that have been in auto-testing mode for
-// ≥48h and flips them to enforce. Called by the background worker.
 func (m *Manager) UpgradeMTASTSModes(ctx context.Context) error {
 	rows, err := m.db.Query(ctx, `
 		SELECT id, domain, mta_sts_id FROM domains
@@ -532,9 +467,6 @@ func (m *Manager) UpgradeMTASTSModes(ctx context.Context) error {
 	return nil
 }
 
-// sendMTASTSEnforceNotice delivers a plain-text notification to
-// postmaster@<domain> explaining that MTA-STS has been upgraded to enforce
-// and providing the new _mta-sts DNS record to publish.
 func (m *Manager) sendMTASTSEnforceNotice(ctx context.Context, domainName, newMTASTSID string) {
 	if m.deliverFn == nil {
 		return
@@ -568,8 +500,6 @@ func (m *Manager) sendMTASTSEnforceNotice(ctx context.Context, domainName, newMT
 	}
 }
 
-// checkDNSRecords performs DNS lookups for all Phase 4 records and returns
-// per-record status.
 func (m *Manager) checkDNSRecords(ctx context.Context, d *Domain, token string) []RecordStatus {
 	primary := m.primaryDomain
 	domain := d.Domain
@@ -578,20 +508,16 @@ func (m *Manager) checkDNSRecords(ctx context.Context, d *Domain, token string) 
 
 	var results []RecordStatus
 
-	// Challenge TXT
 	results = append(results, m.checkTXT(lookupCtx, "_rookery-challenge."+domain, token, "CHALLENGE"))
 
-	// MX — match by host (any priority is fine), surface the full record
-	// value (priority + host) as the suggested publishable form.
+	// MX/SPF/DMARC/TLS-RPT use loose matching (host- or prefix-only) so operators
+	// can set their own priority and append qualifiers, but Expected carries the
+	// full recommended value to display.
 	results = append(results, m.checkMX(lookupCtx, domain, primary, "10 "+primary))
-
-	// SPF TXT — match by prefix (operators may append qualifiers), but
-	// surface the full recommended value as the suggested record to publish.
 	results = append(results, m.checkTXTPrefix(lookupCtx, domain,
 		"v=spf1 include:_spf."+primary,
 		"v=spf1 include:_spf."+primary+" ~all", "SPF"))
 
-	// DKIM CNAMEs
 	results = append(results, m.checkCNAME(lookupCtx,
 		"rookery-ed25519._domainkey."+domain,
 		"rookery-ed25519._domainkey."+primary,
@@ -601,33 +527,27 @@ func (m *Manager) checkDNSRecords(ctx context.Context, d *Domain, token string) 
 		"rookery-rsa._domainkey."+primary,
 		"DKIM_RSA_CNAME"))
 
-	// WKD CNAME
 	results = append(results, m.checkCNAME(lookupCtx,
 		"openpgpkey."+domain,
 		"openpgpkey."+primary,
 		"WKD_CNAME"))
 
-	// MTA-STS CNAME
 	results = append(results, m.checkCNAME(lookupCtx,
 		"mta-sts."+domain,
 		"mta-sts."+primary,
 		"MTA_STS_CNAME"))
 
-	// MTA-STS policy-version TXT. The id value is generated at registration
-	// time (Register) and stored on the domains row, so it's always available.
 	// Exact match: the id rotates when the policy changes, so a stale id is drift.
 	if d.MTASTSID != nil && *d.MTASTSID != "" {
 		results = append(results, m.checkTXT(lookupCtx, "_mta-sts."+domain,
 			"v=STSv1; id="+*d.MTASTSID, "MTA_STS_TXT"))
 	}
 
-	// DMARC TXT — prefix match so operators can use p=reject or add pct=/fo= tags.
 	results = append(results, m.checkTXTPrefix(lookupCtx, "_dmarc."+domain,
 		"v=DMARC1",
 		"v=DMARC1; p=quarantine; rua=mailto:postmaster@"+domain,
 		"DMARC"))
 
-	// TLS-RPT TXT — prefix match for the same reason.
 	results = append(results, m.checkTXTPrefix(lookupCtx, "_smtp._tls."+domain,
 		"v=TLSRPTv1",
 		"v=TLSRPTv1; rua=mailto:postmaster@"+domain,
@@ -657,10 +577,8 @@ func (m *Manager) checkTXT(ctx context.Context, name, expected, key string) Reco
 	return rs
 }
 
-// checkTXTPrefix verifies that some TXT record at name starts with prefix.
-// suggested is the full record value displayed to the operator as the
-// recommended publishable form; the actual match is prefix-only so operators
-// can append qualifiers (e.g. SPF "include:..." chains).
+// Matches on prefix only so operators can append qualifiers; suggested is the
+// full value shown as the recommended record.
 func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, suggested, key string) RecordStatus {
 	rs := RecordStatus{Name: name, Type: "TXT", Key: key, Expected: suggested}
 	records, err := m.lookup().LookupTXT(ctx, name)
@@ -682,9 +600,7 @@ func (m *Manager) checkTXTPrefix(ctx context.Context, name, prefix, suggested, k
 	return rs
 }
 
-// checkMX verifies that some MX record at name points to expectedHost. The
-// MX priority is ignored — operators may use any value. suggested is the full
-// record (priority + host) shown to the operator as the recommended form.
+// Ignores MX priority and matches by host; suggested is the full record.
 func (m *Manager) checkMX(ctx context.Context, name, expectedHost, suggested string) RecordStatus {
 	rs := RecordStatus{Name: name, Type: "MX", Key: "MX", Expected: suggested}
 	mxs, err := m.lookup().LookupMX(ctx, name)
@@ -716,8 +632,7 @@ func (m *Manager) checkCNAME(ctx context.Context, name, expectedTarget, key stri
 	}
 	target = strings.TrimSuffix(target, ".")
 	if strings.EqualFold(target, expectedTarget) || strings.EqualFold(target, name) {
-		// LookupCNAME returns the canonical name, which may equal the input if
-		// no CNAME exists. We treat "same as input" as missing.
+		// LookupCNAME echoes the input name when no CNAME exists; treat that as missing.
 		if strings.EqualFold(target, name) {
 			rs.Status = "drifted"
 			return rs
@@ -731,9 +646,7 @@ func (m *Manager) checkCNAME(ctx context.Context, name, expectedTarget, key stri
 	return rs
 }
 
-// dnsErrStatus maps a DNS lookup error to a record status string.
-// A confirmed "not found" (NXDOMAIN / no records) becomes "missing";
-// transient or indeterminate failures become "unknown".
+// Distinguishes a confirmed NXDOMAIN ("missing") from a transient lookup failure ("unknown").
 func dnsErrStatus(err error) string {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
@@ -749,8 +662,6 @@ func (m *Manager) lookup() *net.Resolver {
 	return net.DefaultResolver
 }
 
-// DNSCheckAll re-checks all verified custom domains for drift and writes
-// dns_status + dns_last_checked_at. Called by the background drift worker.
 func (m *Manager) DNSCheckAll(ctx context.Context) error {
 	rows, err := m.db.Query(ctx, `
 		SELECT id, domain, verification_token, mta_sts_id
@@ -811,7 +722,6 @@ func (m *Manager) DNSCheckAll(ctx context.Context) error {
 	return nil
 }
 
-// scanOne runs a single-row query using the given SQL and args and returns a Domain.
 func (m *Manager) scanOne(ctx context.Context, sql string, args ...any) (*Domain, error) {
 	row := m.db.QueryRow(ctx, sql, args...)
 	d, err := scanDomain(row)
@@ -821,7 +731,7 @@ func (m *Manager) scanOne(ctx context.Context, sql string, args ...any) (*Domain
 	return d, err
 }
 
-// rowScanner is the common interface for pgx.Row and pgx.Rows.
+// Satisfied by both pgx.Row and pgx.Rows.
 type rowScanner interface {
 	Scan(...any) error
 }
@@ -846,10 +756,8 @@ func scanDomain(row rowScanner) (*Domain, error) {
 	return &d, nil
 }
 
-// generateToken returns a 32-byte cryptographically random URL-safe base64
-// string (no padding). Used for verification tokens and MTA-STS IDs.
 func generateToken() (string, error) {
-	b := make([]byte, 24) // 24 bytes → 32 base64url chars
+	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}

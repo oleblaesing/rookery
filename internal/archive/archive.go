@@ -1,16 +1,3 @@
-// Package archive implements per-user data export and import for rookery.
-//
-// ExportUser assembles a PGP-encrypted tar archive of all portable user data
-// and writes it to w. The archive is encrypted to the user's active public key
-// in binary (non-armored) OpenPGP format:
-//
-//	gpg -d rookery-archive-*.tar.gpg | tar x
-//
-// ImportUser accepts a plaintext tar stream (decrypted by the caller's browser)
-// and ingests the contents into the target user's mailbox. Import is idempotent
-// for messages and known_keys; drafts are always inserted.
-//
-// See ADR-0039 for design rationale.
 package archive
 
 import (
@@ -36,10 +23,10 @@ import (
 
 const schemaVersion = 1
 
-// maxTarEntries guards against resource exhaustion from malicious archives.
+// Guards against resource exhaustion from malicious archives.
 const maxTarEntries = 1_000_000
 
-// Manifest is the first entry in every archive.
+// The first entry in every archive.
 type Manifest struct {
 	SchemaVersion  int       `json:"schema_version"`
 	ExportedAt     time.Time `json:"exported_at"`
@@ -54,7 +41,6 @@ type Manifest struct {
 	CustomDomains  []string  `json:"custom_domains"`
 }
 
-// ImportSummary is returned by ImportUser.
 type ImportSummary struct {
 	ImportedMessages  int `json:"imported_messages"`
 	ImportedBlobs     int `json:"imported_blobs"`
@@ -62,8 +48,6 @@ type ImportSummary struct {
 	ImportedDrafts    int `json:"imported_drafts"`
 	SkippedMessages   int `json:"skipped_messages"`
 }
-
-// ---- internal data types ----------------------------------------------------
 
 type exportedMessage struct {
 	ID              string     `json:"id"`
@@ -116,13 +100,7 @@ type exportedDraft struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
-// ---- ExportUser -------------------------------------------------------------
-
-// ExportUser streams a PGP-encrypted tar archive of all portable user data to w.
-// The archive is encrypted to the user's active public key (binary OpenPGP).
-// domain is used in the manifest's source_instance field.
 func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, domain string, w io.Writer) error {
-	// 1. Fetch user's active public key and display name.
 	var armoredKey, fingerprint, displayName string
 	if err := db.QueryRow(ctx, `
 		SELECT uk.armored_public_key, uk.fingerprint, u.display_name
@@ -133,7 +111,6 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 		return fmt.Errorf("archive: fetch user key: %w", err)
 	}
 
-	// 2. Set up binary PGP encryption writer.
 	pgpWriter, err := encryptTo(w, armoredKey)
 	if err != nil {
 		return fmt.Errorf("archive: set up PGP encryption: %w", err)
@@ -141,13 +118,11 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 
 	tw := tar.NewWriter(pgpWriter)
 
-	// 3. Gather metadata (buffered in memory for JSON parts; blobs streamed from disk).
 	msgs, err := fetchMessages(ctx, db, userID)
 	if err != nil {
 		return err
 	}
 
-	// Collect unique blob digests in first-seen order.
 	seen := make(map[string]struct{}, len(msgs))
 	var blobs []string
 	for i := range msgs {
@@ -158,9 +133,8 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 		}
 	}
 
-	// Drop messages whose blob files are missing from disk (data loss / volume
-	// not mounted) so the export completes with what's actually present rather
-	// than failing entirely.
+	// Drop messages whose blob is missing from disk so the export completes with
+	// what's present rather than failing outright.
 	missingBlobs := make(map[string]struct{})
 	for _, digest := range blobs {
 		if _, statErr := os.Stat(st.BlobPath(digest)); os.IsNotExist(statErr) {
@@ -220,7 +194,6 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 		return err
 	}
 
-	// 4. Build and write manifest (first entry).
 	manifest := Manifest{
 		SchemaVersion:  schemaVersion,
 		ExportedAt:     time.Now().UTC(),
@@ -253,7 +226,7 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 		return fmt.Errorf("archive: write message_attachments: %w", err)
 	}
 
-	// Stream blobs from disk last (messages.json references them; import handles ordering).
+	// Blobs last, after the JSON entries that reference them.
 	for _, digest := range blobs {
 		blobData, err := os.ReadFile(st.BlobPath(digest))
 		if err != nil {
@@ -270,16 +243,6 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 	return pgpWriter.Close()
 }
 
-// ---- ImportUser -------------------------------------------------------------
-
-// ImportUser reads a plaintext tar stream (already decrypted by the browser) and
-// ingests the contents into userID's mailbox.
-//
-// Security guarantees:
-//   - manifest.key_fingerprint must match the importing user's active key.
-//   - Tar entry names are validated against path traversal.
-//   - Each blob's SHA-256 is verified against its tar entry name.
-//   - schema_version must match the known version.
 func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID string, r io.Reader) (ImportSummary, error) {
 	var summary ImportSummary
 
@@ -293,8 +256,8 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 
 	tr := tar.NewReader(r)
 
-	// messages.json appears before blobs/ in the archive, so we buffer message
-	// rows in memory and insert them after all blobs have been written to disk.
+	// messages.json precedes blobs/, so buffer rows and insert them only after
+	// the blobs they reference are on disk.
 	var (
 		manifest    *Manifest
 		msgs        []exportedMessage
@@ -386,8 +349,7 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 		return summary, errors.New("archive: manifest.json missing from archive")
 	}
 
-	// Insert messages now that blobs are on disk.
-	// msgIDMap maps exported message ID → newly inserted DB row ID (for attachments).
+	// Maps exported message ID → new DB row ID, for re-pointing attachments.
 	msgIDMap := make(map[string]string, len(msgs))
 	for i := range msgs {
 		m := &msgs[i]
@@ -403,7 +365,7 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 		}
 	}
 
-	// Insert attachment metadata only for messages we just inserted.
+	// Only for messages we just inserted; skipped ones keep their existing rows.
 	for i := range attachments {
 		a := &attachments[i]
 		newMsgID, ok := msgIDMap[a.MessageID]
@@ -420,7 +382,6 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 		}
 	}
 
-	// Upsert known_keys (dedup by user_id + fingerprint).
 	for i := range knownKeys {
 		k := &knownKeys[i]
 		_, err := db.Exec(ctx, `
@@ -436,7 +397,7 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 		summary.ImportedKnownKeys++
 	}
 
-	// Insert drafts (no natural dedup key — re-import will duplicate them).
+	// No natural dedup key, so re-import duplicates drafts.
 	for i := range drafts {
 		d := &drafts[i]
 		_, err := db.Exec(ctx, `
@@ -455,12 +416,7 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 	return summary, nil
 }
 
-// insertMessageIfAbsent inserts a message row if it does not already exist.
-// Dedup key: (user_id, message_id_header) when message_id_header is non-null;
-// otherwise (user_id, blob_sha256, received_at).
-// Returns (newID, true) if inserted, ("", false) if already present.
 func insertMessageIfAbsent(ctx context.Context, db *pgxpool.Pool, userID string, m *exportedMessage) (string, bool, error) {
-	// Check for existing row.
 	var existingID string
 	var err error
 	if m.MessageIDHeader != nil && *m.MessageIDHeader != "" {
@@ -501,7 +457,6 @@ func insertMessageIfAbsent(ctx context.Context, db *pgxpool.Pool, userID string,
 	return newID, true, nil
 }
 
-// validateEntryName rejects path traversal and absolute paths.
 func validateEntryName(name string) error {
 	if name == "" {
 		return errors.New("archive: empty tar entry name")
@@ -516,8 +471,6 @@ func validateEntryName(name string) error {
 	}
 	return nil
 }
-
-// ---- DB fetch helpers -------------------------------------------------------
 
 func fetchMessages(ctx context.Context, db *pgxpool.Pool, userID string) ([]exportedMessage, error) {
 	rows, err := db.Query(ctx, `
@@ -675,8 +628,6 @@ func fetchCustomDomains(ctx context.Context, db *pgxpool.Pool, userID string) ([
 	return doms, rows.Err()
 }
 
-// ---- PGP helper -------------------------------------------------------------
-
 func encryptTo(w io.Writer, armoredKey string) (io.WriteCloser, error) {
 	block, err := armor.Decode(strings.NewReader(armoredKey))
 	if err != nil {
@@ -688,8 +639,6 @@ func encryptTo(w io.Writer, armoredKey string) (io.WriteCloser, error) {
 	}
 	return pgpcrypto.Encrypt(w, entities, nil, nil, nil)
 }
-
-// ---- tar write helpers ------------------------------------------------------
 
 func writeJSON(tw *tar.Writer, name string, v any) error {
 	data, err := json.Marshal(v)

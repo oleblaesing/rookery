@@ -34,12 +34,6 @@ type exportPageData struct {
 	DownloadURL  string
 }
 
-// ---- POST /api/v1/users/me/export -------------------------------------------
-//
-// Queues an async export job. The encrypted archive is assembled in a background
-// goroutine; when ready, a system message is sent to the user's inbox with
-// the download and migration links.
-
 type exportJobRequest struct {
 	NewInstance string `json:"new_instance"`
 }
@@ -49,7 +43,7 @@ func handleAPIExport(db *pgxpool.Pool, st *store.Store, cfg *config.Config) http
 		userID := auth.UserIDFromContext(r.Context())
 
 		var req exportJobRequest
-		// Body is optional — an empty body or omitted new_instance is fine.
+		// Body is optional; an omitted new_instance is fine.
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		newInstance := strings.TrimSpace(req.NewInstance)
 
@@ -82,8 +76,6 @@ func handleAPIExport(db *pgxpool.Pool, st *store.Store, cfg *config.Config) http
 	}
 }
 
-// ---- GET /api/v1/users/me/export/status -------------------------------------
-
 func handleAPIExportStatus(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -111,11 +103,6 @@ func handleAPIExportStatus(db *pgxpool.Pool) http.HandlerFunc {
 		})
 	}
 }
-
-// ---- GET /export/{token}  (unauthenticated, HTML) ---------------------------
-//
-// Human-facing page: shows a download button (linking to the API route) and a
-// domain input that generates the migration deep-link client-side.
 
 func handleExportPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -163,12 +150,7 @@ func handleExportPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 	}
 }
 
-// ---- GET /api/v1/export/{token}  (unauthenticated, binary) ------------------
-//
-// Streams the encrypted archive. Token is the bearer credential. Used by curl,
-// the import proxy on instance B, and the download button on the HTML page.
-// CORS-enabled so instance-B browsers can fetch the archive cross-origin.
-
+// CORS-open so instance-B browsers can fetch the archive cross-origin.
 func handleAPIExportDownload(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := r.PathValue("token")
@@ -236,27 +218,17 @@ func handleAPIExportDownload(db *pgxpool.Pool, cfg *config.Config) http.HandlerF
 			return
 		}
 
-		// Mark as downloaded (still served until expiry for retries).
+		// Still served until expiry, so retries work.
 		_, _ = db.Exec(context.Background(), `
 			UPDATE export_jobs SET status = 'downloaded' WHERE id = $1 AND status = 'ready'
 		`, jobID)
 	}
 }
 
-// ---- GET /api/v1/users/me/import/fetch?url=... ------------------------------
-//
-// Instance B's server proxies the encrypted archive from instance A back to the
-// browser. The browser decrypts it with the private key in localStorage and then
-// POSTs the plaintext tar to /api/v1/users/me/import.
-//
-// SSRF mitigations:
-//   - URL must use HTTPS scheme.
-//   - Destination hostname must not resolve to a private or loopback address.
-//   - Redirects re-validate the destination IP.
-//   - Response is limited to 10 GiB.
+const importFetchMaxBytes = 10 * 1024 * 1024 * 1024
 
-const importFetchMaxBytes = 10 * 1024 * 1024 * 1024 // 10 GiB
-
+// SSRF-guarded: HTTPS only, no private/loopback targets, redirects re-validated,
+// response capped at importFetchMaxBytes.
 func handleAPIImportFetch() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rawURL := r.URL.Query().Get("url")
@@ -313,8 +285,6 @@ func handleAPIImportFetch() http.HandlerFunc {
 	}
 }
 
-// ---- POST /api/v1/users/me/import -------------------------------------------
-
 func handleAPIImport(db *pgxpool.Pool, st *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -330,12 +300,9 @@ func handleAPIImport(db *pgxpool.Pool, st *store.Store) http.HandlerFunc {
 	}
 }
 
-// ---- export background goroutine --------------------------------------------
-
 func runExport(ctx context.Context, db *pgxpool.Pool, st *store.Store, cfg *config.Config, jobID, userID, rawToken, newInstance string) {
 	filePath := filepath.Join(st.ExportDir, jobID+".tar.gpg")
 
-	// Create the output file.
 	f, err := os.Create(filePath)
 	if err != nil {
 		slog.Error("export worker: create file", "job_id", jobID, "err", err)
@@ -359,7 +326,6 @@ func runExport(ctx context.Context, db *pgxpool.Pool, st *store.Store, cfg *conf
 		return
 	}
 
-	// Mark job ready.
 	if _, err := db.Exec(ctx, `
 		UPDATE export_jobs
 		SET status = 'ready', file_path = $1, ready_at = now()
@@ -369,9 +335,8 @@ func runExport(ctx context.Context, db *pgxpool.Pool, st *store.Store, cfg *conf
 		return
 	}
 
-	// Send inbox notification.
+	// Non-fatal: the archive is ready even if the notification fails.
 	if err := sendExportNotification(ctx, db, st, cfg, userID, rawToken, newInstance); err != nil {
-		// Non-fatal — the archive is ready even if the notification fails.
 		slog.Warn("export worker: send notification", "job_id", jobID, "err", err)
 	}
 }
@@ -382,8 +347,6 @@ func markJobFailed(db *pgxpool.Pool, jobID, msg string) {
 	`, msg, jobID)
 }
 
-// sendExportNotification inserts a system inbox message with the download and
-// migration links. The archive is already on disk; the token is the bearer.
 func sendExportNotification(ctx context.Context, db *pgxpool.Pool, st *store.Store, cfg *config.Config, userID, rawToken, newInstance string) error {
 	var primaryAddress string
 	if err := db.QueryRow(ctx, `
@@ -395,9 +358,9 @@ func sendExportNotification(ctx context.Context, db *pgxpool.Pool, st *store.Sto
 		return fmt.Errorf("fetch address: %w", err)
 	}
 
-	// pageURL is the human-facing landing page; archiveURL is the raw binary
-	// download used in migration links (the import proxy fetches this directly).
-	pageURL    := cfg.ExternalURL() + "/export/" + rawToken
+	// archiveURL is the raw download the import proxy fetches; pageURL is the
+	// human landing page.
+	pageURL := cfg.ExternalURL() + "/export/" + rawToken
 	archiveURL := cfg.ExternalURL() + "/api/v1/export/" + rawToken
 
 	var body string
@@ -457,17 +420,11 @@ To decrypt manually: gpg -d rookery-archive-*.tar.gpg | tar x
 	return err
 }
 
-// buildNotificationMessage assembles a minimal RFC 5322 message.
 func buildNotificationMessage(from, to, subject, body, domain string) string {
 	msgID := fmt.Sprintf("<%d.export@%s>", time.Now().UnixNano(), domain)
 	return fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: %s\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s",
 		from, to, subject, time.Now().UTC().Format(time.RFC1123Z), msgID, body)
 }
-
-// ---- CleanupExpiredExports --------------------------------------------------
-//
-// Deletes archive files and marks jobs 'expired' when their 24-hour window has
-// passed. Called hourly by the server worker.
 
 func CleanupExpiredExports(ctx context.Context, db *pgxpool.Pool, exportDir string) error {
 	rows, err := db.Query(ctx, `
@@ -499,10 +456,6 @@ func CleanupExpiredExports(ctx context.Context, db *pgxpool.Pool, exportDir stri
 	return rows.Err()
 }
 
-// ---- SSRF helpers -----------------------------------------------------------
-
-// validateExternalURL rejects non-HTTPS URLs and URLs that resolve to private
-// IP ranges at parse time.
 func validateExternalURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -515,7 +468,7 @@ func validateExternalURL(rawURL string) error {
 		return errors.New("archive URL has no host")
 	}
 	host := u.Hostname()
-	// Pre-flight DNS check. The actual dial also validates (TOCTOU mitigation).
+	// Pre-flight only; the dial re-validates to close the TOCTOU window.
 	addrs, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
 	if err != nil {
 		return fmt.Errorf("DNS lookup failed: %w", err)
@@ -528,8 +481,7 @@ func validateExternalURL(rawURL string) error {
 	return nil
 }
 
-// ssrfSafeDialer returns a DialContext function that re-validates the resolved
-// IP at connection time, providing defence against TOCTOU DNS rebinding.
+// Re-validates the resolved IP at dial time to defend against TOCTOU DNS rebinding.
 func ssrfSafeDialer() func(context.Context, string, string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
@@ -557,12 +509,8 @@ func isPrivateIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
-// ---- token helpers ----------------------------------------------------------
-
-// schemeFor returns "http" for localhost/*.localhost domains (including those
-// with a port suffix like "localhost:8080"), "https" for everything else.
 func schemeFor(host string) string {
-	h := strings.SplitN(host, ":", 2)[0] // strip optional port
+	h := strings.SplitN(host, ":", 2)[0]
 	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
 		return "http"
 	}
@@ -581,4 +529,3 @@ func sha256HexOf(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
-

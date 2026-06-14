@@ -1,8 +1,3 @@
-// Package web registers HTTP routes and renders server-side HTML for the
-// rookery web interface. All user-facing pages use Go html/template. The
-// HTTP API lives under /api/v1/ and is the same interface the web UI consumes;
-// it is documented as a stable public contract from Phase 0 onward (see
-// docs/api-sketch.md and ADR-0006).
 package web
 
 import (
@@ -22,88 +17,57 @@ import (
 	"rookery/internal/store"
 )
 
-// RegisterRoutes mounts all HTTP routes onto r.
 func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, domMgr *domains.Manager) {
 	ss := auth.NewSessionStore(db, cfg)
 
-	// Advertise the Tor hidden service (if configured) on every response.
 	if cfg.OnionAddress != "" {
 		r.Use(onionLocation(cfg.OnionAddress))
 	}
 
-	// ---- Unauthenticated public endpoints ----
 	r.Get("/healthz", handleHealthz(cfg))
 	r.Get("/api/v1/status", handleAPIStatus(cfg))
 
-	// Invite landing page (HTML, unauthenticated).
 	r.Get("/invite/{token}", handleInvitePage(db, ss, cfg))
 
-	// Login / logout.
 	r.Get("/login", handleLoginPage(ss, cfg))
 	r.Get("/logout", handleLogoutPage(ss, cfg))
 
-	// Migration landing page (HTML, unauthenticated). Lets a user on a new
-	// instance import an archive from their old one: it registers an account
-	// with the archive's own key and ingests the data. See ADR-0039.
 	r.Get("/migrate", handleMigratePage(ss, cfg))
-
-	// JavaScript License Web Labels (GNU LibreJS). Linked from every page's
-	// footer via rel="jslicense"; unauthenticated because app.js loads on
-	// logged-out pages too.
 	r.Get("/jslicense", handleJSLicensePage(cfg))
 
-	// ---- API v1 — invite validation (unauthenticated) ----
 	r.Get("/api/v1/invites/{token}", handleAPIGetInvite(db, cfg))
-
-	// ---- API v1 — registration (unauthenticated) ----
 	r.Post("/api/v1/users/register", handleAPIRegister(db, ss, cfg))
 
-	// ---- API v1 — auth ----
-	// Login and logout sit outside the authenticated /api/v1 group: login by
-	// definition has no session yet, and logout must work even after the
-	// session has expired. CSRF still protects logout — it is mounted with
-	// the CSRF middleware so cross-site forms cannot forcibly log a user
-	// out.
+	// Login/logout live outside the authenticated group: login has no session
+	// yet, and logout must work after a session has expired. CSRF still guards
+	// logout so a cross-site form can't forcibly log a user out.
 	csrfAPI := auth.CSRFMiddleware(csrfFailAPI)
-	// Challenge endpoint: unauthenticated, no CSRF (GET, no state mutation).
-	r.Get("/api/v1/auth/challenge", handleAPILoginChallenge(db, cfg))
+	r.Get("/api/v1/auth/challenge", handleAPILoginChallenge(db, cfg)) // GET, no CSRF
 	r.Post("/api/v1/auth/login", handleAPILogin(db, ss, cfg))
 	r.With(csrfAPI).Post("/api/v1/auth/logout", handleAPILogout(ss))
 
-	// ---- WKD Advanced Method ----
-	// Requests arrive at openpgpkey.<domain> via CNAME. We distinguish them
-	// by inspecting the Host header. The router below matches both:
-	//   - openpgpkey.<domain>/.well-known/openpgpkey/<domain>/hu/<hash>
-	//   - <domain>/.well-known/openpgpkey/<domain>/hu/<hash>   (fallback)
+	// WKD requests reach openpgpkey.<domain> via CNAME; this matches both that
+	// host and the bare <domain> fallback, dispatching on the Host header.
 	r.Get("/.well-known/openpgpkey/{domain}/hu/{hash}", handleWKDKey(db))
 	r.Get("/.well-known/openpgpkey/{domain}/policy", handleWKDPolicy)
 
-	// ---- MTA-STS policy (ADR-0037) ----
-	// mta-sts.<domain> CNAMEs to this server; Caddy terminates TLS.
-	// Rookery dispatches by Host header inside this handler.
+	// mta-sts.<domain> CNAMEs here; the handler dispatches on Host.
 	r.Get("/.well-known/mta-sts.txt", handleMTASTS(domMgr))
 
-	// ---- Caddy on-demand TLS ask endpoint (ADR-0035) ----
-	// Called by Caddy before issuing a certificate for any hostname.
-	// Not authenticated — Caddy calls it from the same host.
+	// Caddy calls this from the same host before issuing a cert.
 	r.Get("/internal/tls-ask", handleTLSAsk(domMgr))
 
-	// /api/v1/export/{token} — unauthenticated binary download (bearer token auth).
-	// Used by curl, the import proxy on instance B, and the download button.
+	// Unauthenticated bearer-token download, used by curl, the import proxy, and
+	// the download button.
 	r.Get("/api/v1/export/{token}", handleAPIExportDownload(db, cfg))
 
-	// /api/v1/import/fetch — unauthenticated SSRF-safe proxy. The migration
-	// page (unauthenticated) fetches the encrypted archive from the old
-	// instance through this before the account exists. Carries no user
-	// context; security comes from the SSRF guards in handleAPIImportFetch.
+	// Unauthenticated SSRF-safe proxy: the migration page fetches the encrypted
+	// archive before any account exists. Security is in handleAPIImportFetch.
 	r.Get("/api/v1/import/fetch", handleAPIImportFetch())
 
-	// ---- Authenticated middleware group ----
 	authAPI := auth.Middleware(ss, unauthAPI)
 	authHTML := auth.Middleware(ss, unauthHTML)
 
-	// HTML pages (require session cookie; CSRF checked on mutating form POSTs
-	// via separate middleware on the POST routes).
 	r.Group(func(r chi.Router) {
 		r.Use(authHTML)
 
@@ -111,44 +75,37 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 			http.Redirect(w, r, "/inbox", http.StatusSeeOther)
 		})
 		r.Get("/settings", handleSettingsPage(db, cfg, domMgr))
-		// /export/{token} — session-authenticated; only the owning user can view.
-		r.Get("/export/{token}", handleExportPage(db, cfg))
+		r.Get("/export/{token}", handleExportPage(db, cfg)) // owning user only
 		r.Get("/inbox", handleInboxPage(db, cfg))
 		r.Get("/compose", handleComposePage(db, cfg))
 		r.Get("/partials/key-status", handleKeyStatusFragment(db))
 		r.Get("/messages/{id}", handleReadPage(db, cfg))
 
-		// Form POSTs from HTML pages — these run CSRF middleware inline.
+		// Mutating form POSTs run CSRF inline; GET fragments below don't need it.
 		csrfHTML := auth.CSRFMiddleware(func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "CSRF validation failed", http.StatusForbidden)
 		})
 		r.With(csrfHTML).Post("/messages/{id}/trash", handleTrashPost(db))
 		r.With(csrfHTML).Post("/messages/{id}/delete", handleDeletePermanentPost(db, st))
 
-		// Domain verification status fragment (GET = read-only, no CSRF needed).
 		r.Get("/partials/domains/{id}/verify-status", handleDomainVerifyStatusFragment(domMgr))
 	})
 
-	// API v1 — authenticated endpoints.
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(authAPI)
 		r.Use(csrfAPI)
 
-		// Users.
 		r.Get("/users/me", handleAPIGetMe(db))
 		r.Get("/users/me/sessions", handleAPIListSessions(ss))
 		r.Delete("/users/me/sessions/{id}", handleAPIDeleteSession(db, ss))
 
-		// Account deletion (challenge/response, then irreversible delete).
 		r.Post("/users/me/deletion/challenge", handleAPIDeletionChallenge(db))
 		r.Post("/users/me/deletion", handleAPIDeletion(db, ss, st))
 
-		// Keys.
 		r.Get("/keys/me", handleAPIGetMyKey(db))
 		r.Put("/keys/me", handleAPIPutMyKey(db))
 		r.Get("/keys/lookup", handleAPIKeyLookup(db))
 
-		// Messages.
 		r.Get("/messages", handleAPIListMessages(db))
 		r.Get("/messages/{id}", handleAPIGetMessage(db))
 		r.Get("/messages/{id}/raw", handleAPIGetMessageRaw(db, st))
@@ -156,14 +113,12 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Patch("/messages/{id}", handleAPIPatchMessage(db))
 		r.Delete("/messages/{id}", handleAPIDeleteMessage(db, st))
 
-		// Outbound mail and drafts (Phase 2).
 		r.Post("/messages", handleAPISendMessage(db, st, dk, cfg))
 		r.Post("/messages/drafts", handleAPICreateDraft(db))
 		r.Get("/messages/drafts/{id}", handleAPIGetDraftByID(db))
 		r.Put("/messages/drafts/{id}", handleAPIUpdateDraft(db))
 		r.Delete("/messages/drafts/{id}", handleAPIDeleteDraftByID(db))
 
-		// Custom domains (Phase 4).
 		r.Post("/domains", handleAPIRegisterDomain(domMgr))
 		r.Get("/domains", handleAPIListDomains(domMgr))
 		r.Get("/domains/{id}", handleAPIGetDomain(domMgr))
@@ -171,17 +126,12 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 		r.Delete("/domains/{id}", handleAPIDeleteDomain(domMgr))
 		r.Post("/domains/{id}/verify", handleAPIVerifyDomain(domMgr))
 
-		// Export / import (per-user data portability, ADR-0039).
-		// The archive-fetch proxy is unauthenticated (see /api/v1/import/fetch
-		// above) because the migration flow runs before the account exists.
 		r.Post("/users/me/export", handleAPIExport(db, st, cfg))
 		r.Get("/users/me/export/status", handleAPIExportStatus(db))
 		r.Post("/users/me/import", handleAPIImport(db, st))
 	})
 
-	// Static assets. The path is tried in order:
-	//   1. /opt/rookery/web/static  — container image layout (production)
-	//   2. web/static               — repo layout (local dev with `go run`)
+	// Container image layout first, repo layout for local `go run`.
 	staticDir := "/opt/rookery/web/static"
 	if _, err := os.Stat(staticDir); err != nil {
 		staticDir = "static"
@@ -189,16 +139,10 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.Dir(staticDir))))
 }
 
-// onionLocation advertises the instance's Tor hidden service to clients on the
-// clearnet site. When an onion address is configured, every response carries an
-// Onion-Location header pointing at the same path on the onion, so Tor Browser
-// offers (or auto-redirects to) it. Requests that already arrive over the onion
-// are left untouched so we don't advertise the onion to itself.
-//
-// Tor Browser only acts on the header for HTTPS document loads, so it is inert
-// in development (plain-HTTP localhost) and harmless on API/asset responses.
-// Onion services carry no TLS of their own — Tor provides the transport
-// encryption — hence the http:// scheme.
+// Skips requests that already arrive over the onion so we don't advertise it to
+// itself. The scheme is http:// because Tor provides the transport encryption;
+// Tor Browser only acts on it for HTTPS document loads, so it's inert on
+// plain-HTTP localhost and on API/asset responses.
 func onionLocation(onion string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -209,10 +153,6 @@ func onionLocation(onion string) func(http.Handler) http.Handler {
 		})
 	}
 }
-
-// -------------------------------------------------------------------------
-// Phase 0 handlers (unchanged, kept here for reference)
-// -------------------------------------------------------------------------
 
 type healthzResponse struct {
 	Status    string    `json:"status"`

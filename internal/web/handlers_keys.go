@@ -13,10 +13,6 @@ import (
 	"rookery/internal/keydir"
 )
 
-// -------------------------------------------------------------------------
-// GET /api/v1/keys/me
-// -------------------------------------------------------------------------
-
 type keyResponse struct {
 	Fingerprint      string    `json:"fingerprint"`
 	ArmoredPublicKey string    `json:"armored_public_key"`
@@ -47,14 +43,6 @@ func handleAPIGetMyKey(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// PUT /api/v1/keys/me
-//
-// Phase 1: initial key upload only. Replacing a key with a *different* key
-// is rejected with 409 — key rotation (with the attestation protocol from
-// ADR-0028) lands in Phase 6.
-// -------------------------------------------------------------------------
-
 type putKeyRequest struct {
 	ArmoredPublicKey string `json:"armored_public_key"`
 }
@@ -81,7 +69,6 @@ func handleAPIPutMyKey(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Check if a key already exists for this user.
 		var existingFingerprint string
 		err = db.QueryRow(r.Context(), `
 			SELECT fingerprint FROM user_keys WHERE user_id = $1 AND is_active = TRUE
@@ -93,7 +80,6 @@ func handleAPIPutMyKey(db *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if existingFingerprint != "" && existingFingerprint != fingerprint {
-			// Different key — reject until Phase 6 rotation protocol is implemented.
 			respondError(w, http.StatusConflict, "KEY_ROTATION_NOT_IMPLEMENTED",
 				"Replacing a key with a different key requires the rotation protocol (Phase 6). "+
 					"If you are uploading the same key again, the fingerprints must match.")
@@ -101,7 +87,7 @@ func handleAPIPutMyKey(db *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		if existingFingerprint == fingerprint {
-			// Idempotent re-upload of the same key: update the armored text and return 200.
+			// Same key re-uploaded: refresh the armored text, return 200.
 			if _, err := db.Exec(r.Context(), `
 				UPDATE user_keys SET armored_public_key = $1 WHERE user_id = $2 AND is_active = TRUE
 			`, req.ArmoredPublicKey, userID); err != nil {
@@ -120,7 +106,6 @@ func handleAPIPutMyKey(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// No existing key — insert.
 		var k keyResponse
 		if err := db.QueryRow(r.Context(), `
 			INSERT INTO user_keys (user_id, fingerprint, armored_public_key, algorithm)
@@ -136,15 +121,11 @@ func handleAPIPutMyKey(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /api/v1/keys/lookup?address=...
-// -------------------------------------------------------------------------
-
 type keyLookupResponse struct {
-	Found       bool        `json:"found"`
-	Key         *keyResult  `json:"key,omitempty"`
-	Method      string      `json:"method,omitempty"` // "local", "known_keys"
-	FirstSeenAt *time.Time  `json:"first_seen_at,omitempty"`
+	Found       bool       `json:"found"`
+	Key         *keyResult `json:"key,omitempty"`
+	Method      string     `json:"method,omitempty"`
+	FirstSeenAt *time.Time `json:"first_seen_at,omitempty"`
 }
 
 type keyResult struct {
@@ -162,7 +143,7 @@ func handleAPIKeyLookup(db *pgxpool.Pool) http.HandlerFunc {
 		}
 		userID := auth.UserIDFromContext(r.Context())
 
-		// 1. Check local user directory.
+		// Local users first.
 		var fp, armoredKey, algo string
 		err := db.QueryRow(r.Context(), `
 			SELECT k.fingerprint, k.armored_public_key, k.algorithm
@@ -184,7 +165,7 @@ func handleAPIKeyLookup(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// 2. Check this user's known-keys cache.
+		// Then this user's known-keys cache.
 		var firstSeen time.Time
 		err = db.QueryRow(r.Context(), `
 			SELECT fingerprint, armored_public_key, first_seen_at
@@ -207,17 +188,9 @@ func handleAPIKeyLookup(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// 3. WKD lookup (Phase 2+ for the discovery pipeline; stub here).
-		// TODO(phase2): implement WKD + keyserver discovery via internal/discovery.
 		respondJSON(w, http.StatusOK, keyLookupResponse{Found: false})
 	}
 }
-
-// -------------------------------------------------------------------------
-// WKD endpoint — GET /.well-known/openpgpkey/{domain}/hu/{hash}
-// -------------------------------------------------------------------------
-// This handler is mounted on the openpgpkey.<domain> virtual host.
-// It serves binary (non-armored) OpenPGP public key data.
 
 func handleWKDKey(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -227,9 +200,8 @@ func handleWKDKey(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Accept any domain that is verified and has WKD active. Custom domains
-		// use openpgpkey.<custom-domain> CNAME → openpgpkey.<primary> so the
-		// path segment carries the custom domain name (ADR-0036).
+		// The path segment carries the (possibly custom) domain, reached via the
+		// openpgpkey.<domain> CNAME.
 		domain := r.PathValue("domain")
 		var wkdActive bool
 		if err := db.QueryRow(r.Context(),
@@ -240,10 +212,7 @@ func handleWKDKey(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Find the user whose local-part hashes to this WKD hash.
-		// We iterate users on this domain and compare hashes. For a small
-		// instance this is fine; a larger instance would maintain a precomputed
-		// index (Phase 7 optimisation if ever needed).
+		// Linear scan comparing WKD hashes; fine at this scale, no precomputed index.
 		rows, err := db.Query(r.Context(), `
 			SELECT a.local_part, k.armored_public_key
 			FROM   addresses a
@@ -280,17 +249,12 @@ func handleWKDKey(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// handleWKDPolicy serves the WKD policy file (an empty file per spec).
+// The WKD policy file is empty per the spec.
 func handleWKDPolicy(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(http.StatusOK)
-	// Empty body is compliant with the WKD spec.
 }
-
-// -------------------------------------------------------------------------
-// Shared helper: parse + validate a PGP public key (used in register + put)
-// -------------------------------------------------------------------------
 
 func parsePGPPublicKey(armored string) (fingerprint, algorithm string, err error) {
 	return keydir.ParsePublicKey(armored)

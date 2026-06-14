@@ -23,19 +23,15 @@ import (
 	"rookery/internal/store"
 )
 
-// -------------------------------------------------------------------------
-// GET /compose   — compose page
-// -------------------------------------------------------------------------
-
 type composePageData struct {
 	InstanceName       string
 	User               *userProfile
 	CSRFToken          string
 	FromAddress        string
-	SenderPublicKeyB64 string // base64-encoded armored public key; empty if unavailable
-	// Reply pre-fill fields.
-	ReplyToHeader string // original Message-ID header value
-	ReplyToID     string // message UUID
+	SenderPublicKeyB64 string
+
+	ReplyToHeader string
+	ReplyToID     string
 	References    string
 	ToAddress     string
 	Subject       string
@@ -72,7 +68,6 @@ func handleComposePage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			SenderPublicKeyB64: base64.StdEncoding.EncodeToString([]byte(armoredPublicKey)),
 		}
 
-		// Handle reply pre-fill.
 		if replyID := r.URL.Query().Get("reply_to"); replyID != "" {
 			var origFrom, origSubject, origMsgIDHeader string
 			err := db.QueryRow(r.Context(), `
@@ -100,13 +95,8 @@ func replySubject(s string) string {
 	return "Re: " + s
 }
 
-// -------------------------------------------------------------------------
-// GET /partials/key-status?address=…   — key status HTML fragment
-// -------------------------------------------------------------------------
-// Returns an HTML snippet for partials.js to swap into the compose form.
-// The armored public key is base64-encoded in a data attribute so compose.js
-// can use it for encryption without a second fetch.
-
+// The armored key rides along base64-encoded in a data attribute so compose.js
+// can encrypt without a second fetch.
 func handleKeyStatusFragment(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -151,14 +141,8 @@ func handleKeyStatusFragment(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// POST /api/v1/messages   — send an outbound message
-// -------------------------------------------------------------------------
-
 type sendMessageRequest struct {
-	// Message is the base64-encoded complete RFC 5322 message bytes (headers +
-	// body, already PGP/MIME encrypted by the browser JS). The server
-	// DKIM-signs the message before storing and queueing it for delivery.
+	// Already PGP/MIME-encrypted by the browser; the server DKIM-signs it at delivery time.
 	Message string   `json:"message"`
 	BCC     []string `json:"bcc"`
 }
@@ -188,7 +172,6 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			return
 		}
 
-		// Load the sender's primary address and domain name.
 		var fromAddress, domainName string
 		if err := db.QueryRow(r.Context(), `
 			SELECT a.address, d.domain
@@ -202,16 +185,13 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			return
 		}
 
-		// Parse message metadata (subject, date, to, cc, security_state, etc.).
 		meta := smtp.ParseMeta(rawMsg)
 
-		// Check per-user rate limits.
 		if err := checkRateLimits(r.Context(), db, userID, cfg); err != nil {
 			respondError(w, http.StatusTooManyRequests, "RATE_LIMITED", err.Error())
 			return
 		}
 
-		// Collect all envelope recipients: To + Cc + BCC.
 		allRecipients := append([]string{}, meta.To...)
 		allRecipients = append(allRecipients, meta.Cc...)
 		for _, b := range req.BCC {
@@ -225,7 +205,6 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			return
 		}
 
-		// Resolve thread_id by looking up any matching In-Reply-To message.
 		var threadID *string
 		if inReplyTo := extractHeader(rawMsg, "In-Reply-To"); inReplyTo != "" {
 			var tid string
@@ -239,10 +218,9 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			}
 		}
 
-		// Extract the outgoing Message-ID header for future threading.
 		msgIDHeader := extractHeader(rawMsg, "Message-ID")
 
-		// Store the raw (unsigned) blob.
+		// Stored unsigned; DKIM signing happens at delivery.
 		blobDigest, err := st.WriteBlob(rawMsg)
 		if err != nil {
 			slog.Error("send: write blob", "err", err)
@@ -250,7 +228,6 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			return
 		}
 
-		// Insert the message row in the sender's "sent" folder.
 		var messageID string
 		err = db.QueryRow(r.Context(), `
 			INSERT INTO messages
@@ -274,9 +251,7 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			return
 		}
 
-		// Insert attachment metadata so the sent message's read page can render
-		// download links. For encrypted messages meta.Attachments is nil, so this
-		// is a no-op — the browser handles encrypted attachment listing.
+		// nil for encrypted messages (browser lists those), so this is a no-op then.
 		for _, a := range meta.Attachments {
 			_, _ = db.Exec(r.Context(), `
 				INSERT INTO message_attachments (message_id, part_index, filename, content_type, size_bytes)
@@ -284,7 +259,6 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 			`, messageID, a.PartIndex, a.Filename, a.ContentType, a.SizeBytes)
 		}
 
-		// Queue one delivery row per recipient.
 		for _, rcpt := range allRecipients {
 			rcpt = strings.ToLower(strings.TrimSpace(rcpt))
 			if rcpt == "" {
@@ -303,10 +277,6 @@ func handleAPISendMessage(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, c
 		respondJSON(w, http.StatusCreated, map[string]string{"id": messageID})
 	}
 }
-
-// -------------------------------------------------------------------------
-// Draft CRUD   (API endpoints for /api/v1/messages/drafts/*)
-// -------------------------------------------------------------------------
 
 type draftRequest struct {
 	FromAddress   string   `json:"from_address"`
@@ -460,10 +430,6 @@ func handleAPIDeleteDraftByID(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// Internal helpers
-// -------------------------------------------------------------------------
-
 func checkRateLimits(ctx context.Context, db *pgxpool.Pool, userID string, cfg *config.Config) error {
 	if cfg.SMTP.OutboundRateLimitPerUser == 0 && cfg.SMTP.OutboundDailyLimitPerUser == 0 {
 		return nil
@@ -479,8 +445,7 @@ func checkRateLimits(ctx context.Context, db *pgxpool.Pool, userID string, cfg *
 		  AND q.created_at >= now() - interval '1 day'
 	`, userID).Scan(&hourCount, &dayCount)
 	if err != nil {
-		// Non-fatal: if rate check fails, allow the send.
-		return nil
+		return nil // non-fatal: allow the send if the rate check itself fails
 	}
 	if cfg.SMTP.OutboundRateLimitPerUser > 0 && hourCount >= cfg.SMTP.OutboundRateLimitPerUser {
 		return fmt.Errorf("hourly outbound limit reached (%d messages/hour)", cfg.SMTP.OutboundRateLimitPerUser)
@@ -491,15 +456,13 @@ func checkRateLimits(ctx context.Context, db *pgxpool.Pool, userID string, cfg *
 	return nil
 }
 
-// extractHeader extracts the raw value of a named header from a raw RFC 5322
-// message. Returns "" if the header is absent.
 func extractHeader(raw []byte, name string) string {
 	nameLower := strings.ToLower(name) + ":"
 	lines := strings.Split(string(raw), "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimRight(line, "\r")
 		if trimmed == "" {
-			break // end of header section
+			break
 		}
 		if strings.HasPrefix(strings.ToLower(trimmed), nameLower) {
 			val := strings.TrimSpace(trimmed[len(nameLower):])

@@ -1,11 +1,3 @@
-// rookery is the single binary for a rookery instance. It has explicit
-// subcommands so each invocation is unambiguous:
-//
-//	rookery serve                              — start the HTTP + SMTP server
-//	rookery healthcheck                        — probe the local /healthz endpoint (container use)
-//	rookery delete-user <address>              — permanently delete a user account
-//	rookery rotate-master-key ...              — re-encrypt DKIM keys under a new master key
-//	rookery relay-client <create|list|revoke>  — manage relay-rookery client credentials
 package main
 
 import (
@@ -43,7 +35,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		printHelp()
+		fmt.Fprintf(os.Stderr, "rookery: unknown subcommand %q\n\n", os.Args[1])
 		os.Exit(1)
 	}
 
@@ -64,43 +56,9 @@ func main() {
 		os.Exit(runRelayClient(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "rookery: unknown subcommand %q\n\n", os.Args[1])
-		printHelp()
 		os.Exit(1)
 	}
 }
-
-func printHelp() {
-	fmt.Fprint(os.Stderr, `rookery — mail server binary
-
-Usage:
-  rookery serve
-      Start the HTTP and SMTP server.
-
-  rookery healthcheck
-      Probe the local /healthz endpoint and exit 0 on success.
-      Used by the container HEALTHCHECK; not intended for direct operator use.
-
-  rookery delete-user <address>
-      Permanently delete a user account and all exclusively-owned data.
-      The rookery dispatcher (./rookery user delete) is the operator-facing
-      interface; this subcommand is the implementation it delegates to.
-
-  rookery rotate-master-key --old-key=<hex> --new-key=<hex>
-      Re-encrypt all DKIM private keys from the old master key to a new one.
-      The rookery dispatcher (./rookery master-key rotate) generates the new
-      key and invokes this subcommand; do not call it directly.
-
-  rookery relay-client <create|list|revoke> ...
-      Manage downstream relay-client credentials for the relay-rookery
-      submission listener (ADR-0030). The rookery dispatcher
-      (./rookery relay-client ...) is the operator-facing interface.
-
-`)
-}
-
-// -------------------------------------------------------------------------
-// serve
-// -------------------------------------------------------------------------
 
 func runServer() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -194,8 +152,6 @@ func runServer() int {
 		}
 	}()
 
-	// Relay-rookery submission listener (ports 465/587), opt-in. Reuses the TLS
-	// certificate Caddy provisions for the instance domain (ADR-0030 §3/§4).
 	if cfg.SMTP.SubmissionEnabled {
 		tlsCfg, err := smtp.LoadSubmissionTLS(cfg.SMTP.SubmissionCertsDir, cfg.Domain,
 			cfg.SMTP.SubmissionCertFile, cfg.SMTP.SubmissionKeyFile)
@@ -241,10 +197,6 @@ func runServer() int {
 	return 0
 }
 
-// -------------------------------------------------------------------------
-// healthcheck
-// -------------------------------------------------------------------------
-
 func runHealthcheck() int {
 	port := os.Getenv("ROOKERY_HEALTHCHECK_PORT")
 	if port == "" {
@@ -267,10 +219,6 @@ func runHealthcheck() int {
 	}
 	return 0
 }
-
-// -------------------------------------------------------------------------
-// delete-user
-// -------------------------------------------------------------------------
 
 func runDeleteUser(accountName string) int {
 	ctx := context.Background()
@@ -314,10 +262,6 @@ func runDeleteUser(accountName string) int {
 	fmt.Printf("delete-user: deleted %s\n", accountName)
 	return 0
 }
-
-// -------------------------------------------------------------------------
-// rotate-master-key
-// -------------------------------------------------------------------------
 
 func runRotateMasterKey(args []string) int {
 	var oldKey, newKey string
@@ -369,14 +313,7 @@ func runRotateMasterKey(args []string) int {
 	return 0
 }
 
-// -------------------------------------------------------------------------
-// relay-client
-// -------------------------------------------------------------------------
-
-// runRelayClient implements `rookery relay-client {create,list,revoke}` — the
-// lifecycle for downstream relay-client credentials (ADR-0030 §3, Phase B).
-// The rookery dispatcher (./rookery relay-client ...) execs this in the running
-// container; it is not intended for direct invocation.
+// The dispatcher execs this inside the running container; not for direct use.
 func runRelayClient(args []string) int {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: rookery relay-client <create|list|revoke> ...")
@@ -532,8 +469,6 @@ func randHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// loadConfigForCLI loads the instance config the same way the server does,
-// honoring ROOKERY_CONFIG. Used by CLI subcommands that need the DB URL/domain.
 func loadConfigForCLI() (*config.Config, error) {
 	cfgPath := os.Getenv("ROOKERY_CONFIG")
 	if cfgPath == "" {
@@ -541,10 +476,6 @@ func loadConfigForCLI() (*config.Config, error) {
 	}
 	return config.Load(cfgPath)
 }
-
-// -------------------------------------------------------------------------
-// Server bootstrap helpers
-// -------------------------------------------------------------------------
 
 func bootstrapDKIM(ctx context.Context, st *store.Store, cfg *config.Config, dk *dkim.Manager) error {
 	var domainID string

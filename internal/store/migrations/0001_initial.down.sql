@@ -1,4 +1,3 @@
--- Rollback for migration 0001.
 DROP TABLE IF EXISTS known_keys;
 DROP TABLE IF EXISTS messages;
 DROP TABLE IF EXISTS invites;

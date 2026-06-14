@@ -1,5 +1,3 @@
--- Reverse migration 0008.
-
 DROP INDEX IF EXISTS idx_outbound_queue_relay_client;
 
 -- Relayed rows have no messages row; remove them before restoring NOT NULL.

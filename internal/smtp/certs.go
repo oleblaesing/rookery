@@ -6,18 +6,7 @@ import (
 	"path/filepath"
 )
 
-// LoadSubmissionTLS builds the TLS config for the relay-rookery submission
-// listener. It reuses the certificate Caddy already provisions for the instance
-// hostname rather than running a second ACME client (ADR-0030 §4).
-//
-// When certFile and keyFile are both set, they are loaded directly (the
-// operator-supplied escape hatch). Otherwise the loader looks under certsDir for
-// the Caddy layout <certsDir>/<ca>/<host>/<host>.{crt,key}; the <ca> path segment
-// (e.g. acme-v02.api.letsencrypt.org-directory) is matched by glob so the loader
-// does not need to know which CA issued the cert.
-//
-// Certs are loaded once at startup; ACME renewals (~60-day events) are picked up
-// on the next restart (ADR-0030, out of scope: cert hot-reload).
+// Loaded once at startup, so renewals are picked up only on restart.
 func LoadSubmissionTLS(certsDir, host, certFile, keyFile string) (*tls.Config, error) {
 	cert, key, err := resolveCertPaths(certsDir, host, certFile, keyFile)
 	if err != nil {
@@ -33,16 +22,13 @@ func LoadSubmissionTLS(certsDir, host, certFile, keyFile string) (*tls.Config, e
 	}, nil
 }
 
-// resolveCertPaths returns the cert and key file paths to load, either the
-// explicit operator-supplied pair or the Caddy-provisioned pair discovered by
-// globbing certsDir for the instance host.
 func resolveCertPaths(certsDir, host, certFile, keyFile string) (cert, key string, err error) {
 	if certFile != "" && keyFile != "" {
 		return certFile, keyFile, nil
 	}
 
-	// Caddy stores certs at <certsDir>/<ca>/<host>/<host>.crt|.key. The <ca>
-	// segment varies (Let's Encrypt vs ZeroSSL fallback), so glob it.
+	// Caddy stores certs at <certsDir>/<ca>/<host>/<host>.crt|.key; the <ca>
+	// segment varies (Let's Encrypt vs ZeroSSL), so glob it.
 	pattern := filepath.Join(certsDir, "*", host, host+".crt")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {

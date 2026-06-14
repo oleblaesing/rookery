@@ -1,22 +1,3 @@
-// Package smtp provides the inbound SMTP listener for a rookery instance.
-//
-// Phase 1 scope (from PLAN.md §8 Phase 1):
-//   - Accept inbound mail on port 25 for the instance's primary domain.
-//   - STARTTLS-preferred (accepts unencrypted mail because the open internet
-//     still sends some; MTA-STS on our domain encourages senders to use TLS).
-//   - Plus-addressing: alice+tag@domain routes to alice@domain.
-//   - Reserved local-parts (postmaster, abuse, etc.) are accepted.
-//   - Stores the raw RFC 5322 blob content-addressed on disk.
-//   - Inserts a message metadata row in Postgres.
-//   - Detects PGP/MIME structure and sets security_state accordingly.
-//
-// Phase 2 adds: outbound submission, DKIM signing, key harvest from auto-attached
-// keys, bounce/DSN handling.
-//
-// §11.4 ADR-0019 decisions implemented here:
-//   - Port 25, STARTTLS-preferred.
-//   - Maximum message size from config (default 25 MiB).
-//   - AUTH is NOT offered on port 25 (inbound MX only; submission is Phase 2).
 package smtp
 
 import (
@@ -48,7 +29,6 @@ import (
 	"rookery/internal/store"
 )
 
-// Server wraps the go-smtp listener for inbound mail on port 25.
 type Server struct {
 	smtpServer *smtp.Server
 	cfg        *config.Config
@@ -56,10 +36,8 @@ type Server struct {
 	st         *store.Store
 }
 
-// NewServer creates (but does not start) the inbound SMTP server.
-// tlsConfig may be nil (no STARTTLS); when non-nil, STARTTLS is advertised.
-// SMTP STARTTLS provisioning is deferred — Caddy handles HTTP TLS but cannot
-// terminate SMTP, so a separate cert-management solution is needed for port 25.
+// STARTTLS is advertised only when tlsCfg is non-nil; Caddy can't terminate
+// SMTP, so port 25 needs its own cert source.
 func NewServer(cfg *config.Config, db *pgxpool.Pool, st *store.Store, tlsCfg *tls.Config) *Server {
 	s := &Server{cfg: cfg, db: db, st: st}
 
@@ -72,7 +50,7 @@ func NewServer(cfg *config.Config, db *pgxpool.Pool, st *store.Store, tlsCfg *tl
 	srv.WriteTimeout = 5 * time.Minute
 	srv.MaxMessageBytes = cfg.SMTP.MaxMessageBytes
 	srv.MaxRecipients = 100
-	srv.AllowInsecureAuth = false // AUTH not offered on port 25
+	srv.AllowInsecureAuth = false
 	if tlsCfg != nil {
 		srv.TLSConfig = tlsCfg
 	}
@@ -81,8 +59,6 @@ func NewServer(cfg *config.Config, db *pgxpool.Pool, st *store.Store, tlsCfg *tl
 	return s
 }
 
-// ListenAndServe starts the SMTP listener. It blocks until ctx is cancelled
-// or an unrecoverable error occurs.
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	slog.Info("smtp: inbound listener starting", "addr", s.smtpServer.Addr)
 	errCh := make(chan error, 1)
@@ -98,10 +74,6 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return err
 	}
 }
-
-// -------------------------------------------------------------------------
-// go-smtp backend implementation
-// -------------------------------------------------------------------------
 
 type inboundBackend struct {
 	cfg *config.Config
@@ -120,9 +92,7 @@ type inboundSession struct {
 }
 
 func (s *inboundSession) AuthPlain(_, _ string) error {
-	// AUTH is not offered or accepted on the inbound MX port (port 25).
-	// go-smtp will not call this unless the client explicitly tries AUTH,
-	// in which case we reject it.
+	// MX port never offers AUTH; reject if a client tries anyway.
 	return smtp.ErrAuthUnsupported
 }
 
@@ -138,7 +108,6 @@ func (s *inboundSession) Rcpt(to string, _ *smtp.RcptOptions) error {
 			Message: "Too many recipients"}
 	}
 
-	// Check that the recipient is a user on this instance.
 	userID, _, err := resolveRecipient(context.Background(), s.backend.db, s.backend.cfg, to)
 	if err != nil {
 		if errors.Is(err, ErrNoSuchUser) {
@@ -150,7 +119,6 @@ func (s *inboundSession) Rcpt(to string, _ *smtp.RcptOptions) error {
 			Message: "Temporary error, try again later"}
 	}
 
-	// Check per-user quota.
 	var quotaBytes, usedBytes int64
 	if err := s.backend.db.QueryRow(context.Background(),
 		`SELECT quota_bytes, used_bytes FROM users WHERE id = $1`, userID,
@@ -170,7 +138,6 @@ func (s *inboundSession) Data(r io.Reader) error {
 		return errors.New("no recipients")
 	}
 
-	// Read the full message into memory (max size enforced by go-smtp).
 	rawMsg, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("smtp: read data: %w", err)
@@ -178,7 +145,7 @@ func (s *inboundSession) Data(r io.Reader) error {
 
 	ctx := context.Background()
 
-	// Spam check via rspamd (soft-fail: deliver on error).
+	// Spam check soft-fails: on any rspamd error we deliver anyway.
 	if url := s.backend.cfg.Spam.RspamdURL; url != "" {
 		action, score, checkErr := rspamdCheck(ctx, url, s.from, s.recipients, rawMsg)
 		if checkErr != nil {
@@ -194,13 +161,12 @@ func (s *inboundSession) Data(r io.Reader) error {
 				return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 7, 0},
 					Message: "Please try again later"}
 			default:
-				// "no action", "add header", "rewrite subject": deliver normally.
-				// rspamd has already added X-Spam-* headers to the message body.
+				// "add header"/"rewrite subject": rspamd already edited the body.
 			}
 		}
 	}
 
-	// Write the blob once; all recipients share the same blob ref.
+	// One blob, shared by every recipient's message row.
 	blobDigest, err := s.backend.st.WriteBlob(rawMsg)
 	if err != nil {
 		slog.Error("smtp: write blob", "err", err)
@@ -208,11 +174,9 @@ func (s *inboundSession) Data(r io.Reader) error {
 			Message: "Temporary storage error"}
 	}
 
-	// Parse MIME headers for metadata (subject, date, to, cc, security state).
 	meta := parseMeta(rawMsg)
 
-	// Harvest any auto-attached PGP public keys from the message. This is done
-	// once per message (not per recipient) since the key belongs to the sender.
+	// Harvested once: the key belongs to the sender, not the recipient.
 	harvestedKey := extractAttachedPublicKey(rawMsg)
 
 	for _, to := range s.recipients {
@@ -223,12 +187,10 @@ func (s *inboundSession) Data(r io.Reader) error {
 		}
 		if _, err := storeMessage(ctx, s.backend.db, userID, s.from, meta, blobDigest, int64(len(rawMsg))); err != nil {
 			slog.Error("smtp: store message", "user_id", userID, "err", err)
-			// Continue to next recipient.
 			continue
 		}
 		slog.Info("smtp: message delivered", "blob", blobDigest)
 
-		// Cache the sender's harvested key into this recipient's known_keys.
 		if harvestedKey != "" {
 			if err := harvestKey(ctx, s.backend.db, userID, s.from, harvestedKey); err != nil {
 				slog.Debug("smtp: key harvest failed", "err", err)
@@ -247,17 +209,8 @@ func (s *inboundSession) Logout() error {
 	return nil
 }
 
-// -------------------------------------------------------------------------
-// Recipient resolution (plus-addressing, reserved local-parts)
-// -------------------------------------------------------------------------
-
-// ErrNoSuchUser is returned by ResolveRecipient and DeliverLocal when the
-// address is not a known local user.
 var ErrNoSuchUser = errors.New("no such user")
 
-// resolveRecipient maps an envelope recipient address to a user ID and the
-// canonical address. It handles plus-addressing (alice+tag → alice), one-hop
-// aliases, and catch-all delivery on any verified domain.
 func resolveRecipient(ctx context.Context, db *pgxpool.Pool, _ *config.Config, to string) (userID, canonicalAddr string, err error) {
 	parts := strings.SplitN(to, "@", 2)
 	if len(parts) != 2 {
@@ -265,10 +218,9 @@ func resolveRecipient(ctx context.Context, db *pgxpool.Pool, _ *config.Config, t
 	}
 	localRaw, domain := parts[0], parts[1]
 
-	// Accept any domain that is verified by this instance.
 	var domainID string
 	var catchAllEnabled bool
-	var catchAllAddrID string // empty if NULL
+	var catchAllAddrID string
 	err = db.QueryRow(ctx, `
 		SELECT id, catch_all_enabled, COALESCE(catch_all_address_id::text, '')
 		FROM   domains
@@ -281,14 +233,12 @@ func resolveRecipient(ctx context.Context, db *pgxpool.Pool, _ *config.Config, t
 		return "", "", err
 	}
 
-	// Strip plus-tag: alice+tag → alice.
 	local := localRaw
 	if idx := strings.IndexByte(local, '+'); idx >= 0 {
 		local = local[:idx]
 	}
 	canonical := local + "@" + domain
 
-	// Look up address by local_part + domain_id.
 	var uid string
 	var suspended bool
 	err = db.QueryRow(ctx, `
@@ -298,7 +248,6 @@ func resolveRecipient(ctx context.Context, db *pgxpool.Pool, _ *config.Config, t
 		WHERE  a.local_part = $1 AND a.domain_id = $2
 	`, local, domainID).Scan(&uid, &suspended)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// No direct match — try catch-all for this domain.
 		if !catchAllEnabled || catchAllAddrID == "" {
 			return "", "", ErrNoSuchUser
 		}
@@ -325,43 +274,32 @@ func resolveRecipient(ctx context.Context, db *pgxpool.Pool, _ *config.Config, t
 	return uid, canonical, nil
 }
 
-// -------------------------------------------------------------------------
-// Message metadata parsing
-// -------------------------------------------------------------------------
-
-// AttachmentMeta holds metadata for a single attachment part extracted from a
-// plaintext message at inbound time. Encrypted messages have no rows in the
-// message_attachments table — attachments are reconstructed browser-side.
 type AttachmentMeta struct {
-	PartIndex   int    // 0-based among attachment-eligible leaf parts, depth-first
+	PartIndex   int
 	Filename    string
 	ContentType string
 	SizeBytes   int64
 }
 
-// AttachmentPart holds the decoded bytes and metadata for a single attachment.
-// Returned by ReadAttachmentAt for the download endpoint.
 type AttachmentPart struct {
 	Filename    string
 	ContentType string
 	Body        []byte
 }
 
-// MsgMeta holds the parsed metadata fields extracted from an RFC 5322 message.
 type MsgMeta struct {
 	Subject         string
 	MessageDate     time.Time
 	To              []string
 	Cc              []string
-	SecurityState   string          // pgp_encrypted | pgp_signed_plaintext | plaintext
-	SignatureStatus string          // verified | unknown_key | invalid | none
+	SecurityState   string
+	SignatureStatus string
 	HasAttachments  bool
-	Attachments     []AttachmentMeta // nil for encrypted messages; populated for plaintext
+	// nil for encrypted messages; the browser rebuilds the list after decrypt.
+	Attachments []AttachmentMeta
 }
 
-// isAttachmentPart reports whether a MIME leaf part with the given content-type
-// and disposition is a user-visible attachment. PGP wrapper types and text/plain
-// (the message body) are excluded.
+// Excludes PGP wrapper types and the text body so only user-visible attachments count.
 func isAttachmentPart(ct, disp string) bool {
 	ctLower := strings.ToLower(strings.TrimSpace(ct))
 	switch ctLower {
@@ -376,9 +314,7 @@ func isAttachmentPart(ct, disp string) bool {
 		ctLower != ""
 }
 
-// collectAttachmentMeta walks entity depth-first and appends metadata for
-// attachment-eligible leaf parts to result. idx tracks the running part index.
-// Only body sizes are computed; body bytes are discarded to save memory.
+// Discards body bytes after sizing them to keep memory flat.
 func collectAttachmentMeta(entity *gomessage.Entity, result *[]AttachmentMeta, idx *int) {
 	ct, ctParams, _ := entity.Header.ContentType()
 	disp, dispParams, _ := entity.Header.ContentDisposition()
@@ -406,7 +342,6 @@ func collectAttachmentMeta(entity *gomessage.Entity, result *[]AttachmentMeta, i
 		filename = fmt.Sprintf("attachment-%d", *idx)
 	}
 
-	// Read body only to compute size; discard bytes to keep memory use low.
 	n, _ := io.Copy(io.Discard, entity.Body)
 	*result = append(*result, AttachmentMeta{
 		PartIndex:   *idx,
@@ -417,8 +352,6 @@ func collectAttachmentMeta(entity *gomessage.Entity, result *[]AttachmentMeta, i
 	(*idx)++
 }
 
-// collectAllParts walks entity depth-first and appends decoded body bytes for
-// each attachment-eligible leaf part to parts.
 func collectAllParts(entity *gomessage.Entity, parts *[]*AttachmentPart) {
 	ct, ctParams, _ := entity.Header.ContentType()
 	disp, dispParams, _ := entity.Header.ContentDisposition()
@@ -454,9 +387,6 @@ func collectAllParts(entity *gomessage.Entity, parts *[]*AttachmentPart) {
 	})
 }
 
-// ReadAttachmentAt re-parses raw and returns the decoded body and metadata of
-// the attachment at the given 0-based index. Returns an error if the index is
-// out of range or the message cannot be parsed.
 func ReadAttachmentAt(raw []byte, index int) (*AttachmentPart, error) {
 	entity, err := gomessage.Read(strings.NewReader(string(raw)))
 	if err != nil {
@@ -470,8 +400,6 @@ func ReadAttachmentAt(raw []byte, index int) (*AttachmentPart, error) {
 	return parts[index], nil
 }
 
-// ParseMeta parses MIME headers and structure from a raw RFC 5322 message and
-// returns the metadata fields used when inserting a messages row.
 func ParseMeta(raw []byte) MsgMeta {
 	m := MsgMeta{
 		SecurityState:   "plaintext",
@@ -498,22 +426,18 @@ func ParseMeta(raw []byte) MsgMeta {
 	m.To = addressList(header.Get("To"))
 	m.Cc = addressList(header.Get("Cc"))
 
-	// Detect PGP/MIME structure.
 	ct, _, _ := entity.Header.ContentType()
 	switch {
 	case ct == "multipart/encrypted":
 		m.SecurityState = "pgp_encrypted"
 	case ct == "multipart/signed":
 		m.SecurityState = "pgp_signed_plaintext"
-		m.SignatureStatus = "unknown_key" // JS module verifies on read
+		m.SignatureStatus = "unknown_key" // the JS module verifies on read
 	}
 
-	// For non-encrypted messages, walk the MIME tree to collect attachment
-	// metadata. A fresh reader is used so the content-type detection above
-	// does not interfere with the body walk.
-	// For PGP-encrypted messages, has_attachments stays false on the outer
-	// MIME (the outer is multipart/encrypted and reveals nothing about the
-	// inner content); the browser reconstructs the list after decryption.
+	// Encrypted messages reveal nothing on the outer MIME, so skip the walk and
+	// let the browser list attachments after decrypt. A fresh reader avoids
+	// disturbing the content-type read above.
 	if m.SecurityState != "pgp_encrypted" {
 		entity2, err2 := gomessage.Read(strings.NewReader(string(raw)))
 		if err2 == nil {
@@ -525,12 +449,9 @@ func ParseMeta(raw []byte) MsgMeta {
 	return m
 }
 
-// parseMeta is an unexported alias kept for internal use.
 func parseMeta(raw []byte) MsgMeta { return ParseMeta(raw) }
 
-// DeliverLocal stores rawMsg directly into a local user's inbox without going
-// through external SMTP. Used by the outbound queue worker for same-domain
-// delivery so that @local messages never leave the host.
+// Stores into a local inbox so same-domain mail never leaves the host.
 func DeliverLocal(ctx context.Context, db *pgxpool.Pool, st *store.Store, cfg *config.Config, from, to string, rawMsg []byte) error {
 	userID, _, err := resolveRecipient(ctx, db, cfg, to)
 	if err != nil {
@@ -545,20 +466,15 @@ func DeliverLocal(ctx context.Context, db *pgxpool.Pool, st *store.Store, cfg *c
 	return err
 }
 
-// addressList parses an RFC 5322 address-list header value (To, Cc) into
-// lower-cased email addresses, discarding display names and groups. Quoted
-// names that contain commas (e.g. `"Doe, John" <john@x>`) and angle-addr
-// forms are handled correctly because we delegate to net/mail's parser
-// rather than splitting on raw commas.
+// Delegates to net/mail so commas inside quoted display names don't split an address.
 func addressList(header string) []string {
 	if header == "" {
 		return []string{}
 	}
 	parsed, err := netmail.ParseAddressList(header)
 	if err != nil {
-		// Malformed header — fall back to a permissive split rather than
-		// dropping the metadata entirely. The values land in the DB for
-		// display only; delivery uses envelope recipients (see Rcpt).
+		// These values are display-only (delivery uses envelope recipients), so
+		// a malformed header falls back to a split rather than dropping metadata.
 		return fallbackAddressList(header)
 	}
 	addrs := make([]string, 0, len(parsed))
@@ -570,8 +486,7 @@ func addressList(header string) []string {
 	return addrs
 }
 
-// fallbackAddressList is the previous naive splitter, kept only for
-// malformed headers that net/mail rejects.
+// Handles only headers net/mail rejects.
 func fallbackAddressList(header string) []string {
 	var addrs []string
 	for _, part := range strings.Split(header, ",") {
@@ -588,10 +503,6 @@ func fallbackAddressList(header string) []string {
 	}
 	return addrs
 }
-
-// -------------------------------------------------------------------------
-// Message storage
-// -------------------------------------------------------------------------
 
 func storeMessage(ctx context.Context, db *pgxpool.Pool,
 	userID, from string, meta MsgMeta, blobDigest string, sizeBytes int64) (string, error) {
@@ -614,14 +525,12 @@ func storeMessage(ctx context.Context, db *pgxpool.Pool,
 		return "", fmt.Errorf("storeMessage: %w", err)
 	}
 
-	// Update the user's used_bytes counter.
 	_, _ = db.Exec(ctx,
 		`UPDATE users SET used_bytes = used_bytes + $1 WHERE id = $2`,
 		sizeBytes, userID)
 
-	// Insert attachment metadata for plaintext messages. Errors are non-fatal
-	// — the message is already stored and the download endpoint will return 404
-	// rather than corrupt data.
+	// Non-fatal: the message is already stored, so a failed attachment row just
+	// makes the download endpoint 404 rather than corrupting anything.
 	for _, a := range meta.Attachments {
 		_, _ = db.Exec(ctx, `
 			INSERT INTO message_attachments (message_id, part_index, filename, content_type, size_bytes)
@@ -632,14 +541,6 @@ func storeMessage(ctx context.Context, db *pgxpool.Pool,
 	return messageID, nil
 }
 
-// -------------------------------------------------------------------------
-// Key harvest — extract and cache auto-attached PGP public keys
-// -------------------------------------------------------------------------
-
-// extractAttachedPublicKey returns an ASCII-armored PGP public key found in
-// the message, or "" if none is present. It checks, in order:
-//  1. application/pgp-keys MIME parts (standard inline attachment).
-//  2. The Autocrypt header (RFC 8617 — used by ProtonMail and others).
 func extractAttachedPublicKey(raw []byte) string {
 	entity, err := gomessage.Read(strings.NewReader(string(raw)))
 	if err != nil {
@@ -651,8 +552,6 @@ func extractAttachedPublicKey(raw []byte) string {
 	return extractAutocryptKey(entity)
 }
 
-// extractAutocryptKey parses the Autocrypt header and returns the armored key,
-// or "" when the header is absent or malformed.
 func extractAutocryptKey(entity *gomessage.Entity) string {
 	hdr := entity.Header.Get("Autocrypt")
 	if hdr == "" {
@@ -669,7 +568,7 @@ func extractAutocryptKey(entity *gomessage.Entity) string {
 	if keydata == "" {
 		return ""
 	}
-	// Strip whitespace that may have been introduced by header folding.
+	// Drop whitespace inserted by header folding before base64-decoding.
 	keydata = strings.Map(func(r rune) rune {
 		if r == ' ' || r == '\t' || r == '\r' || r == '\n' {
 			return -1
@@ -683,8 +582,6 @@ func extractAutocryptKey(entity *gomessage.Entity) string {
 	return armorBinaryKey(binKey)
 }
 
-// armorBinaryKey converts a binary OpenPGP public key to ASCII armor.
-// Returns "" if the bytes cannot be parsed as a valid key.
 func armorBinaryKey(binKey []byte) string {
 	entities, err := pgpcrypto.ReadKeyRing(bytes.NewReader(binKey))
 	if err != nil || len(entities) == 0 {
@@ -726,8 +623,6 @@ func walkForKey(entity *gomessage.Entity) string {
 	return ""
 }
 
-// harvestKey upserts a sender's PGP public key into the recipient user's
-// known_keys cache tagged as "auto_attach".
 func harvestKey(ctx context.Context, db *pgxpool.Pool, userID, fromAddress, armoredKey string) error {
 	if !strings.Contains(armoredKey, "BEGIN PGP PUBLIC KEY BLOCK") {
 		return nil
@@ -746,9 +641,7 @@ func harvestKey(ctx context.Context, db *pgxpool.Pool, userID, fromAddress, armo
 	return err
 }
 
-// rspamdCheck calls rspamd's HTTP check API and returns the action and score.
-// rspamdURL is the base URL (e.g. "http://rspamd:11333").
-// This is a soft-fail helper: the caller logs errors and delivers on failure.
+// Callers treat any error as soft-fail.
 func rspamdCheck(ctx context.Context, rspamdURL, from string, rcpts []string, msg []byte) (action string, score float64, err error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

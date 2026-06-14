@@ -1,16 +1,3 @@
-// Package store manages the Postgres connection pool and runs database
-// migrations on startup. It also provides the content-addressed blob store
-// for raw RFC 5322 message files.
-//
-// Design constraints (from §11.6 of PLAN.md):
-//   - Postgres only; no SQLite alternative.
-//   - golang-migrate for migrations; SQL files embedded via embed.FS.
-//   - Blobs stored content-addressed on the filesystem:
-//     <message_dir>/sha256/<ab>/<cd>/<full-sha256>.eml
-//   - The server master key (§11.6) encrypts DKIM private keys and ACME
-//     account keys at rest; message blobs are stored as-received (PGP-
-//     encrypted messages are already encrypted; plaintext messages match
-//     every other mail server's storage model).
 package store
 
 import (
@@ -33,15 +20,12 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
-// Store holds the database pool and blob storage root.
 type Store struct {
 	DB         *pgxpool.Pool
 	MessageDir string
 	ExportDir  string
 }
 
-// Open connects to Postgres, runs pending migrations, and returns a Store.
-// It blocks until the connection is established or ctx is cancelled.
 func Open(ctx context.Context, dbURL, messageDir string) (*Store, error) {
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -63,9 +47,7 @@ func Open(ctx context.Context, dbURL, messageDir string) (*Store, error) {
 		return nil, fmt.Errorf("store: create message_dir %s: %w", messageDir, err)
 	}
 
-	// ExportDir lives inside MessageDir so it inherits the existing bind mount
-	// and is writable by the container process without a separate bind mount or
-	// any host-side setup beyond what rookery init already does.
+	// Inside MessageDir so it inherits the existing bind mount with no extra setup.
 	exportDir := filepath.Join(messageDir, "exports")
 	if err := os.MkdirAll(exportDir, 0o750); err != nil {
 		pool.Close()
@@ -76,20 +58,17 @@ func Open(ctx context.Context, dbURL, messageDir string) (*Store, error) {
 	return &Store{DB: pool, MessageDir: messageDir, ExportDir: exportDir}, nil
 }
 
-// Close releases the database pool.
 func (s *Store) Close() {
 	s.DB.Close()
 }
 
-// runMigrations applies any pending up-migrations from the embedded SQL files.
 func runMigrations(dbURL string) error {
 	srcDriver, err := iofs.New(migrationsFS, "migrations")
 	if err != nil {
 		return fmt.Errorf("migrations source: %w", err)
 	}
 
-	// golang-migrate expects a pgx5 DSN for the pgx/v5 driver.
-	// The pgx/v5 driver prefix is "pgx5".
+	// golang-migrate's pgx/v5 driver wants the "pgx5://" scheme.
 	m, err := migrate.NewWithSourceInstance("iofs", srcDriver, "pgx5://"+dbURL[len("postgres://"):])
 	if err != nil {
 		return fmt.Errorf("migrate new: %w", err)
@@ -105,10 +84,6 @@ func runMigrations(dbURL string) error {
 	return nil
 }
 
-// BlobPath returns the filesystem path for a given sha256 hex digest.
-// The path follows the content-addressed layout:
-//
-//	<message_dir>/sha256/<ab>/<cd>/<full-digest>.eml
 func (s *Store) BlobPath(digest string) string {
 	if len(digest) < 4 {
 		return filepath.Join(s.MessageDir, "sha256", digest+".eml")
@@ -116,23 +91,20 @@ func (s *Store) BlobPath(digest string) string {
 	return filepath.Join(s.MessageDir, "sha256", digest[:2], digest[2:4], digest+".eml")
 }
 
-// WriteBlob writes data to the content-addressed blob store. It returns the
-// SHA-256 hex digest of the written data. Writing the same data twice is
-// idempotent — the file is only written if it does not already exist.
 func (s *Store) WriteBlob(data []byte) (digest string, err error) {
 	sum := sha256.Sum256(data)
 	digest = hex.EncodeToString(sum[:])
 	path := s.BlobPath(digest)
 
 	if _, err := os.Stat(path); err == nil {
-		return digest, nil // already exists
+		return digest, nil
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return "", fmt.Errorf("store: blob mkdir: %w", err)
 	}
 
-	// Write to a temp file then rename so partial writes are never visible.
+	// Temp-file-then-rename so a partial write is never visible at the final path.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o640); err != nil {
 		return "", fmt.Errorf("store: blob write: %w", err)
@@ -144,7 +116,6 @@ func (s *Store) WriteBlob(data []byte) (digest string, err error) {
 	return digest, nil
 }
 
-// ReadBlob reads the raw blob for a given SHA-256 hex digest.
 func (s *Store) ReadBlob(digest string) ([]byte, error) {
 	data, err := os.ReadFile(s.BlobPath(digest))
 	if err != nil {
@@ -153,7 +124,6 @@ func (s *Store) ReadBlob(digest string) ([]byte, error) {
 	return data, nil
 }
 
-// ReadBlobInto copies the raw blob for digest into w.
 func (s *Store) ReadBlobInto(digest string, w io.Writer) error {
 	f, err := os.Open(s.BlobPath(digest))
 	if err != nil {
@@ -164,8 +134,6 @@ func (s *Store) ReadBlobInto(digest string, w io.Writer) error {
 	return err
 }
 
-// DeleteBlob removes the content-addressed blob file for digest from disk.
-// It is a no-op (returns nil) if the file does not exist.
 func (s *Store) DeleteBlob(digest string) error {
 	err := os.Remove(s.BlobPath(digest))
 	if err != nil && !os.IsNotExist(err) {

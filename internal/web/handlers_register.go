@@ -15,24 +15,15 @@ import (
 	"rookery/internal/config"
 )
 
-// localPartRe validates that a local-part contains only safe characters.
-// Allowed: a-z 0-9 . _ - (no plus — that's reserved for plus-addressing
-// tags which are stripped before lookup). Must start and end with an
-// alphanumeric. Length 1–64.
-//
-// The regex permits consecutive separators (e.g. "a..b"); that is
-// disallowed by isValidLocalPart's additional check, which keeps the regex
-// readable.
+// a-z 0-9 . _ - only (no plus: reserved for plus-addressing), alphanumeric at
+// both ends, length 1–64. Consecutive separators are left for the check below
+// to reject, which keeps the regex readable.
 var localPartRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}[a-z0-9]$|^[a-z0-9]$`)
 
-// localPartConsecutiveSepRe matches any run of two or more separator
-// characters (., _, -). RFC 5322 forbids consecutive dots in unquoted
-// local-parts; we extend the same rule to _ and - to keep displayable
-// addresses unambiguous.
+// RFC 5322 bans consecutive dots; we extend that to _ and - so addresses stay
+// unambiguous.
 var localPartConsecutiveSepRe = regexp.MustCompile(`[._-]{2,}`)
 
-// isValidLocalPart applies both the regex and the no-consecutive-separators
-// rule.
 func isValidLocalPart(local string) bool {
 	if !localPartRe.MatchString(local) {
 		return false
@@ -42,10 +33,6 @@ func isValidLocalPart(local string) bool {
 	}
 	return true
 }
-
-// -------------------------------------------------------------------------
-// GET /api/v1/invites/{token}
-// -------------------------------------------------------------------------
 
 type inviteInfoResponse struct {
 	Valid        bool    `json:"valid"`
@@ -89,10 +76,6 @@ func handleAPIGetInvite(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// POST /api/v1/users/register
-// -------------------------------------------------------------------------
-
 type registerRequest struct {
 	InviteToken      string `json:"invite_token"`
 	LocalPart        string `json:"local_part"`
@@ -107,7 +90,6 @@ func handleAPIRegister(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Conf
 			return
 		}
 
-		// ---- Validate inputs ----
 		req.LocalPart = strings.ToLower(strings.TrimSpace(req.LocalPart))
 		if req.InviteToken == "" {
 			respondError(w, http.StatusBadRequest, "BAD_REQUEST", "invite_token is required.")
@@ -124,7 +106,6 @@ func handleAPIRegister(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Conf
 			return
 		}
 
-		// ---- Parse and validate the PGP public key ----
 		fingerprint, algo, err := parsePGPPublicKey(req.ArmoredPublicKey)
 		if err != nil {
 			respondErrorDetail(w, http.StatusUnprocessableEntity, "INVALID_PUBLIC_KEY",
@@ -133,7 +114,6 @@ func handleAPIRegister(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Conf
 			return
 		}
 
-		// ---- Transactionally register the user ----
 		userProfile, rawToken, csrfToken, err := registerUser(r.Context(), db, ss, cfg, registerParams{
 			inviteToken:      req.InviteToken,
 			localPart:        req.LocalPart,
@@ -165,11 +145,9 @@ func handleAPIRegister(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Conf
 	}
 }
 
-// ---- Registration errors ----
-
 var (
-	errInviteInvalid    = errors.New("invite invalid or used")
-	errLocalPartTaken   = errors.New("local part taken")
+	errInviteInvalid     = errors.New("invite invalid or used")
+	errLocalPartTaken    = errors.New("local part taken")
 	errLocalPartReserved = errors.New("local part reserved")
 )
 
@@ -181,21 +159,9 @@ type registerParams struct {
 	algorithm        string
 }
 
-// registerUser runs the full registration inside a single transaction:
-//  1. Locks and validates the invite token (not used, not expired).
-//  2. Checks the local-part is not reserved and not taken.
-//  3. Inserts: user row, address row, user_key row.
-//  4. Links primary_address_id back to the user row.
-//  5. Marks the invite as used.
-//  6. Inserts the session row.
-//
-// No passphrase or passphrase hash is stored — authentication is purely
-// challenge/response via the user's PGP key (§11.2 / PLAN.md §5.3).
-//
-// Returns the new user's profile, a raw session token, and a CSRF token on
-// success. Session creation lives inside the transaction so a failure there
-// rolls back the user/invite/key inserts — there is no half-state where the
-// invite is consumed but the caller never receives a session cookie.
+// Runs the whole registration in one transaction — including session creation —
+// so a failure anywhere rolls back invite consumption and the user/address/key
+// inserts, leaving no half-state.
 func registerUser(
 	ctx context.Context,
 	db *pgxpool.Pool,
@@ -209,7 +175,6 @@ func registerUser(
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// 1. Validate and lock the invite.
 	var inviteID string
 	err = tx.QueryRow(ctx, `
 		SELECT id FROM invites
@@ -225,7 +190,6 @@ func registerUser(
 		return nil, "", "", err
 	}
 
-	// 2a. Check reserved local-parts.
 	var reserved bool
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM reserved_local_parts WHERE local_part = $1)`,
@@ -237,15 +201,13 @@ func registerUser(
 		return nil, "", "", errLocalPartReserved
 	}
 
-	// 2b. Check uniqueness on the primary domain.
 	var domainID string
 	err = tx.QueryRow(ctx,
 		`SELECT id FROM domains WHERE domain = $1 AND is_primary = TRUE`,
 		cfg.Domain,
 	).Scan(&domainID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Primary domain row should have been seeded on first run; this is a
-		// configuration error, but don't panic — return a useful error.
+		// The primary domain is seeded on first run; missing means misconfiguration.
 		return nil, "", "", errors.New("primary domain not found in DB; run the server once to seed it")
 	}
 	if err != nil {
@@ -264,8 +226,7 @@ func registerUser(
 		return nil, "", "", errLocalPartTaken
 	}
 
-	// 3. Insert user (without primary_address_id yet — FK is DEFERRABLE).
-	// No passphrase or hash is stored: auth is PGP challenge/response only.
+	// primary_address_id is set after the address exists; the FK is DEFERRABLE.
 	var userID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO users (quota_bytes)
@@ -275,7 +236,6 @@ func registerUser(
 		return nil, "", "", err
 	}
 
-	// 3b. Insert the primary address.
 	var addrID string
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO addresses (user_id, domain_id, local_part, address)
@@ -285,7 +245,6 @@ func registerUser(
 		return nil, "", "", err
 	}
 
-	// 3c. Set primary_address_id on the user.
 	if _, err := tx.Exec(ctx,
 		`UPDATE users SET primary_address_id = $1 WHERE id = $2`,
 		addrID, userID,
@@ -293,7 +252,6 @@ func registerUser(
 		return nil, "", "", err
 	}
 
-	// 3d. Insert the public key.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO user_keys (user_id, fingerprint, armored_public_key, algorithm)
 		VALUES ($1, $2, $3, $4)
@@ -301,16 +259,12 @@ func registerUser(
 		return nil, "", "", err
 	}
 
-	// 4. Mark invite as used.
 	if _, err := tx.Exec(ctx, `
 		UPDATE invites SET used_at = now(), used_by_id = $1 WHERE id = $2
 	`, userID, inviteID); err != nil {
 		return nil, "", "", err
 	}
 
-	// 5. Create the session inside the same transaction — a failure here
-	//    rolls back the user, address, key, and invite consumption so the
-	//    caller never sees a half-state.
 	rawToken, csrfToken, err := ss.CreateInTx(ctx, tx, userID)
 	if err != nil {
 		return nil, "", "", err

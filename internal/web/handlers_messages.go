@@ -19,10 +19,6 @@ import (
 	"rookery/internal/store"
 )
 
-// -------------------------------------------------------------------------
-// GET /api/v1/messages
-// -------------------------------------------------------------------------
-
 type messageListItem struct {
 	ID              string    `json:"id"`
 	ThreadID        *string   `json:"thread_id,omitempty"`
@@ -98,10 +94,6 @@ func handleAPIListMessages(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /api/v1/messages/{id}
-// -------------------------------------------------------------------------
-
 func handleAPIGetMessage(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -134,7 +126,6 @@ func handleAPIGetMessage(db *pgxpool.Pool) http.HandlerFunc {
 			m.Cc = []string{}
 		}
 
-		// Mark as read on first fetch.
 		if !m.IsRead {
 			_, _ = db.Exec(r.Context(),
 				`UPDATE messages SET is_read = TRUE WHERE id = $1 AND user_id = $2`,
@@ -145,12 +136,7 @@ func handleAPIGetMessage(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /api/v1/messages/{id}/raw
-// -------------------------------------------------------------------------
-// Returns the raw RFC 5322 blob. The browser JS module fetches this to
-// decrypt PGP/MIME bodies locally. The server never decrypts.
-
+// The browser decrypts PGP/MIME locally; the server never decrypts.
 func handleAPIGetMessageRaw(db *pgxpool.Pool, st *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -172,16 +158,10 @@ func handleAPIGetMessageRaw(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 
 		w.Header().Set("Content-Type", "message/rfc822")
 		if err := st.ReadBlobInto(blobSHA256, w); err != nil {
-			// Headers already sent; nothing to do but log.
-			return
+			return // headers already sent
 		}
 	}
 }
-
-// -------------------------------------------------------------------------
-// PATCH /api/v1/messages/{id}
-// -------------------------------------------------------------------------
-// Allowed fields: is_read, is_starred, folder (move between virtual views).
 
 type patchMessageRequest struct {
 	IsRead    *bool   `json:"is_read,omitempty"`
@@ -215,7 +195,6 @@ func handleAPIPatchMessage(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		// Build a dynamic UPDATE statement for the fields that were provided.
 		query, args := buildPatchSet(req, userID, msgID)
 		if query == "" {
 			respondError(w, http.StatusBadRequest, "BAD_REQUEST", "Nothing to update.")
@@ -235,13 +214,7 @@ func handleAPIPatchMessage(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /api/v1/messages/{id}/attachments/{index}
-// -------------------------------------------------------------------------
-// Serves a single attachment from a plaintext message by re-parsing the raw
-// RFC 5322 blob. Encrypted messages are not handled here — the browser
-// decrypts the blob via /raw and builds Blob URLs for attachment download.
-
+// Encrypted messages go through /raw and the browser instead.
 func handleAPIGetAttachment(db *pgxpool.Pool, st *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -268,13 +241,11 @@ func handleAPIGetAttachment(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 			return
 		}
 
-		// Encrypted messages: the browser decrypts and renders attachment Blob URLs.
 		if securityState == "pgp_encrypted" {
 			respondError(w, http.StatusNotFound, "NOT_FOUND", "Use the /raw endpoint to decrypt encrypted message attachments in the browser.")
 			return
 		}
 
-		// Confirm the attachment exists in the DB before reading the blob.
 		var filename, contentType string
 		err = db.QueryRow(r.Context(), `
 			SELECT filename, content_type FROM message_attachments
@@ -309,8 +280,7 @@ func handleAPIGetAttachment(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 			safeFilename = fmt.Sprintf("attachment-%d", index)
 		}
 
-		// RFC 6266: filename= is the ASCII fallback; filename*= is the authoritative
-		// RFC 5987-encoded value for non-ASCII names.
+		// RFC 6266: filename= is the ASCII fallback, filename*= the RFC 5987 value.
 		asciiName := filenameASCIIFallback(safeFilename)
 		encodedName := strings.ReplaceAll(url.QueryEscape(safeFilename), "+", "%20")
 		disposition := fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, asciiName, encodedName)
@@ -322,7 +292,6 @@ func handleAPIGetAttachment(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 	}
 }
 
-// sanitizeAttachmentFilename removes path separators and control characters.
 func sanitizeAttachmentFilename(name string) string {
 	var b strings.Builder
 	for _, r := range name {
@@ -334,8 +303,7 @@ func sanitizeAttachmentFilename(name string) string {
 	return b.String()
 }
 
-// filenameASCIIFallback replaces non-ASCII and special characters with '_'
-// for the Content-Disposition filename= (plain ASCII) fallback.
+// Replaces non-ASCII and special chars with '_' for the Content-Disposition filename= fallback.
 func filenameASCIIFallback(name string) string {
 	var b strings.Builder
 	for _, r := range name {
@@ -389,11 +357,6 @@ func buildPatchSet(req patchMessageRequest, userID, msgID string) (string, []any
 	return query, args
 }
 
-// -------------------------------------------------------------------------
-// DELETE /api/v1/messages/{id}           — soft delete (move to trash)
-// DELETE /api/v1/messages/{id}?permanent=1 — hard delete from trash
-// -------------------------------------------------------------------------
-
 func handleAPIDeleteMessage(db *pgxpool.Pool, st *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -401,7 +364,6 @@ func handleAPIDeleteMessage(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 		permanent := r.URL.Query().Get("permanent") == "1"
 
 		if permanent {
-			// Hard delete: only allowed from trash.
 			var folder, blobSHA256 string
 			err := db.QueryRow(r.Context(),
 				`SELECT folder, blob_sha256 FROM messages WHERE id = $1 AND user_id = $2`,
@@ -431,8 +393,7 @@ func handleAPIDeleteMessage(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 				respondError(w, http.StatusNotFound, "MESSAGE_NOT_FOUND", "No message with that ID exists.")
 				return
 			}
-			// Blobs are shared across recipients; only remove the file when no
-			// other message row references it.
+			// Shared across recipients; remove the file only when unreferenced.
 			var remaining int
 			_ = db.QueryRow(r.Context(),
 				`SELECT COUNT(*) FROM messages WHERE blob_sha256 = $1`, blobSHA256,
@@ -443,7 +404,6 @@ func handleAPIDeleteMessage(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 				}
 			}
 		} else {
-			// Soft delete: move to trash.
 			result, err := db.Exec(r.Context(), `
 				UPDATE messages
 				SET folder = 'trash', deleted_at = now()
@@ -461,4 +421,3 @@ func handleAPIDeleteMessage(db *pgxpool.Pool, st *store.Store) http.HandlerFunc 
 		respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
-

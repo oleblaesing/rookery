@@ -1,17 +1,3 @@
-// Package dkim manages per-domain DKIM keypairs and signs outbound messages.
-//
-// Phase 2 scope:
-//   - Generate an ed25519 keypair (primary) and an RSA-2048 keypair (fallback)
-//     for each domain on startup if none exist.
-//   - Store private keys AES-256-GCM encrypted using SHA-256(master_key).
-//   - Sign outbound messages (adds DKIM-Signature headers via go-msgauth).
-//   - Expose the DNS TXT record value for each key so the operator can publish
-//     the public keys in DNS.
-//
-// Per §11.7 / ADR-0024: ed25519 primary, RSA-2048 fallback, distinct selectors.
-// Selectors are "rookery-ed25519" and "rookery-rsa"; custom-domain owners CNAME
-// `<selector>._domainkey.<their-domain>` to `<selector>._domainkey.<primary>`
-// (ADR-0036/0038). Rotation tooling (Phase 7) will rename to a versioned form.
 package dkim
 
 import (
@@ -34,24 +20,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Manager handles DKIM key lifecycle for an instance.
 type Manager struct {
-	db         *pgxpool.Pool
-	aesKey     []byte // 32-byte AES-256 key derived from master key
+	db     *pgxpool.Pool
+	aesKey []byte
 }
 
-// NewManager creates a Manager. masterKey is the raw ROOKERY_MASTER_KEY string;
-// SHA-256 of it is used as the AES-256-GCM encryption key for stored private keys.
 func NewManager(db *pgxpool.Pool, masterKey string) *Manager {
 	sum := sha256.Sum256([]byte(masterKey))
 	return &Manager{db: db, aesKey: sum[:]}
 }
 
-// EnsureKeys generates ed25519 + RSA-2048 DKIM keys for the given domain if
-// none exist yet. Safe to call on every startup. Logs the DNS TXT records that
-// the operator must publish in DNS.
 func (m *Manager) EnsureKeys(ctx context.Context, domainID, domainName string) error {
-	// Check if keys already exist.
 	var count int
 	if err := m.db.QueryRow(ctx,
 		`SELECT count(*) FROM dkim_keys WHERE domain_id = $1 AND is_active = TRUE`,
@@ -66,7 +45,6 @@ func (m *Manager) EnsureKeys(ctx context.Context, domainID, domainName string) e
 
 	slog.Info("dkim: generating keypairs", "domain", domainName)
 
-	// ed25519 key.
 	edPub, edPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return fmt.Errorf("dkim: generate ed25519: %w", err)
@@ -75,7 +53,6 @@ func (m *Manager) EnsureKeys(ctx context.Context, domainID, domainName string) e
 		return fmt.Errorf("dkim: store ed25519 key: %w", err)
 	}
 
-	// RSA-2048 key.
 	rsaPriv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return fmt.Errorf("dkim: generate rsa2048: %w", err)
@@ -94,8 +71,6 @@ func (m *Manager) EnsureKeys(ctx context.Context, domainID, domainName string) e
 	return nil
 }
 
-// storeKey encrypts the private key and writes a dkim_keys row.
-// privKeyBytes: for ed25519, the raw 64-byte private key; for RSA, PKCS8 DER.
 func (m *Manager) storeKey(ctx context.Context, domainID, selector, algorithm string, pubKeyDER []byte, privKeyBytes interface{}) error {
 	var rawPriv []byte
 	switch v := privKeyBytes.(type) {
@@ -120,17 +95,10 @@ func (m *Manager) storeKey(ctx context.Context, domainID, selector, algorithm st
 	return err
 }
 
-// Sign DKIM-signs the message. It reads from r and writes the signed message
-// to w, with DKIM-Signature headers prepended for each active key on the domain.
-// domainName is used to look up the correct dkim_keys rows.
-//
-// For custom domains that share the primary instance's DKIM keys via CNAME
-// (ADR-0036), no dkim_keys row exists for the custom domain. Sign falls back
-// to the primary domain's keys (is_primary = TRUE) in that case, while still
-// setting d=<custom-domain> in the DKIM-Signature so the CNAME-based DNS
-// lookup by receivers resolves correctly.
+// Custom domains have no keys of their own: Sign falls back to the primary's
+// keys but still sets d=<custom-domain> so receivers' CNAME-based DNS lookup
+// resolves.
 func (m *Manager) Sign(ctx context.Context, domainName string, r io.Reader) (io.Reader, error) {
-	// Load all active keys for this domain; if none, fall back to primary.
 	rows, err := m.db.Query(ctx, `
 		SELECT dk.selector, dk.algorithm, dk.private_key_enc
 		FROM   dkim_keys dk
@@ -160,8 +128,7 @@ func (m *Manager) Sign(ctx context.Context, domainName string, r io.Reader) (io.
 		return nil, fmt.Errorf("dkim: iterate keys: %w", err)
 	}
 	if len(keys) == 0 {
-		// No keys for this domain — fall back to primary domain keys (ADR-0036).
-		// This is the expected path for custom domains that use CNAME-based DKIM.
+		// Expected for CNAME-based custom domains: use the primary's keys.
 		rows, err = m.db.Query(ctx, `
 			SELECT dk.selector, dk.algorithm, dk.private_key_enc
 			FROM   dkim_keys dk
@@ -191,7 +158,7 @@ func (m *Manager) Sign(ctx context.Context, domainName string, r io.Reader) (io.
 		slog.Debug("dkim: using primary domain keys for custom domain", "domain", domainName)
 	}
 
-	// Read the full message into a buffer so we can sign it multiple times.
+	// Buffer the message so we can sign it once per key.
 	rawMsg, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("dkim: read message: %w", err)
@@ -225,7 +192,6 @@ func (m *Manager) Sign(ctx context.Context, domainName string, r io.Reader) (io.
 	return bytes.NewReader(signed), nil
 }
 
-// loadSigner decrypts a stored private key and returns a crypto.Signer.
 func (m *Manager) loadSigner(algorithm string, encBytes []byte) (crypto.Signer, error) {
 	rawPriv, err := m.decryptKey(encBytes)
 	if err != nil {
@@ -253,9 +219,6 @@ func (m *Manager) loadSigner(algorithm string, encBytes []byte) (crypto.Signer, 
 	}
 }
 
-// ReEncryptKeys re-encrypts all dkim_keys rows from the current manager's
-// master key to newMgr's master key. Used during master-key rotation.
-// Returns the number of rows successfully re-encrypted.
 func (m *Manager) ReEncryptKeys(ctx context.Context, newMgr *Manager) (int, error) {
 	rows, err := m.db.Query(ctx, `SELECT id, private_key_enc FROM dkim_keys`)
 	if err != nil {
@@ -300,9 +263,6 @@ func (m *Manager) ReEncryptKeys(ctx context.Context, newMgr *Manager) (int, erro
 	return len(work), nil
 }
 
-// DNSRecords returns the DNS TXT record values for each active DKIM key on
-// the given domain. The operator publishes these in their DNS provider.
-// Returns slice of (selector, txtValue) pairs.
 func (m *Manager) DNSRecords(ctx context.Context, domainName string) ([][2]string, error) {
 	rows, err := m.db.Query(ctx, `
 		SELECT dk.selector, dk.algorithm, dk.public_key_der
@@ -334,8 +294,6 @@ func (m *Manager) DNSRecords(ctx context.Context, domainName string) ([][2]strin
 	return out, rows.Err()
 }
 
-// logDNSRecords logs the DNS TXT records the operator needs to publish.
-// newKeys=true (key generation) logs at Warn; false (startup reminder) logs at Info.
 func (m *Manager) logDNSRecords(ctx context.Context, domainID, domainName string, newKeys bool) {
 	records, err := m.DNSRecords(ctx, domainName)
 	if err != nil {
@@ -359,8 +317,7 @@ func (m *Manager) logDNSRecords(ctx context.Context, domainID, domainName string
 	}
 }
 
-// encryptKey encrypts plaintext with AES-256-GCM using m.aesKey.
-// Returns nonce (12 bytes) + ciphertext concatenated.
+// Returns nonce + AES-256-GCM ciphertext, concatenated.
 func (m *Manager) encryptKey(plaintext []byte) ([]byte, error) {
 	block, err := aes.NewCipher(m.aesKey)
 	if err != nil {
@@ -378,7 +335,6 @@ func (m *Manager) encryptKey(plaintext []byte) ([]byte, error) {
 	return append(nonce, ciphertext...), nil
 }
 
-// decryptKey decrypts a value produced by encryptKey.
 func (m *Manager) decryptKey(data []byte) ([]byte, error) {
 	block, err := aes.NewCipher(m.aesKey)
 	if err != nil {

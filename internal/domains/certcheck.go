@@ -11,9 +11,6 @@ import (
 
 const certExpiryWarnDays = 14
 
-// CheckCertExpiry dials mta-sts.<domain>:443 for each verified custom domain
-// and logs a WARN if the leaf certificate expires within certExpiryWarnDays.
-// Called by the daily background worker.
 func (m *Manager) CheckCertExpiry(ctx context.Context) error {
 	rows, err := m.db.Query(ctx, `
 		SELECT domain FROM domains

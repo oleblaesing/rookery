@@ -1,4 +1,3 @@
--- Revert migration 0004: drop Phase 4 columns.
 DROP INDEX IF EXISTS idx_domains_verified_custom;
 DROP INDEX IF EXISTS idx_domains_mta_sts_upgrade;
 

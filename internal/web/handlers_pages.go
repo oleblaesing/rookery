@@ -19,10 +19,6 @@ import (
 	"rookery/internal/store"
 )
 
-// -------------------------------------------------------------------------
-// GET /login — render the login page
-// -------------------------------------------------------------------------
-
 type loginPageData struct {
 	InstanceName string
 	Domain       string
@@ -35,7 +31,6 @@ type loginPageData struct {
 
 func handleLoginPage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// If the user already has a valid session, send them straight to inbox.
 		if rawToken, ok := auth.TokenFromRequest(r); ok {
 			if _, err := ss.Get(r.Context(), rawToken); err == nil {
 				http.Redirect(w, r, "/inbox", http.StatusSeeOther)
@@ -48,8 +43,8 @@ func handleLoginPage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc
 			Domain:       cfg.Domain,
 			Deleted:      r.URL.Query().Get("deleted") == "1",
 		}
-		// Unauthenticated CSRF token: reuse the existing cookie if present so
-		// that opening login in multiple tabs does not invalidate any of them.
+		// Reuse the existing unauth cookie so login open in multiple tabs doesn't
+		// invalidate any of them.
 		csrfToken, err := auth.EnsureUnauthCSRFCookie(w, r)
 		if err != nil {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -60,16 +55,10 @@ func handleLoginPage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /logout — renders a self-contained page that calls the logout API
-// and redirects to /login client-side.
-// -------------------------------------------------------------------------
-
 func handleLogoutPage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// If the user has a valid session, embed its stable CSRF token so the
-		// logout POST will verify cleanly. Otherwise fall back to the unauth
-		// cookie (the form is harmless without a session anyway).
+		// Prefer the session's stable CSRF token so the logout POST verifies;
+		// fall back to the unauth cookie (harmless without a session).
 		var csrfToken string
 		if rawToken, ok := auth.TokenFromRequest(r); ok {
 			if s, err := ss.Get(r.Context(), rawToken); err == nil {
@@ -101,11 +90,6 @@ func handleLogoutPage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFun
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /invite/{token} — invite landing page
-// POST /register — process registration form
-// -------------------------------------------------------------------------
-
 type invitePageData struct {
 	InstanceName string
 	Domain       string
@@ -117,7 +101,6 @@ type invitePageData struct {
 
 func handleInvitePage(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// If the user already has a valid session, they must log out first.
 		if rawToken, ok := auth.TokenFromRequest(r); ok {
 			if _, err := ss.Get(r.Context(), rawToken); err == nil {
 				http.Redirect(w, r, "/inbox", http.StatusSeeOther)
@@ -127,7 +110,7 @@ func handleInvitePage(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Confi
 
 		token := r.PathValue("token")
 
-		// Validate the invite quickly (no lock — just check it's usable).
+		// Cheap usability check only; the real claim happens under lock at POST.
 		var used bool
 		err := db.QueryRow(r.Context(), `
 			SELECT used_at IS NOT NULL FROM invites
@@ -156,10 +139,6 @@ func handleInvitePage(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Confi
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /migrate — logged-out migration/import landing page
-// -------------------------------------------------------------------------
-
 type migratePageData struct {
 	InstanceName string
 	Domain       string
@@ -169,15 +148,10 @@ type migratePageData struct {
 	User         *userProfile // nil — unauthenticated page; required by base template
 }
 
-// handleMigratePage renders the logged-out migration page. The user supplies
-// their recovery private key + passphrase, an invite token, and a username;
-// the browser fetches and decrypts the archive, then registers an account with
-// the archive's own key and imports the data (see migrate.js). The archive URL
-// and invite token are prefilled from the deep-link in the export notification.
 func handleMigratePage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Already logged in? The migration flow creates a new account, so send
-		// an authenticated user to their inbox instead.
+		// Migration creates a new account, so an already-logged-in user goes to
+		// their inbox instead.
 		if rawToken, ok := auth.TokenFromRequest(r); ok {
 			if _, err := ss.Get(r.Context(), rawToken); err == nil {
 				http.Redirect(w, r, "/inbox", http.StatusSeeOther)
@@ -185,8 +159,6 @@ func handleMigratePage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFu
 			}
 		}
 
-		// The registration POST issued from this page needs an unauthenticated
-		// CSRF token; reuse the existing cookie if present.
 		csrfToken, err := auth.EnsureUnauthCSRFCookie(w, r)
 		if err != nil {
 			http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -203,44 +175,28 @@ func handleMigratePage(ss *auth.SessionStore, cfg *config.Config) http.HandlerFu
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /jslicense — JavaScript License Web Labels (GNU LibreJS)
-// -------------------------------------------------------------------------
-
-// handleJSLicensePage renders the JavaScript License Web Labels page declaring
-// the licensing of the bundled client script (static/app.js). Every page links
-// to it from the footer via rel="jslicense" so the GNU LibreJS browser
-// extension can confirm the JavaScript is free software. Unauthenticated: the
-// script loads on logged-out pages too, so the labels must be reachable there.
-// See https://www.gnu.org/licenses/javascript-labels.html.
+// Must be reachable logged-out since static/app.js loads there too.
 func handleJSLicensePage(cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		renderTemplate(w, "jslicense.gohtml", struct {
 			InstanceName string
 			User         *userProfile // nil — unauthenticated page; required by base template
-			CSRFToken    string       // empty — base template references it; no form on this page
+			CSRFToken    string       // empty — base template references it; no form here
 		}{
 			InstanceName: cfg.InstanceName,
 		})
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /settings — account settings page
-// -------------------------------------------------------------------------
-
-// settingsDomain holds the fields the settings template needs for one
-// domain row, plus the pre-grouped pending-records table. PendingGroups is
-// nil for verified domains. Flat fields (not an embedded domains.Domain)
-// because embedding promotes a .Domain field that collides with the string
-// field of the same name and breaks template resolution.
+// Flat fields rather than embedding domains.Domain: an embedded .Domain field
+// would collide with the string Name and break template resolution.
 type settingsDomain struct {
 	ID              string
 	Name            string
 	VerifiedAt      *time.Time
 	PendingGroups   []recordGroup
-	MTASTSMode      string     // effective: "testing", "enforce", "disabled", "" when unverified
-	MTASTSEnforceAt *time.Time // non-nil only while auto-testing with time remaining
+	MTASTSMode      string
+	MTASTSEnforceAt *time.Time
 }
 
 type settingsPageData struct {
@@ -275,7 +231,6 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Ma
 			}
 			if domList[i].VerifiedAt != nil {
 				sd.MTASTSMode = domMgr.EffectiveMTASTSMode(&domList[i])
-				// Show the auto-enforce time only while the domain is still in the 48h window.
 				if domList[i].MTASTSMode == nil && domList[i].MTASTSModeChangedAt != nil {
 					enforceAt := domList[i].MTASTSModeChangedAt.Add(48 * time.Hour)
 					if enforceAt.After(time.Now()) {
@@ -306,11 +261,6 @@ func handleSettingsPage(db *pgxpool.Pool, cfg *config.Config, domMgr *domains.Ma
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /inbox — server-rendered inbox list
-// -------------------------------------------------------------------------
-
-// inboxPageSize is the number of messages shown per inbox page.
 const inboxPageSize = 50
 
 type inboxPageData struct {
@@ -320,7 +270,6 @@ type inboxPageData struct {
 	Folder       string
 	CSRFToken    string
 
-	// Search + pagination state for the template.
 	Query      string
 	Total      int
 	Page       int
@@ -351,9 +300,8 @@ func handleInboxPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Base filter, with an optional search clause over from/to/subject only
-		// (never the message body). The args slice is shared by the count and
-		// page queries so positional placeholders line up.
+		// Search spans from/to/subject only, never the body. args is shared by the
+		// count and page queries so the positional placeholders line up.
 		where := "user_id = $1 AND folder = $2"
 		args := []any{userID, folder}
 		if query != "" {
@@ -435,11 +383,6 @@ func handleInboxPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /messages/{id} — read a single message
-// -------------------------------------------------------------------------
-
-// attachmentItem is a single attachment entry for the read page template.
 type attachmentItem struct {
 	PartIndex   int
 	Filename    string
@@ -452,8 +395,8 @@ type readPageData struct {
 	User               *userProfile
 	Message            messageListItem
 	CSRFToken          string
-	SenderPublicKeyB64 string          // base64-encoded armored public key for signature verification
-	Attachments        []attachmentItem // populated for plaintext messages only
+	SenderPublicKeyB64 string
+	Attachments        []attachmentItem
 }
 
 func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
@@ -494,7 +437,6 @@ func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			m.Cc = []string{}
 		}
 
-		// Mark as read.
 		if !m.IsRead {
 			_, _ = db.Exec(r.Context(),
 				`UPDATE messages SET is_read = TRUE WHERE id = $1 AND user_id = $2`,
@@ -502,9 +444,8 @@ func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			m.IsRead = true
 		}
 
-		// Look up the sender's public key for client-side signature verification.
-		// First try local users; fall back to the per-user known_keys cache for
-		// external correspondents (e.g. keys fetched via WKD when sending to them).
+		// Sender key for client-side signature verification: try local users
+		// first, then the per-user known_keys cache for external correspondents.
 		var senderKeyB64 string
 		if m.FromAddress != "" {
 			var armoredKey string
@@ -529,9 +470,8 @@ func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 			}
 		}
 
-		// Fetch attachment metadata for plaintext messages so the template can
-		// render server-side download links. Encrypted messages have no rows —
-		// the browser reconstructs the list after PGP decryption.
+		// Encrypted messages have no attachment rows; the browser rebuilds the
+		// list after decryption.
 		var attachments []attachmentItem
 		if m.HasAttachments && m.SecurityState != "pgp_encrypted" {
 			aRows, aErr := db.Query(r.Context(), `
@@ -562,10 +502,6 @@ func handleReadPage(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// POST /messages/{id}/trash — move to trash (form POST from read page)
-// -------------------------------------------------------------------------
-
 func handleTrashPost(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -578,16 +514,11 @@ func handleTrashPost(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// POST /messages/{id}/delete — permanently delete a trashed message
-// -------------------------------------------------------------------------
-
 func handleDeletePermanentPost(db *pgxpool.Pool, st *store.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
 		msgID := r.PathValue("id")
 
-		// Read blob digest and confirm the message is in trash before deleting.
 		var blobSHA256 string
 		err := db.QueryRow(r.Context(),
 			`SELECT blob_sha256 FROM messages WHERE id = $1 AND user_id = $2 AND folder = 'trash'`,
@@ -598,7 +529,6 @@ func handleDeletePermanentPost(db *pgxpool.Pool, st *store.Store) http.HandlerFu
 			return
 		}
 
-		// Delete the database row.
 		_, err = db.Exec(r.Context(),
 			`DELETE FROM messages WHERE id = $1 AND user_id = $2`, msgID, userID)
 		if err != nil {
@@ -606,8 +536,8 @@ func handleDeletePermanentPost(db *pgxpool.Pool, st *store.Store) http.HandlerFu
 			return
 		}
 
-		// Blobs are shared across recipients; only remove the file when no
-		// other message row references it.
+		// Blobs are shared across recipients; remove the file only when no other
+		// row references it.
 		var remaining int
 		_ = db.QueryRow(r.Context(),
 			`SELECT COUNT(*) FROM messages WHERE blob_sha256 = $1`, blobSHA256,
@@ -622,14 +552,10 @@ func handleDeletePermanentPost(db *pgxpool.Pool, st *store.Store) http.HandlerFu
 	}
 }
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
-
 func isSafeRedirect(url string) bool {
-	// Only allow relative redirects (no scheme) to prevent open-redirect attacks.
+	// Relative-only (no scheme, no //) to prevent open redirects.
 	return len(url) > 0 && url[0] == '/' && (len(url) < 2 || url[1] != '/')
 }
 
-// messageDate is a time.Time alias so templates can call .Date.Format.
+// Aliases time.Time so templates can call .Date.Format.
 type messageDate = time.Time

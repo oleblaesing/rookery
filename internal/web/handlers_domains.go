@@ -13,14 +13,6 @@ import (
 	"rookery/internal/domains"
 )
 
-// -------------------------------------------------------------------------
-// GET /.well-known/mta-sts.txt
-//
-// Serves the MTA-STS policy for any verified domain whose mta-sts.<domain>
-// subdomain CNAMEs to this server (ADR-0037).  The domain is extracted from
-// the Host header by stripping the "mta-sts." prefix.
-// -------------------------------------------------------------------------
-
 func handleMTASTS(domMgr *domains.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
@@ -58,15 +50,6 @@ func handleMTASTS(domMgr *domains.Manager) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /internal/tls-ask?domain=<hostname>
-//
-// Caddy on-demand TLS ask endpoint (ADR-0035). Returns 200 to allow Caddy to
-// obtain a certificate for the requested hostname, 403 to deny.  Allowed:
-//   - The primary domain and its canonical subdomains (mail, mta-sts, openpgpkey).
-//   - mta-sts.<X> and openpgpkey.<X> where X is a verified custom domain.
-// -------------------------------------------------------------------------
-
 func handleTLSAsk(domMgr *domains.Manager) http.HandlerFunc {
 	primary := domMgr.PrimaryDomain()
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +59,6 @@ func handleTLSAsk(domMgr *domains.Manager) http.HandlerFunc {
 			return
 		}
 
-		// Always allow the primary domain and its standard subdomains.
 		switch domain {
 		case primary,
 			"mta-sts." + primary,
@@ -85,7 +67,6 @@ func handleTLSAsk(domMgr *domains.Manager) http.HandlerFunc {
 			return
 		}
 
-		// Allow mta-sts.<X> and openpgpkey.<X> for any verified custom domain.
 		for _, pfx := range []string{"mta-sts.", "openpgpkey."} {
 			if strings.HasPrefix(domain, pfx) {
 				base := strings.TrimPrefix(domain, pfx)
@@ -102,19 +83,15 @@ func handleTLSAsk(domMgr *domains.Manager) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// Domain CRUD API  (all under /api/v1/domains, authenticated + CSRF)
-// -------------------------------------------------------------------------
-
 type domainResponse struct {
-	ID          string     `json:"id"`
-	Domain      string     `json:"domain"`
-	VerifiedAt  *time.Time `json:"verified_at"`
-	PendingDNS  []dnsEntry `json:"pending_dns,omitempty"`
-	MTASTSMode  string     `json:"mta_sts_mode"`
-	MTASTSID    string     `json:"mta_sts_id"`
-	CatchAll    bool       `json:"catch_all_enabled"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID         string     `json:"id"`
+	Domain     string     `json:"domain"`
+	VerifiedAt *time.Time `json:"verified_at"`
+	PendingDNS []dnsEntry `json:"pending_dns,omitempty"`
+	MTASTSMode string     `json:"mta_sts_mode"`
+	MTASTSID   string     `json:"mta_sts_id"`
+	CatchAll   bool       `json:"catch_all_enabled"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 type dnsEntry struct {
@@ -126,11 +103,11 @@ type dnsEntry struct {
 
 func domainToResponse(d *domains.Domain, primaryDomain string) domainResponse {
 	r := domainResponse{
-		ID:        d.ID,
-		Domain:    d.Domain,
+		ID:         d.ID,
+		Domain:     d.Domain,
 		VerifiedAt: d.VerifiedAt,
-		CatchAll:  d.CatchAllEnabled,
-		CreatedAt: d.CreatedAt,
+		CatchAll:   d.CatchAllEnabled,
+		CreatedAt:  d.CreatedAt,
 	}
 	if d.MTASTSMode != nil {
 		r.MTASTSMode = *d.MTASTSMode
@@ -139,16 +116,12 @@ func domainToResponse(d *domains.Domain, primaryDomain string) domainResponse {
 		r.MTASTSID = *d.MTASTSID
 	}
 	if d.VerifiedAt == nil {
-		// Return the DNS records the user must publish.
 		r.PendingDNS = buildRequiredDNS(d, primaryDomain)
 	}
 	return r
 }
 
-// requiredRecords mirrors buildRequiredDNS but emits []domains.RecordStatus
-// (with empty Status) for the inline "pending" table on the settings page.
-// Used to render the same table layout the verify-status fragment uses, with
-// no DNS lookups performed yet.
+// Empty Status / no DNS lookups, so the settings page reuses the verify-status table layout.
 func requiredRecords(d *domains.Domain, primary string) []domains.RecordStatus {
 	entries := buildRequiredDNS(d, primary)
 	out := make([]domains.RecordStatus, 0, len(entries))
@@ -163,8 +136,7 @@ func requiredRecords(d *domains.Domain, primary string) []domains.RecordStatus {
 	return out
 }
 
-// keyForEntry maps a buildRequiredDNS dnsEntry to the RecordStatus.Key value
-// that checkDNSRecords would emit for the same record. Keeps grouping in sync.
+// Maps to the same RecordStatus.Key checkDNSRecords emits, so both paths group identically.
 func keyForEntry(e dnsEntry) string {
 	switch {
 	case e.Type == "TXT" && strings.HasPrefix(e.Name, "_rookery-challenge."):
@@ -268,7 +240,6 @@ func buildRequiredDNS(d *domains.Domain, primary string) []dnsEntry {
 	return entries
 }
 
-// POST /api/v1/domains
 func handleAPIRegisterDomain(domMgr *domains.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -299,7 +270,6 @@ func handleAPIRegisterDomain(domMgr *domains.Manager) http.HandlerFunc {
 	}
 }
 
-// GET /api/v1/domains
 func handleAPIListDomains(domMgr *domains.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -317,7 +287,6 @@ func handleAPIListDomains(domMgr *domains.Manager) http.HandlerFunc {
 	}
 }
 
-// GET /api/v1/domains/{id}
 func handleAPIGetDomain(domMgr *domains.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -340,7 +309,6 @@ func handleAPIGetDomain(domMgr *domains.Manager) http.HandlerFunc {
 	}
 }
 
-// DELETE /api/v1/domains/{id}
 func handleAPIDeleteDomain(domMgr *domains.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
@@ -364,13 +332,12 @@ func handleAPIDeleteDomain(domMgr *domains.Manager) http.HandlerFunc {
 	}
 }
 
-// POST /api/v1/domains/{id}/verify
 func handleAPIVerifyDomain(domMgr *domains.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
 		id := r.PathValue("id")
 
-		// Ownership check before running DNS queries.
+		// Ownership check before the (slower) DNS queries.
 		d, err := domMgr.Get(r.Context(), id)
 		if errors.Is(err, domains.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "NOT_FOUND", "Domain not found.")
@@ -394,16 +361,13 @@ func handleAPIVerifyDomain(domMgr *domains.Manager) http.HandlerFunc {
 	}
 }
 
-// PATCH /api/v1/domains/{id}
-//
-// Supports updating mta_sts_mode and catch_all settings.
 func handleAPIPatchDomain(domMgr *domains.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
 		id := r.PathValue("id")
 
 		var req struct {
-			MTASTSMode      *string `json:"mta_sts_mode"`      // null clears override
+			MTASTSMode      *string `json:"mta_sts_mode"` // null clears override
 			CatchAllEnabled *bool   `json:"catch_all_enabled"`
 			CatchAllTarget  string  `json:"catch_all_address_id"`
 		}
@@ -450,22 +414,12 @@ func handleAPIPatchDomain(domMgr *domains.Manager) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// GET /partials/domains/{id}/verify-status
-//
-// HTML fragment for verification polling (used by partials.js). Returns the
-// status of each required DNS record for the domain and whether it's verified.
-// When verified, sets data-poll-stop="true" to stop polling.
-// -------------------------------------------------------------------------
-
-// recordGroup is a labelled set of DNS records for grouped template rendering.
 type recordGroup struct {
 	Label   string
 	Records []domains.RecordStatus
 }
 
-// recordKeyGroup maps internal RecordStatus.Key values to display group labels.
-// Labels include the DNS record type so the per-row type column can be dropped.
+// The label carries the DNS type so the template can drop the per-row type column.
 var recordKeyGroup = map[string]string{
 	"CHALLENGE":          "verification (TXT)",
 	"MX":                 "mail routing (MX)",
@@ -492,9 +446,6 @@ var recordGroupOrder = []string{
 	"other",
 }
 
-// groupRecords folds a flat record list into labelled groups. The output order
-// follows recordGroupOrder exactly; any record whose Key isn't in recordKeyGroup
-// lands in the "other" group, which is the final entry of recordGroupOrder.
 func groupRecords(records []domains.RecordStatus) []recordGroup {
 	byLabel := make(map[string][]domains.RecordStatus)
 	for _, r := range records {
@@ -518,8 +469,8 @@ type verifyStatusData struct {
 	Result          *domains.VerificationResult
 	PrimaryDomain   string
 	Groups          []recordGroup
-	MTASTSMode      string     // effective mode, set when Result.Verified
-	MTASTSEnforceAt *time.Time // non-nil while auto-testing with time remaining
+	MTASTSMode      string
+	MTASTSEnforceAt *time.Time
 }
 
 func handleDomainVerifyStatusFragment(domMgr *domains.Manager) http.HandlerFunc {
@@ -543,7 +494,7 @@ func handleDomainVerifyStatusFragment(domMgr *domains.Manager) http.HandlerFunc 
 			return
 		}
 
-		// Re-fetch to get updated verified_at after CheckVerification.
+		// CheckVerification may have just set verified_at; re-fetch to reflect it.
 		d, _ = domMgr.Get(r.Context(), id)
 
 		data := verifyStatusData{

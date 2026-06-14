@@ -14,61 +14,45 @@ import (
 	"rookery/internal/config"
 )
 
-// sessionExecer is the subset of *pgxpool.Pool and pgx.Tx needed to insert
-// a session row. Both types satisfy it. Using an interface lets callers
-// choose between the pool-level Create and the transactional CreateInTx
-// path without duplicating logic.
+// sessionExecer lets createWith run against either the pool or an open tx.
 type sessionExecer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
 const (
-	// SessionCookieName is the HttpOnly session cookie placed in the browser.
 	SessionCookieName = "rookery_session"
 
-	// sessionTokenBytes is the length of the raw random token before hex-encoding.
-	// 32 bytes → 256 bits of entropy → 64-char hex string in the cookie.
 	sessionTokenBytes = 32
 
-	// CSRFCookieName is the CSRF token cookie (not HttpOnly so JS can read it).
-	CSRFCookieName = "rookery_csrf"
-	// CSRFHeaderName is the header the browser sends the CSRF token in.
+	CSRFCookieName = "rookery_csrf" // not HttpOnly: JS reads it for the header
 	CSRFHeaderName = "X-CSRF-Token"
 )
 
-// Session represents an active login session.
 type Session struct {
 	ID        string
 	UserID    string
 	TokenHash string // SHA-256 of the raw cookie value; never exposed
-	CSRFToken string // synchronizer token; stable for the session
+	CSRFToken string
 	LastSeen  time.Time
 	CreatedAt time.Time
 }
 
-// SessionStore manages sessions in Postgres.
 type SessionStore struct {
 	db  *pgxpool.Pool
 	cfg *config.Config
 }
 
-// NewSessionStore creates a SessionStore backed by the given pool.
 func NewSessionStore(db *pgxpool.Pool, cfg *config.Config) *SessionStore {
 	return &SessionStore{db: db, cfg: cfg}
 }
 
-// Create inserts a new session for userID and returns the raw token (to be
-// placed in the cookie) and the CSRF token for this session. The session
-// token is never stored — only its SHA-256 hash. The CSRF token is stored
-// verbatim and remains stable for the lifetime of the session.
+// Only the token's SHA-256 hash is stored.
 func (ss *SessionStore) Create(ctx context.Context, userID string) (rawToken, csrfToken string, err error) {
 	return ss.createWith(ctx, ss.db, userID)
 }
 
-// CreateInTx is the transactional variant of Create. Callers that perform
-// session creation as part of a larger atomic operation (e.g. registration,
-// where the invite must not be consumed if session creation fails) pass
-// the open transaction here. The same rules as Create apply.
+// Lets session creation join a caller's transaction, so registration doesn't
+// consume the invite if session creation fails.
 func (ss *SessionStore) CreateInTx(ctx context.Context, tx pgx.Tx, userID string) (rawToken, csrfToken string, err error) {
 	return ss.createWith(ctx, tx, userID)
 }
@@ -94,8 +78,6 @@ func (ss *SessionStore) createWith(ctx context.Context, q sessionExecer, userID 
 	return rawToken, csrfToken, nil
 }
 
-// Get looks up the session for rawToken, refreshes last_seen, and returns
-// the Session. Returns ErrSessionNotFound if the token is unknown or expired.
 func (ss *SessionStore) Get(ctx context.Context, rawToken string) (*Session, error) {
 	tokenHash := SHA256Hex([]byte(rawToken))
 	expiryDays := ss.cfg.Policy.SessionExpiryDays
@@ -119,7 +101,6 @@ func (ss *SessionStore) Get(ctx context.Context, rawToken string) (*Session, err
 	return &s, nil
 }
 
-// Delete invalidates a session by its ID (used by logout and session revoke).
 func (ss *SessionStore) Delete(ctx context.Context, sessionID string) error {
 	_, err := ss.db.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, sessionID)
 	if err != nil {
@@ -128,7 +109,6 @@ func (ss *SessionStore) Delete(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// DeleteByToken invalidates the session identified by the raw cookie token.
 func (ss *SessionStore) DeleteByToken(ctx context.Context, rawToken string) error {
 	tokenHash := SHA256Hex([]byte(rawToken))
 	_, err := ss.db.Exec(ctx, `DELETE FROM sessions WHERE token_hash = $1`, tokenHash)
@@ -138,8 +118,7 @@ func (ss *SessionStore) DeleteByToken(ctx context.Context, rawToken string) erro
 	return nil
 }
 
-// ListByUser returns all active (non-expired) sessions for a user, ordered
-// by last_seen descending. No IP or UA is returned — pseudonymity default.
+// No IP or UA is returned, by pseudonymity default.
 func (ss *SessionStore) ListByUser(ctx context.Context, userID string) ([]Session, error) {
 	expiryDays := ss.cfg.Policy.SessionExpiryDays
 	rows, err := ss.db.Query(ctx, `
@@ -165,12 +144,11 @@ func (ss *SessionStore) ListByUser(ctx context.Context, userID string) ([]Sessio
 	return sessions, rows.Err()
 }
 
-// ErrSessionNotFound is returned when a session token is unknown or expired.
 var ErrSessionNotFound = errors.New("session not found or expired")
 
-// isSecure returns true when the request arrived over HTTPS — either directly
-// (r.TLS != nil) or via a TLS-terminating proxy that set X-Forwarded-Proto.
-// Cookies must not be marked Secure over plain HTTP or browsers will drop them.
+// Marking a cookie Secure over plain HTTP makes browsers drop it, so cookie
+// setters gate Secure on this (true also for a TLS-terminating proxy's
+// X-Forwarded-Proto).
 func isSecure(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
@@ -178,9 +156,6 @@ func isSecure(r *http.Request) bool {
 	return r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
-// SetCookie writes the session cookie to the response. Secure is set only
-// when the connection is HTTPS so that local HTTP dev works without browsers
-// silently dropping the cookie.
 func SetCookie(w http.ResponseWriter, r *http.Request, rawToken string, expiryDays int) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
@@ -193,7 +168,6 @@ func SetCookie(w http.ResponseWriter, r *http.Request, rawToken string, expiryDa
 	})
 }
 
-// ClearCookie removes the session cookie from the browser.
 func ClearCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     SessionCookieName,
@@ -206,24 +180,18 @@ func ClearCookie(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// SetCSRFCookie writes the CSRF token cookie. Not HttpOnly so that
-// partials.js can read it and include it in the X-CSRF-Token header.
 func SetCSRFCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     CSRFCookieName,
 		Value:    token,
 		Path:     "/",
-		HttpOnly: false, // JS must read this
+		HttpOnly: false, // partials.js must read this for the X-CSRF-Token header
 		Secure:   isSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 }
 
-// EnsureUnauthCSRFCookie returns a CSRF token suitable for unauthenticated
-// forms (login, invite). If the request already carries a rookery_csrf
-// cookie, its value is reused so concurrent open tabs all post the same
-// token. Otherwise a fresh token is generated and the cookie is set on the
-// response. The token is stable for the browser's cookie lifetime.
+// Reuses an existing rookery_csrf cookie so concurrent tabs post the same token.
 func EnsureUnauthCSRFCookie(w http.ResponseWriter, r *http.Request) (string, error) {
 	if c, err := r.Cookie(CSRFCookieName); err == nil && c.Value != "" {
 		return c.Value, nil
@@ -236,8 +204,6 @@ func EnsureUnauthCSRFCookie(w http.ResponseWriter, r *http.Request) (string, err
 	return token, nil
 }
 
-// TokenFromRequest extracts the raw session token from the request cookie.
-// Returns ("", false) if the cookie is absent or empty.
 func TokenFromRequest(r *http.Request) (string, bool) {
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil || c.Value == "" {

@@ -19,28 +19,15 @@ import (
 	"rookery/internal/config"
 )
 
-// challengeTTL is how long an issued challenge nonce remains valid.
-// Short enough to limit replay windows; long enough to be usable on slow
-// connections.
 const challengeTTL = 5 * time.Minute
-
-// -------------------------------------------------------------------------
-// GET /api/v1/auth/challenge?address=…
-//
-// Issues a single-use nonce for the given address. The client must sign
-// this nonce with their PGP private key and POST the signature to
-// /api/v1/auth/login within challengeTTL.
-//
-// To prevent user-enumeration via timing, we always insert a challenge row
-// regardless of whether the address exists — the existence check happens at
-// claim time.
-// -------------------------------------------------------------------------
 
 type challengeResponse struct {
 	ChallengeID string `json:"challenge_id"`
 	Nonce       string `json:"nonce"`
 }
 
+// A row is inserted even for unknown addresses so timing can't reveal whether an
+// account exists; the existence check happens at claim time.
 func handleAPILoginChallenge(db *pgxpool.Pool, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		address := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("address")))
@@ -52,7 +39,7 @@ func handleAPILoginChallenge(db *pgxpool.Pool, cfg *config.Config) http.HandlerF
 			address = address + "@" + cfg.Domain
 		}
 
-		nonce, err := auth.GenerateToken(32) // 64-char hex string
+		nonce, err := auth.GenerateToken(32)
 		if err != nil {
 			slog.Error("login challenge: generate nonce", "err", err)
 			respondError(w, http.StatusInternalServerError, "INTERNAL", "Could not generate challenge.")
@@ -78,20 +65,6 @@ func handleAPILoginChallenge(db *pgxpool.Pool, cfg *config.Config) http.HandlerF
 		})
 	}
 }
-
-// -------------------------------------------------------------------------
-// POST /api/v1/auth/login
-//
-// Verifies a detached PGP signature of a previously issued challenge nonce.
-// On success, creates a session and sets the session + CSRF cookies.
-//
-// Request body:
-//   {
-//     "address":          "alice@example.com",
-//     "challenge_id":     "<uuid>",
-//     "signed_challenge": "<armored detached PGP signature>"
-//   }
-// -------------------------------------------------------------------------
 
 type loginRequest struct {
 	Address         string `json:"address"`
@@ -127,8 +100,8 @@ func handleAPILogin(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Config)
 			req.Address = req.Address + "@" + cfg.Domain
 		}
 
-		// Claim the challenge: verify it exists, belongs to this address,
-		// has not been used, and has not expired. Mark it used atomically.
+		// Claim atomically: the UPDATE both validates and marks the nonce used,
+		// so a concurrent replay can't claim the same challenge.
 		var nonce string
 		err := db.QueryRow(r.Context(), `
 			UPDATE auth_challenges
@@ -154,7 +127,6 @@ func handleAPILogin(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Config)
 		}
 		slog.Info("login: challenge claimed", "address", req.Address, "challenge_id", req.ChallengeID)
 
-		// Fetch the user and their stored public key.
 		user, armoredPublicKey, err := fetchUserByAddressWithKey(r.Context(), db, req.Address)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -172,7 +144,6 @@ func handleAPILogin(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Config)
 			return
 		}
 
-		// Verify the detached PGP signature of the nonce.
 		if err := verifyDetachedSignature(armoredPublicKey, nonce, req.SignedChallenge); err != nil {
 			slog.Info("login: signature verification failed", "address", req.Address, "err", err)
 			respondError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Signature verification failed.")
@@ -191,8 +162,6 @@ func handleAPILogin(db *pgxpool.Pool, ss *auth.SessionStore, cfg *config.Config)
 	}
 }
 
-// verifyDetachedSignature checks that armoredSig is a valid detached PGP
-// signature of plaintext made by the key in armoredPublicKey.
 func verifyDetachedSignature(armoredPublicKey, plaintext, armoredSig string) error {
 	keyBlock, err := armor.Decode(strings.NewReader(armoredPublicKey))
 	if err != nil {
@@ -217,25 +186,17 @@ func verifyDetachedSignature(armoredPublicKey, plaintext, armoredSig string) err
 	return err
 }
 
-// -------------------------------------------------------------------------
-// POST /api/v1/auth/logout
-// -------------------------------------------------------------------------
-
 func handleAPILogout(ss *auth.SessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rawToken, ok := auth.TokenFromRequest(r)
 		if ok {
-			// Best-effort — ignore errors (already expired tokens are fine).
+			// Best-effort: an already-expired token is fine.
 			_ = ss.DeleteByToken(r.Context(), rawToken)
 		}
 		auth.ClearCookie(w, r)
 		respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 }
-
-// -------------------------------------------------------------------------
-// GET /api/v1/users/me
-// -------------------------------------------------------------------------
 
 func handleAPIGetMe(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -248,10 +209,6 @@ func handleAPIGetMe(db *pgxpool.Pool) http.HandlerFunc {
 		respondJSON(w, http.StatusOK, user)
 	}
 }
-
-// -------------------------------------------------------------------------
-// GET /api/v1/users/me/sessions
-// -------------------------------------------------------------------------
 
 type sessionSummary struct {
 	ID        string    `json:"id"`
@@ -284,16 +241,11 @@ func handleAPIListSessions(ss *auth.SessionStore) http.HandlerFunc {
 	}
 }
 
-// -------------------------------------------------------------------------
-// DELETE /api/v1/users/me/sessions/{id}
-// -------------------------------------------------------------------------
-
 func handleAPIDeleteSession(db *pgxpool.Pool, ss *auth.SessionStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := auth.UserIDFromContext(r.Context())
 		sessionID := r.PathValue("id")
 
-		// Verify the session belongs to this user before deleting.
 		var ownerID string
 		err := db.QueryRow(r.Context(),
 			`SELECT user_id FROM sessions WHERE id = $1`, sessionID,
@@ -315,12 +267,7 @@ func handleAPIDeleteSession(db *pgxpool.Pool, ss *auth.SessionStore) http.Handle
 	}
 }
 
-// -------------------------------------------------------------------------
-// DB helpers
-// -------------------------------------------------------------------------
-
-// dbUser is the raw row returned by user queries (before converting to the
-// JSON-facing userProfile).
+// The raw user row, before conversion to the JSON-facing userProfile.
 type dbUser struct {
 	id                   string
 	primaryAddress       string
@@ -351,8 +298,6 @@ func (u *dbUser) toProfile() *userProfile {
 	return p
 }
 
-// fetchUserByAddressWithKey returns the user profile and their armored public
-// key for the given address. Returns pgx.ErrNoRows if not found.
 func fetchUserByAddressWithKey(ctx context.Context, db *pgxpool.Pool, address string) (*userProfile, string, error) {
 	var u dbUser
 	var armoredPublicKey string
@@ -377,13 +322,11 @@ func fetchUserByAddressWithKey(ctx context.Context, db *pgxpool.Pool, address st
 		return nil, "", err
 	}
 	if armoredPublicKey == "" {
-		// User exists but has no active key — cannot authenticate.
-		return nil, "", pgx.ErrNoRows
+		return nil, "", pgx.ErrNoRows // user exists but has no key to authenticate with
 	}
 	return u.toProfile(), armoredPublicKey, nil
 }
 
-// fetchUserByID returns the user profile for the given UUID.
 func fetchUserByID(ctx context.Context, db *pgxpool.Pool, userID string) (*userProfile, error) {
 	var u dbUser
 	err := db.QueryRow(ctx, `
@@ -406,5 +349,3 @@ func fetchUserByID(ctx context.Context, db *pgxpool.Pool, userID string) (*userP
 	}
 	return u.toProfile(), nil
 }
-
-
