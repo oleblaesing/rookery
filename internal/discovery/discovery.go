@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -114,8 +115,11 @@ func lookupWKD(ctx context.Context, address string) (*Result, error) {
 	}
 	localPart, domain := parts[0], parts[1]
 	hash := wkdHash(localPart)
+	// The l= query parameter is recommended by the WKD spec; some providers
+	// (e.g. Proton) reject requests without it with HTTP 400.
+	query := "?l=" + url.QueryEscape(localPart)
 
-	advURL := fmt.Sprintf("https://openpgpkey.%s/.well-known/openpgpkey/%s/hu/%s", domain, domain, hash)
+	advURL := fmt.Sprintf("https://openpgpkey.%s/.well-known/openpgpkey/%s/hu/%s%s", domain, domain, hash, query)
 	r, fallback, err := fetchWKDKey(ctx, advURL)
 	if err != nil {
 		return nil, err
@@ -127,7 +131,7 @@ func lookupWKD(ctx context.Context, address string) (*Result, error) {
 		return nil, nil
 	}
 
-	dirURL := fmt.Sprintf("https://%s/.well-known/openpgpkey/hu/%s", domain, hash)
+	dirURL := fmt.Sprintf("https://%s/.well-known/openpgpkey/hu/%s%s", domain, hash, query)
 	r, _, err = fetchWKDKey(ctx, dirURL)
 	return r, err
 }

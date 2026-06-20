@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"rookery/internal/auth"
+	"rookery/internal/discovery"
 	"rookery/internal/keydir"
 )
 
@@ -143,52 +144,24 @@ func handleAPIKeyLookup(db *pgxpool.Pool) http.HandlerFunc {
 		}
 		userID := auth.UserIDFromContext(r.Context())
 
-		// Local users first.
-		var fp, armoredKey, algo string
-		err := db.QueryRow(r.Context(), `
-			SELECT k.fingerprint, k.armored_public_key, k.algorithm
-			FROM   user_keys k
-			JOIN   users u ON u.id = k.user_id
-			JOIN   addresses a ON a.id = u.primary_address_id
-			WHERE  a.address = $1 AND k.is_active = TRUE
-		`, address).Scan(&fp, &armoredKey, &algo)
-		if err == nil {
-			respondJSON(w, http.StatusOK, keyLookupResponse{
-				Found:  true,
-				Key:    &keyResult{Fingerprint: fp, ArmoredPublicKey: armoredKey, Algorithm: algo},
-				Method: "local",
-			})
-			return
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
+		// Local users → this user's known-keys cache → WKD/keyserver discovery,
+		// caching any externally-discovered key for next time.
+		result, err := discovery.Discover(r.Context(), db, userID, address)
+		if err != nil {
 			respondError(w, http.StatusInternalServerError, "INTERNAL", "Key lookup failed.")
 			return
 		}
-
-		// Then this user's known-keys cache.
-		var firstSeen time.Time
-		err = db.QueryRow(r.Context(), `
-			SELECT fingerprint, armored_public_key, first_seen_at
-			FROM   known_keys
-			WHERE  user_id = $1 AND address = $2
-			ORDER  BY last_seen_at DESC
-			LIMIT  1
-		`, userID, address).Scan(&fp, &armoredKey, &firstSeen)
-		if err == nil {
-			respondJSON(w, http.StatusOK, keyLookupResponse{
-				Found:       true,
-				Key:         &keyResult{Fingerprint: fp, ArmoredPublicKey: armoredKey},
-				Method:      "known_keys",
-				FirstSeenAt: &firstSeen,
-			})
-			return
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			respondError(w, http.StatusInternalServerError, "INTERNAL", "Key lookup failed.")
+		if result == nil {
+			respondJSON(w, http.StatusOK, keyLookupResponse{Found: false})
 			return
 		}
 
-		respondJSON(w, http.StatusOK, keyLookupResponse{Found: false})
+		respondJSON(w, http.StatusOK, keyLookupResponse{
+			Found:       true,
+			Key:         &keyResult{Fingerprint: result.Fingerprint, ArmoredPublicKey: result.ArmoredPublicKey},
+			Method:      result.Source,
+			FirstSeenAt: result.FirstSeenAt,
+		})
 	}
 }
 
