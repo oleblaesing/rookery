@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
+	"rookery/internal/cache"
 	"rookery/internal/config"
 	"rookery/internal/dkim"
 	"rookery/internal/domains"
@@ -116,7 +117,8 @@ func runServer() int {
 		slog.Error("bootstrap: backfill owner addresses failed", "err", err)
 	}
 
-	qWorker := queue.NewWorker(st.DB, st, dk, cfg, smtp.Deliver)
+	mtastsCache := cache.NewRedisPolicyCache(cache.NewClient(cfg.Redis.Addr))
+	qWorker := queue.NewWorker(st.DB, st, dk, cfg, mtastsCache, smtp.Deliver)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)

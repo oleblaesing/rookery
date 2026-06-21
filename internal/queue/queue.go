@@ -37,20 +37,25 @@ type Worker struct {
 	st   *store.Store
 	dkim *dkim.Manager
 	cfg  *config.Config
+	// Recipient MTA-STS policy cache, passed through to direct-MX delivery. May
+	// be nil (delivery then stays opportunistic).
+	mtastsCache smtppkg.PolicyCache
 	// Default to the real implementations; swapped in tests.
-	deliverFn   func(ctx context.Context, fromDomain, from, to string, msg []byte) error
+	deliverFn   func(ctx context.Context, cache smtppkg.PolicyCache, fromDomain, from, to string, msg []byte) error
 	signFn      func(ctx context.Context, domain string, r io.Reader) (io.Reader, error)
 	smarthostFn func(ctx context.Context, fromDomain string, sh smtppkg.Smarthost, from, to string, msg []byte) error
 }
 
 func NewWorker(db *pgxpool.Pool, st *store.Store, dk *dkim.Manager, cfg *config.Config,
-	deliverFn func(ctx context.Context, fromDomain, from, to string, msg []byte) error,
+	mtastsCache smtppkg.PolicyCache,
+	deliverFn func(ctx context.Context, cache smtppkg.PolicyCache, fromDomain, from, to string, msg []byte) error,
 ) *Worker {
 	return &Worker{
 		db:          db,
 		st:          st,
 		dkim:        dk,
 		cfg:         cfg,
+		mtastsCache: mtastsCache,
 		deliverFn:   deliverFn,
 		signFn:      dk.Sign,
 		smarthostFn: smtppkg.DeliverViaSmarthost,
@@ -173,7 +178,7 @@ func (w *Worker) processOne(ctx context.Context) (bool, error) {
 		}
 	} else if relayed {
 		// Opaque transport: forward the downstream's signed bytes via direct MX.
-		deliveryErr = w.deliverFn(ctx, domain, fromAddress, recipient, rawMsg)
+		deliveryErr = w.deliverFn(ctx, w.mtastsCache, domain, fromAddress, recipient, rawMsg)
 		if deliveryErr == nil {
 			w.markDelivered(ctx, queueID)
 			slog.Info("queue: relayed", "queue_id", queueID, "attempts", attempts+1)
@@ -241,7 +246,7 @@ func (w *Worker) deliverExternal(ctx context.Context, domain, from, to string, r
 			Auth:       sh.Auth,
 		}, from, to, signedBytes.Bytes()), nil
 	}
-	return w.deliverFn(ctx, domain, from, to, signedBytes.Bytes()), nil
+	return w.deliverFn(ctx, w.mtastsCache, domain, from, to, signedBytes.Bytes()), nil
 }
 
 func (w *Worker) markDelivered(ctx context.Context, queueID string) {

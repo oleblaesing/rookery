@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -15,6 +16,22 @@ import (
 func fakeSign(_ context.Context, _ string, r io.Reader) (io.Reader, error) {
 	body, _ := io.ReadAll(r)
 	return strings.NewReader("X-Signed: yes\r\n" + string(body)), nil
+}
+
+// MTA-STS enforcement failures must be treated as transient (retryable), not as
+// permanent 5xx bounces. The error strings are deliberately digit-free so the
+// 5xx string matcher in isHardFailure can't misclassify them.
+func TestMTASTSEnforcementErrorsAreSoft(t *testing.T) {
+	msgs := []string{
+		`mta-sts: enforce mode, MX "mx.example.com" not authorized by policy`,
+		`mta-sts: enforce mode, MX "mx.example.com" does not offer STARTTLS`,
+		`mta-sts: enforce mode, TLS not established with "mx.example.com"`,
+	}
+	for _, m := range msgs {
+		if isHardFailure(errors.New(m)) {
+			t.Errorf("isHardFailure(%q) = true, want false (should retry)", m)
+		}
+	}
 }
 
 func TestDeliverExternal_SmarthostBranchSignsBeforeHandoff(t *testing.T) {
@@ -39,7 +56,7 @@ func TestDeliverExternal_SmarthostBranchSignsBeforeHandoff(t *testing.T) {
 			Secrets: config.Secrets{SMTPRelayPassword: "pw"},
 		},
 		signFn: fakeSign,
-		deliverFn: func(context.Context, string, string, string, []byte) error {
+		deliverFn: func(context.Context, smtppkg.PolicyCache, string, string, string, []byte) error {
 			mxCalled = true
 			return nil
 		},
@@ -84,7 +101,7 @@ func TestDeliverExternal_DirectMXWhenDisabled(t *testing.T) {
 			SMTP:   config.SMTPConfig{Smarthost: config.SmarthostConfig{Enabled: false}},
 		},
 		signFn: fakeSign,
-		deliverFn: func(_ context.Context, _, _, _ string, msg []byte) error {
+		deliverFn: func(_ context.Context, _ smtppkg.PolicyCache, _, _, _ string, msg []byte) error {
 			mxCalled = true
 			gotMsg = msg
 			return nil

@@ -15,12 +15,22 @@ import (
 	"time"
 )
 
-func Deliver(ctx context.Context, fromDomain, from, to string, message []byte) error {
+func Deliver(ctx context.Context, cache PolicyCache, fromDomain, from, to string, message []byte) error {
 	parts := strings.SplitN(to, "@", 2)
 	if len(parts) != 2 {
 		return fmt.Errorf("outbound: invalid recipient address %q", to)
 	}
 	recipientDomain := parts[1]
+
+	// Resolve the recipient's MTA-STS policy once; nil means none is published
+	// and delivery stays opportunistic. A discovery error here is transient, so
+	// don't deliver against a policy we couldn't read in enforce-capable mode —
+	// fall back to opportunistic rather than fail the whole message.
+	policy, err := ResolvePolicy(ctx, cache, recipientDomain)
+	if err != nil {
+		slog.Warn("outbound: MTA-STS policy lookup failed, proceeding opportunistically", "domain", recipientDomain, "err", err)
+		policy = nil
+	}
 
 	mxs, err := net.DefaultResolver.LookupMX(ctx, recipientDomain)
 	if err != nil || len(mxs) == 0 {
@@ -34,7 +44,7 @@ func Deliver(ctx context.Context, fromDomain, from, to string, message []byte) e
 	for _, mx := range mxs {
 		host := strings.TrimSuffix(mx.Host, ".")
 		addr := net.JoinHostPort(host, "25")
-		if err := tryDeliver(ctx, fromDomain, addr, host, from, to, message); err != nil {
+		if err := tryDeliver(ctx, policy, fromDomain, addr, host, from, to, message); err != nil {
 			slog.Debug("outbound: MX attempt failed", "mx", host, "err", err)
 			lastErr = err
 			continue
@@ -162,7 +172,18 @@ func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
 	}
 }
 
-func tryDeliver(ctx context.Context, fromDomain, addr, serverName, from, to string, message []byte) error {
+// nil means the system pool; tests set it to trust a throwaway MX certificate.
+var directMXRootCAs *x509.CertPool
+
+func tryDeliver(ctx context.Context, policy *STSPolicy, fromDomain, addr, serverName, from, to string, message []byte) error {
+	enforce := policy != nil && policy.Mode == "enforce"
+
+	// In enforce mode the MX host must be named by the policy, otherwise it must
+	// not be used at all (RFC 8461 §4.1).
+	if enforce && !policyAllowsMX(policy, serverName) {
+		return fmt.Errorf("mta-sts: enforce mode, MX %q not authorized by policy", serverName)
+	}
+
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -180,14 +201,26 @@ func tryDeliver(ctx context.Context, fromDomain, addr, serverName, from, to stri
 		return fmt.Errorf("EHLO: %w", err)
 	}
 
+	tlsCfg := &tls.Config{
+		ServerName: serverName,
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    directMXRootCAs,
+	}
 	if ok, _ := c.Extension("STARTTLS"); ok {
-		tlsCfg := &tls.Config{
-			ServerName: serverName,
-			MinVersion: tls.VersionTLS12,
-		}
 		if err := c.StartTLS(tlsCfg); err != nil {
-			// Opportunistic only: continue unencrypted.
-			slog.Debug("outbound: STARTTLS failed, continuing plaintext", "mx", serverName, "err", err)
+			if enforce {
+				// No plaintext fallback: a verified TLS channel is mandatory.
+				return fmt.Errorf("mta-sts: enforce mode, STARTTLS to %q failed: %w", serverName, err)
+			}
+			slog.Warn("outbound: STARTTLS failed, continuing plaintext", "mx", serverName, "err", err)
+		}
+	} else if enforce {
+		return fmt.Errorf("mta-sts: enforce mode, MX %q does not offer STARTTLS", serverName)
+	}
+
+	if enforce {
+		if _, ok := c.TLSConnectionState(); !ok {
+			return fmt.Errorf("mta-sts: enforce mode, TLS not established with %q", serverName)
 		}
 	}
 

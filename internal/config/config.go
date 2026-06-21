@@ -27,6 +27,7 @@ type Config struct {
 	Policy  PolicyConfig  `toml:"policy"`
 	DNS     DNSConfig     `toml:"dns"`
 	Spam    SpamConfig    `toml:"spam"`
+	Redis   RedisConfig   `toml:"redis"`
 
 	Secrets Secrets `toml:"-"`
 }
@@ -77,6 +78,12 @@ type SpamConfig struct {
 	RspamdURL string `toml:"rspamd_url"`
 }
 
+type RedisConfig struct {
+	// host:port of the shared redis (same instance rspamd uses). Backs the
+	// outbound MTA-STS policy cache.
+	Addr string `toml:"addr"`
+}
+
 type DNSConfig struct {
 	Resolver string `toml:"resolver"`
 }
@@ -124,6 +131,9 @@ func defaults(c *Config, md toml.MetaData) {
 	}
 	if !md.IsDefined("smtp", "outbound_daily_limit_per_user") {
 		c.SMTP.OutboundDailyLimitPerUser = 1000
+	}
+	if !md.IsDefined("redis", "addr") {
+		c.Redis.Addr = "redis:6379"
 	}
 	if !md.IsDefined("smtp", "smarthost", "port") {
 		c.SMTP.Smarthost.Port = 587

@@ -215,6 +215,89 @@ func TestDeliverViaSmarthost_RequireTLSNoSTARTTLS(t *testing.T) {
 	}
 }
 
+func TestTryDeliver_EnforceRequiresVerifiedTLS(t *testing.T) {
+	cert, pool := selfSignedCert(t)
+	prev := directMXRootCAs
+	directMXRootCAs = pool
+	t.Cleanup(func() { directMXRootCAs = prev })
+
+	be := &captureBackend{}
+	host, port := startServer(t, be, &tls.Config{Certificates: []tls.Certificate{cert}}, true)
+
+	policy := &STSPolicy{Mode: "enforce", MX: []string{host}}
+	msg := []byte("Subject: hi\r\n\r\nbody\r\n")
+	err := tryDeliver(context.Background(), policy, "rookery.example",
+		net.JoinHostPort(host, strconv.Itoa(port)), host,
+		"from@rookery.example", "rcpt@elsewhere.example", msg)
+	if err != nil {
+		t.Fatalf("tryDeliver (enforce, valid TLS): %v", err)
+	}
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	if string(be.gotData) != string(msg) {
+		t.Errorf("delivered data = %q, want %q", be.gotData, msg)
+	}
+}
+
+func TestTryDeliver_EnforceNoSTARTTLSFails(t *testing.T) {
+	// Server does not advertise STARTTLS. Enforce mode must refuse and never
+	// transmit MAIL/DATA in the clear.
+	be := &captureBackend{}
+	host, port := startServer(t, be, nil, false)
+
+	policy := &STSPolicy{Mode: "enforce", MX: []string{host}}
+	err := tryDeliver(context.Background(), policy, "rookery.example",
+		net.JoinHostPort(host, strconv.Itoa(port)), host,
+		"from@rookery.example", "rcpt@elsewhere.example", []byte("Subject: x\r\n\r\nx\r\n"))
+	if err == nil {
+		t.Fatal("expected enforce failure when no STARTTLS, got nil")
+	}
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	if be.mailSeen || be.gotData != nil {
+		t.Error("mail/data sent in the clear despite enforce mode — plaintext leak")
+	}
+}
+
+func TestTryDeliver_EnforceUnauthorizedMXFails(t *testing.T) {
+	// MX host not named by the policy: must not even be contacted.
+	be := &captureBackend{}
+	host, port := startServer(t, be, nil, false)
+
+	policy := &STSPolicy{Mode: "enforce", MX: []string{"someone.else.example"}}
+	err := tryDeliver(context.Background(), policy, "rookery.example",
+		net.JoinHostPort(host, strconv.Itoa(port)), host,
+		"from@rookery.example", "rcpt@elsewhere.example", []byte("Subject: x\r\n\r\nx\r\n"))
+	if err == nil {
+		t.Fatal("expected enforce failure for unauthorized MX, got nil")
+	}
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	if be.mailSeen || be.gotData != nil {
+		t.Error("contacted an MX not authorized by the policy")
+	}
+}
+
+func TestTryDeliver_OpportunisticDeliversWithoutTLS(t *testing.T) {
+	// No policy (nil) and a server without STARTTLS: delivery still proceeds in
+	// plaintext, preserving the pre-existing opportunistic behavior.
+	be := &captureBackend{}
+	host, port := startServer(t, be, nil, false)
+
+	msg := []byte("Subject: hi\r\n\r\nbody\r\n")
+	err := tryDeliver(context.Background(), nil, "rookery.example",
+		net.JoinHostPort(host, strconv.Itoa(port)), host,
+		"from@rookery.example", "rcpt@elsewhere.example", msg)
+	if err != nil {
+		t.Fatalf("tryDeliver (opportunistic): %v", err)
+	}
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	if string(be.gotData) != string(msg) {
+		t.Errorf("delivered data = %q, want %q", be.gotData, msg)
+	}
+}
+
 func TestDeliverViaSmarthost_NoTLSNoAuth(t *testing.T) {
 	// The dev/mailpit shape: require_tls=false, auth=false, plaintext delivery.
 	be := &captureBackend{requireAuth: false}
