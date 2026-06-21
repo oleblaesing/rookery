@@ -104,6 +104,8 @@ func RegisterRoutes(r chi.Router, cfg *config.Config, db *pgxpool.Pool, st *stor
 
 		r.Get("/keys/me", handleAPIGetMyKey(db))
 		r.Put("/keys/me", handleAPIPutMyKey(db))
+		r.Post("/keys/me/rotation/challenge", handleAPIRotationChallenge(db))
+		r.Post("/keys/me/rotation", handleAPIRotateKey(db))
 		r.Get("/keys/lookup", handleAPIKeyLookup(db))
 
 		r.Get("/messages", handleAPIListMessages(db))

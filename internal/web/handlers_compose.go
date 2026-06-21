@@ -125,7 +125,10 @@ func handleKeyStatusFragment(db *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		firstSeenNote := ""
-		if result.Source == "known_keys" && result.FirstSeenAt != nil {
+		switch {
+		case result.RotatedFrom != "":
+			firstSeenNote = ` (rotated from a previously-trusted key ✓)`
+		case result.Source == "known_keys" && result.FirstSeenAt != nil:
 			firstSeenNote = fmt.Sprintf(` (first seen %s)`, result.FirstSeenAt.Format("2006-01-02"))
 		}
 

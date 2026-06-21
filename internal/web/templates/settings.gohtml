@@ -135,6 +135,20 @@
       <p id="export-error" class="field-hint error" style="display:none"></p>
     </form>
 
+    <h3>rotate encryption key</h3>
+    <form id="rotate-key-form" class="narrow-form" data-address="{{.User.PrimaryAddress}}">
+      <p class="field-hint">Generates a fresh keypair and makes it your active key.
+      Contacts who already trust your current key can verify the change
+      automatically (it is signed by your old key). You must be signed in with
+      your current key. When it completes, export a new recovery file above —
+      <strong>your old recovery file no longer unlocks new mail.</strong></p>
+      <div class="form-actions">
+        <button type="submit" id="rotate-key-btn" class="button">rotate key</button>
+      </div>
+      <p id="rotate-key-status" class="field-hint" style="display:none"></p>
+      <p id="rotate-key-error" class="field-hint error" style="display:none"></p>
+    </form>
+
     <h3>full data export</h3>
     <form id="export-archive-form" class="narrow-form">
       <div class="field">

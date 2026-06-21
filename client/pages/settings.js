@@ -2,6 +2,10 @@ import {
   exportSessionKey,
   unlockPrivateKey,
   signChallenge,
+  generateKeypair,
+  readPrivateKey,
+  loadSessionKey,
+  storeSessionKey,
 } from "../crypto.js";
 
 (function () {
@@ -340,6 +344,197 @@ import {
         setStatus("Could not reach the server.");
         btn.disabled = false;
       }
+    });
+  });
+})();
+
+(function () {
+  "use strict";
+
+  if (location.pathname !== "/settings") {
+    return;
+  }
+
+  function ready(fn) {
+    if (document.readyState !== "loading") {
+      fn();
+      return;
+    }
+
+    document.addEventListener("DOMContentLoaded", fn);
+  }
+
+  // Must byte-for-byte match rotationStatement() in handlers_keys.go.
+  function rotationStatement(oldFP, newFP, nonce) {
+    return (
+      "rookery-key-rotation:v1\nold:" + oldFP + "\nnew:" + newFP + "\nnonce:" + nonce
+    );
+  }
+
+  ready(function () {
+    const form = document.getElementById("rotate-key-form");
+    const btn = document.getElementById("rotate-key-btn");
+    const errorEl = document.getElementById("rotate-key-error");
+    const statusEl = document.getElementById("rotate-key-status");
+
+    if (!form) {
+      return;
+    }
+
+    function csrfToken() {
+      const meta = document.querySelector('meta[name="csrf-token"]');
+      return meta ? meta.getAttribute("content") : "";
+    }
+
+    function showError(msg) {
+      errorEl.textContent = msg;
+      errorEl.style.display = "";
+    }
+
+    function clearError() {
+      errorEl.textContent = "";
+      errorEl.style.display = "none";
+    }
+
+    function showStatus(msg) {
+      statusEl.textContent = msg;
+      statusEl.style.display = "";
+    }
+
+    function setBusy(label) {
+      btn.disabled = true;
+      btn.textContent = label;
+    }
+
+    function setReady() {
+      btn.disabled = false;
+      btn.textContent = "rotate key";
+    }
+
+    form.addEventListener("submit", async function (e) {
+      e.preventDefault();
+      clearError();
+
+      setBusy("loading current key…");
+
+      let oldKey;
+      try {
+        oldKey = await loadSessionKey();
+      } catch {
+        oldKey = null;
+      }
+      if (!oldKey) {
+        showError(
+          "You must be signed in with your current key to rotate. Log out, log back in, and try again.",
+        );
+        setReady();
+
+        return;
+      }
+
+      setBusy("generating new key…");
+
+      let newPublicKeyArmored, newKey;
+      try {
+        const address = form.getAttribute("data-address");
+        const gen = await generateKeypair(address, null);
+        newPublicKeyArmored = gen.publicKeyArmored;
+        newKey = await readPrivateKey(gen.privateKeyArmored);
+      } catch (err) {
+        showError("Key generation failed: " + err.message);
+        setReady();
+
+        return;
+      }
+
+      setBusy("requesting challenge…");
+
+      let challengeID, nonce;
+      try {
+        const resp = await fetch("/api/v1/keys/me/rotation/challenge", {
+          method: "POST",
+          headers: { "X-CSRF-Token": csrfToken() },
+          credentials: "same-origin",
+        });
+        const body = await resp.json();
+
+        if (!resp.ok) {
+          showError(body.message || "Could not obtain rotation challenge.");
+          setReady();
+
+          return;
+        }
+
+        challengeID = body.challenge_id;
+        nonce = body.nonce;
+      } catch {
+        showError("Could not reach the server. Check your connection and try again.");
+        setReady();
+
+        return;
+      }
+
+      setBusy("signing…");
+
+      let oldSignature, newSignature;
+      try {
+        const oldFP = oldKey.getFingerprint().toUpperCase();
+        const newFP = newKey.getFingerprint().toUpperCase();
+        const statement = rotationStatement(oldFP, newFP, nonce);
+        oldSignature = await signChallenge(oldKey, statement);
+        newSignature = await signChallenge(newKey, statement);
+      } catch (err) {
+        showError("Signing failed: " + err.message);
+        setReady();
+
+        return;
+      }
+
+      setBusy("rotating…");
+
+      try {
+        const resp = await fetch("/api/v1/keys/me/rotation", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrfToken(),
+          },
+          body: JSON.stringify({
+            challenge_id: challengeID,
+            new_armored_public_key: newPublicKeyArmored,
+            old_signature: oldSignature,
+            new_signature: newSignature,
+          }),
+          credentials: "same-origin",
+        });
+        const body = await resp.json();
+
+        if (!resp.ok) {
+          showError(body.message || "Key rotation failed.");
+          setReady();
+
+          return;
+        }
+      } catch {
+        showError("Could not reach the server. Check your connection and try again.");
+        setReady();
+
+        return;
+      }
+
+      // The new key is now active server-side; make the rest of this session use
+      // it. The new key has no recovery file yet — the user exports one above,
+      // with whatever passphrase they choose (the same flow as their old key).
+      try {
+        await storeSessionKey(newKey);
+      } catch {
+        /* localStorage may be unavailable; rotation already succeeded */
+      }
+
+      showStatus(
+        "Key rotated. Now export a new recovery file from “private key export” above and store it safely — your old recovery file no longer unlocks new mail.",
+      );
+      setReady();
     });
   });
 })();

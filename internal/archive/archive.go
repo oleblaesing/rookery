@@ -33,20 +33,22 @@ type Manifest struct {
 	SourceInstance string    `json:"source_instance"`
 	KeyFingerprint string    `json:"key_fingerprint"`
 	DisplayName    string    `json:"display_name"`
-	MessageCount   int       `json:"message_count"`
-	BlobCount      int       `json:"blob_count"`
-	KnownKeyCount  int       `json:"known_key_count"`
-	DraftCount     int       `json:"draft_count"`
-	Addresses      []string  `json:"addresses"`
-	CustomDomains  []string  `json:"custom_domains"`
+	MessageCount     int      `json:"message_count"`
+	BlobCount        int      `json:"blob_count"`
+	KnownKeyCount    int      `json:"known_key_count"`
+	KeyRotationCount int      `json:"key_rotation_count"`
+	DraftCount       int      `json:"draft_count"`
+	Addresses        []string `json:"addresses"`
+	CustomDomains    []string `json:"custom_domains"`
 }
 
 type ImportSummary struct {
-	ImportedMessages  int `json:"imported_messages"`
-	ImportedBlobs     int `json:"imported_blobs"`
-	ImportedKnownKeys int `json:"imported_known_keys"`
-	ImportedDrafts    int `json:"imported_drafts"`
-	SkippedMessages   int `json:"skipped_messages"`
+	ImportedMessages     int `json:"imported_messages"`
+	ImportedBlobs        int `json:"imported_blobs"`
+	ImportedKnownKeys    int `json:"imported_known_keys"`
+	ImportedKeyRotations int `json:"imported_key_rotations"`
+	ImportedDrafts       int `json:"imported_drafts"`
+	SkippedMessages      int `json:"skipped_messages"`
 }
 
 type exportedMessage struct {
@@ -85,6 +87,16 @@ type exportedKnownKey struct {
 	Source           string    `json:"source"`
 	FirstSeenAt      time.Time `json:"first_seen_at"`
 	LastSeenAt       time.Time `json:"last_seen_at"`
+}
+
+type exportedKeyRotation struct {
+	OldFingerprint      string    `json:"old_fingerprint"`
+	NewFingerprint      string    `json:"new_fingerprint"`
+	OldArmoredPublicKey string    `json:"old_armored_public_key"`
+	NewArmoredPublicKey string    `json:"new_armored_public_key"`
+	Attestation         string    `json:"attestation"`
+	Statement           string    `json:"statement"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 type exportedDraft struct {
@@ -181,6 +193,10 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 	if err != nil {
 		return err
 	}
+	keyRotations, err := fetchKeyRotations(ctx, db, userID)
+	if err != nil {
+		return err
+	}
 	drafts, err := fetchDrafts(ctx, db, userID)
 	if err != nil {
 		return err
@@ -200,12 +216,13 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 		SourceInstance: domain,
 		KeyFingerprint: fingerprint,
 		DisplayName:    displayName,
-		MessageCount:   len(msgs),
-		BlobCount:      len(blobs),
-		KnownKeyCount:  len(knownKeys),
-		DraftCount:     len(drafts),
-		Addresses:      addresses,
-		CustomDomains:  customDomains,
+		MessageCount:     len(msgs),
+		BlobCount:        len(blobs),
+		KnownKeyCount:    len(knownKeys),
+		KeyRotationCount: len(keyRotations),
+		DraftCount:       len(drafts),
+		Addresses:        addresses,
+		CustomDomains:    customDomains,
 	}
 	if err := writeJSON(tw, "manifest.json", manifest); err != nil {
 		return fmt.Errorf("archive: write manifest: %w", err)
@@ -215,6 +232,9 @@ func ExportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID, 
 	}
 	if err := writeJSON(tw, "known_keys.json", knownKeys); err != nil {
 		return fmt.Errorf("archive: write known_keys: %w", err)
+	}
+	if err := writeJSON(tw, "key_rotations.json", keyRotations); err != nil {
+		return fmt.Errorf("archive: write key_rotations: %w", err)
 	}
 	if err := writeJSON(tw, "drafts.json", drafts); err != nil {
 		return fmt.Errorf("archive: write drafts: %w", err)
@@ -259,11 +279,12 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 	// messages.json precedes blobs/, so buffer rows and insert them only after
 	// the blobs they reference are on disk.
 	var (
-		manifest    *Manifest
-		msgs        []exportedMessage
-		attachments []exportedAttachment
-		knownKeys   []exportedKnownKey
-		drafts      []exportedDraft
+		manifest     *Manifest
+		msgs         []exportedMessage
+		attachments  []exportedAttachment
+		knownKeys    []exportedKnownKey
+		keyRotations []exportedKeyRotation
+		drafts       []exportedDraft
 	)
 
 	entryCount := 0
@@ -305,6 +326,11 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 		case hdr.Name == "known_keys.json":
 			if err := json.NewDecoder(tr).Decode(&knownKeys); err != nil {
 				return summary, fmt.Errorf("archive: parse known_keys: %w", err)
+			}
+
+		case hdr.Name == "key_rotations.json":
+			if err := json.NewDecoder(tr).Decode(&keyRotations); err != nil {
+				return summary, fmt.Errorf("archive: parse key_rotations: %w", err)
 			}
 
 		case hdr.Name == "drafts.json":
@@ -395,6 +421,22 @@ func ImportUser(ctx context.Context, db *pgxpool.Pool, st *store.Store, userID s
 			return summary, fmt.Errorf("archive: upsert known_key: %w", err)
 		}
 		summary.ImportedKnownKeys++
+	}
+
+	for i := range keyRotations {
+		kr := &keyRotations[i]
+		_, err := db.Exec(ctx, `
+			INSERT INTO key_rotations
+			  (user_id, old_fingerprint, new_fingerprint,
+			   old_armored_public_key, new_armored_public_key, attestation, statement, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (user_id, old_fingerprint, new_fingerprint) DO NOTHING
+		`, userID, kr.OldFingerprint, kr.NewFingerprint, kr.OldArmoredPublicKey,
+			kr.NewArmoredPublicKey, kr.Attestation, kr.Statement, kr.CreatedAt)
+		if err != nil {
+			return summary, fmt.Errorf("archive: insert key_rotation: %w", err)
+		}
+		summary.ImportedKeyRotations++
 	}
 
 	// No natural dedup key, so re-import duplicates drafts.
@@ -554,6 +596,31 @@ func fetchKnownKeys(ctx context.Context, db *pgxpool.Pool, userID string) ([]exp
 		keys = append(keys, k)
 	}
 	return keys, rows.Err()
+}
+
+func fetchKeyRotations(ctx context.Context, db *pgxpool.Pool, userID string) ([]exportedKeyRotation, error) {
+	rows, err := db.Query(ctx, `
+		SELECT old_fingerprint, new_fingerprint, old_armored_public_key,
+		       new_armored_public_key, attestation, statement, created_at
+		FROM   key_rotations
+		WHERE  user_id = $1
+		ORDER  BY created_at ASC
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("archive: query key_rotations: %w", err)
+	}
+	defer rows.Close()
+
+	var rotations []exportedKeyRotation
+	for rows.Next() {
+		var kr exportedKeyRotation
+		if err := rows.Scan(&kr.OldFingerprint, &kr.NewFingerprint, &kr.OldArmoredPublicKey,
+			&kr.NewArmoredPublicKey, &kr.Attestation, &kr.Statement, &kr.CreatedAt); err != nil {
+			return nil, fmt.Errorf("archive: scan key_rotation: %w", err)
+		}
+		rotations = append(rotations, kr)
+	}
+	return rotations, rows.Err()
 }
 
 func fetchDrafts(ctx context.Context, db *pgxpool.Pool, userID string) ([]exportedDraft, error) {

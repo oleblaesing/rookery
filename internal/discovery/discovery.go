@@ -15,6 +15,7 @@ import (
 
 	pgpcrypto "github.com/ProtonMail/go-crypto/openpgp"
 	"github.com/ProtonMail/go-crypto/openpgp/armor"
+	"github.com/ProtonMail/go-crypto/openpgp/packet"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,6 +25,10 @@ type Result struct {
 	Fingerprint      string
 	Source           string
 	FirstSeenAt      *time.Time
+	// Set when the discovered key differs from a previously-trusted one but is
+	// linked to it by a verified rotation attestation chain; RotatedFrom is the
+	// older fingerprint we already trusted.
+	RotatedFrom string
 }
 
 func Discover(ctx context.Context, db *pgxpool.Pool, userID, address string) (*Result, error) {
@@ -32,6 +37,7 @@ func Discover(ctx context.Context, db *pgxpool.Pool, userID, address string) (*R
 	if r, err := lookupLocal(ctx, db, address); err != nil {
 		return nil, err
 	} else if r != nil {
+		annotateRotation(ctx, db, userID, address, r)
 		return r, nil
 	}
 
@@ -51,10 +57,114 @@ func Discover(ctx context.Context, db *pgxpool.Pool, userID, address string) (*R
 		return nil, nil
 	}
 
+	annotateRotation(ctx, db, userID, address, r)
 	if err := cacheKey(ctx, db, userID, address, r.ArmoredPublicKey, r.Fingerprint, "wkd"); err != nil {
 		slog.Warn("discovery: failed to cache WKD result", "address", address, "err", err)
 	}
 	return r, nil
+}
+
+// annotateRotation checks whether a freshly-discovered key supersedes one this
+// user already trusted for the address via a verified rotation chain. When it
+// does, it records the prior fingerprint and carries the original first-seen
+// date forward so the change reads as continuity rather than a trust reset.
+func annotateRotation(ctx context.Context, db *pgxpool.Pool, userID, address string, r *Result) {
+	var prevFP string
+	var prevFirstSeen time.Time
+	err := db.QueryRow(ctx, `
+		SELECT fingerprint, first_seen_at
+		FROM   known_keys
+		WHERE  user_id = $1 AND address = $2 AND fingerprint <> $3
+		ORDER  BY last_seen_at DESC
+		LIMIT  1
+	`, userID, address, r.Fingerprint).Scan(&prevFP, &prevFirstSeen)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		slog.Warn("discovery: rotation annotate lookup", "address", address, "err", err)
+		return
+	}
+
+	verified, err := VerifyRotationChain(ctx, db, prevFP, r.Fingerprint)
+	if err != nil {
+		slog.Warn("discovery: rotation chain verify", "address", address, "err", err)
+		return
+	}
+	if !verified {
+		return
+	}
+	r.RotatedFrom = prevFP
+	t := prevFirstSeen
+	r.FirstSeenAt = &t
+}
+
+const maxRotationHops = 16
+
+// VerifyRotationChain reports whether toFP is reachable from fromFP through a
+// chain of attested rotations. Each hop's attestation must be a valid signature,
+// by that hop's old key, over a statement binding old->new; and the old key's
+// fingerprint must equal the fingerprint carried into the hop. That anchors the
+// whole chain to fromFP — the key the caller already trusts — so the server,
+// lacking the old private keys, cannot forge a link.
+func VerifyRotationChain(ctx context.Context, db *pgxpool.Pool, fromFP, toFP string) (bool, error) {
+	cur := strings.ToUpper(strings.TrimSpace(fromFP))
+	target := strings.ToUpper(strings.TrimSpace(toFP))
+
+	for range maxRotationHops {
+		if cur == target {
+			return true, nil
+		}
+
+		var newFP, oldArmored, attestation, statement string
+		err := db.QueryRow(ctx, `
+			SELECT new_fingerprint, old_armored_public_key, attestation, statement
+			FROM   key_rotations
+			WHERE  old_fingerprint = $1
+			ORDER  BY created_at DESC
+			LIMIT  1
+		`, cur).Scan(&newFP, &oldArmored, &attestation, &statement)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("discovery: rotation chain lookup: %w", err)
+		}
+		newFP = strings.ToUpper(newFP)
+
+		// The attesting key must be exactly the one we currently trust, and its
+		// signature must cover a statement binding cur->newFP.
+		armoredFP, err := fingerprint(oldArmored)
+		if err != nil || !strings.EqualFold(armoredFP, cur) {
+			return false, nil
+		}
+		if !strings.Contains(statement, "old:"+cur) || !strings.Contains(statement, "new:"+newFP) {
+			return false, nil
+		}
+		if err := verifyDetached(oldArmored, statement, attestation); err != nil {
+			return false, nil
+		}
+
+		cur = newFP
+	}
+	return false, nil
+}
+
+func verifyDetached(armoredPublicKey, plaintext, armoredSig string) error {
+	keyBlock, err := armor.Decode(strings.NewReader(armoredPublicKey))
+	if err != nil {
+		return err
+	}
+	keyRing, err := pgpcrypto.ReadKeyRing(keyBlock.Body)
+	if err != nil {
+		return err
+	}
+	sigBlock, err := armor.Decode(strings.NewReader(armoredSig))
+	if err != nil {
+		return err
+	}
+	_, err = pgpcrypto.CheckDetachedSignature(keyRing, strings.NewReader(plaintext), sigBlock.Body, &packet.Config{})
+	return err
 }
 
 func HarvestKey(ctx context.Context, db *pgxpool.Pool, userID, address, armoredKey, source string) error {
