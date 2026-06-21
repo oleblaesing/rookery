@@ -188,7 +188,7 @@ func handleAPIStatus(cfg *config.Config) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		if err := json.NewEncoder(w).Encode(apiStatusResponse{
 			Status:  "ok",
-			Version: "0.1.0-phase1",
+			Version: "0.1.0",
 			Domain:  cfg.Domain,
 		}); err != nil {
 			slog.Error("api/v1/status: encode response", "err", err)
